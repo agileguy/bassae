@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isGguf } from "../src/gguf/magic.ts";
@@ -13,4 +13,5 @@ test("isGguf reads the magic, not the extension", async () => {
   expect(await isGguf(join(dir, "fake.gguf"))).toBe(false);
   expect(await isGguf(join(dir, "short"))).toBe(false);
   expect(await isGguf(join(dir, "missing"))).toBe(false);
+  rmSync(dir, { recursive: true, force: true });
 });
