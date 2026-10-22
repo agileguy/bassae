@@ -10,9 +10,19 @@ export const TEMPLATE_LIST_KEY = "tokenizer.chat_templates";
 
 const BARE_KEY = "tokenizer.chat_template";
 
+/** The key as llama.cpp resolves it. Its lookups compare C strings, so a NUL ends the key. */
+export function cKey(key: string): string {
+  const nul = key.indexOf("\0");
+  return nul < 0 ? key : key.slice(0, nul);
+}
+
+export function isTemplateKey(key: string): boolean {
+  return CHAT_TEMPLATE_KEY.test(cKey(key));
+}
+
 /** "default" for the bare key, otherwise the suffix. */
 export function templateName(key: string): string {
-  return CHAT_TEMPLATE_KEY.exec(key)?.[1] ?? "default";
+  return CHAT_TEMPLATE_KEY.exec(cKey(key))?.[1] ?? "default";
 }
 
 export function extractTemplates(raw: RawTemplate[], path: string, realPath: string): ExtractedTemplate[] {
@@ -38,7 +48,7 @@ export function checkTemplateList(templates: ExtractedTemplate[], list: string[]
   const reported = new Set<string>();
   for (const t of templates) {
     const { key, name } = t.source;
-    if (key === BARE_KEY || listed.has(name) || reported.has(name)) continue;
+    if (cKey(key!) === BARE_KEY || listed.has(name) || reported.has(name)) continue;
     reported.add(name);
     findings.push({
       ruleId: "template_list_mismatch",

@@ -116,6 +116,31 @@ test("ISC-4.2: a duplicated named template key is HIGH too", () => {
   expect(r.templates).toHaveLength(2);
 });
 
+// llama.cpp keeps keys as std::string but looks them up with strcmp and C-string map keys, so the part
+// after a NUL is invisible to it. Byte-exact readers would miss these templates entirely.
+test("a template key with a NUL suffix is extracted under the name llama.cpp sees, and flagged", () => {
+  const r = read([
+    ["tokenizer.chat_template\u0000x", str("A")],
+    ["tokenizer.chat_template.tool_use\u0000y", str("B")],
+  ]);
+  expect(r.templates.map((t) => [t.source.name, t.source.key])).toEqual([
+    ["default", "tokenizer.chat_template\u0000x"],
+    ["tool_use", "tokenizer.chat_template.tool_use\u0000y"],
+  ]);
+  expect(rules(r)).toEqual([["parse_error", "MEDIUM"], ["parse_error", "MEDIUM"]]);
+});
+
+test("ISC-4.2: a NUL alias of the bare template key is a HIGH duplicate", () => {
+  const r = read([
+    ["tokenizer.chat_template\u0000evil", str("evil")],
+    ["tokenizer.chat_template", str("clean")],
+    ["tokenizer.chat_templates", arr(T.STRING, [])],
+  ]);
+  expect(r.findings.map((f) => f.severity)).toContain("HIGH");
+  expect(r.findings.every((f) => f.ruleId === "parse_error")).toBe(true);
+  expect(r.templates.map((t) => t.text)).toEqual(["evil", "clean"]);
+});
+
 test("a duplicated key that is not a template is a MEDIUM parse_error", () => {
   const r = read([
     ["general.name", str("a")],

@@ -5,10 +5,10 @@
 // Where bassae's bytes differ only in those ways the row says ORACLE-LOSSY, not MISMATCH.
 import { gguf } from "@huggingface/gguf";
 import { openFileSource, readGgufModel, readGgufSource } from "../src/gguf/index.ts";
-import { CHAT_TEMPLATE_KEY } from "../src/gguf/templates.ts";
+import { isTemplateKey } from "../src/gguf/templates.ts";
 
 const encoder = new TextEncoder();
-const stripBom = (s: string) => (s.startsWith("﻿") ? s.slice(1) : s);
+const stripBom = (s: string) => (s.startsWith("\uFEFF") ? s.slice(1) : s);
 const equal = (a: Uint8Array, b: Uint8Array) => a.length === b.length && a.every((x, i) => x === b[i]);
 
 const paths = process.argv.slice(2);
@@ -41,7 +41,7 @@ for (const path of paths) {
   let fileOk = true;
   const keys = new Set([
     ...ours.templates.map((t) => t.source.key!),
-    ...Object.keys(oracle).filter((k) => CHAT_TEMPLATE_KEY.test(k)),
+    ...Object.keys(oracle).filter(isTemplateKey),
   ]);
   for (const key of keys) {
     const mine = ours.templates.filter((t) => t.source.key === key);

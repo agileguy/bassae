@@ -2,7 +2,7 @@ import { realpathSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import type { Finding, ModelRecord } from "../types.ts";
 import { openFileSource, parseGguf, type ByteSource } from "./reader.ts";
-import { CHAT_TEMPLATE_KEY, checkTemplateList, extractTemplates, templateName } from "./templates.ts";
+import { checkTemplateList, extractTemplates, isTemplateKey, templateName } from "./templates.ts";
 
 export { bytesSource, openFileSource, parseGguf, type ByteSource } from "./reader.ts";
 
@@ -52,7 +52,7 @@ export function readGgufSource(src: ByteSource, path: string, realPath = path): 
     const f: Finding = { ruleId: p.ruleId, severity: p.severity, message: p.message, file: path };
     if (p.key !== undefined) {
       f.detail = { key: p.key };
-      if (CHAT_TEMPLATE_KEY.test(p.key)) f.templateName = templateName(p.key);
+      if (isTemplateKey(p.key)) f.templateName = templateName(p.key);
     }
     record.findings.push(f);
   }

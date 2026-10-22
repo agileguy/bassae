@@ -1,7 +1,7 @@
 import { closeSync, fstatSync, openSync, readSync } from "node:fs";
 import type { Severity } from "../types.ts";
 import { MAX_ARRAY_LENGTH, MAX_KEY_BYTES, MAX_KV_COUNT, MAX_KV_SECTION_BYTES, MAX_STRING_BYTES } from "./limits.ts";
-import { CHAT_TEMPLATE_KEY, TEMPLATE_LIST_KEY } from "./templates.ts";
+import { CHAT_TEMPLATE_KEY, cKey, TEMPLATE_LIST_KEY } from "./templates.ts";
 
 /** Random-access bytes. Every read the parser makes goes through one, so tests can watch the offsets (ISC-38). */
 export interface ByteSource {
@@ -233,14 +233,19 @@ export function parseGguf(src: ByteSource): GgufParse {
   let special: Uint8Array | undefined;
 
   const readKv = (seen: Set<string>) => {
+    // `key` is the stored key, used in messages. `name` is what llama.cpp looks up, used for matching.
     const key = utf8.decode(cur.bytes(length(cur, MAX_KEY_BYTES, "key")));
+    const name = cKey(key);
     const type = cur.u32();
-    const isTemplate = CHAT_TEMPLATE_KEY.test(key);
-    if (seen.has(key)) {
-      // An engine keeps one of the copies, and which one differs between readers.
-      out.problems.push({ ruleId: "parse_error", severity: isTemplate ? "HIGH" : "MEDIUM", message: `key ${q(key)} appears more than once`, key });
+    const isTemplate = CHAT_TEMPLATE_KEY.test(name);
+    if (name !== key) {
+      out.problems.push({ ruleId: "parse_error", severity: "MEDIUM", message: `key ${q(key)} contains a NUL byte; llama.cpp reads it as ${q(name)}`, key });
     }
-    seen.add(key);
+    if (seen.has(name)) {
+      // Readers disagree on which copy wins. llama.cpp refuses exact duplicates but takes the first NUL alias.
+      out.problems.push({ ruleId: "parse_error", severity: isTemplate ? "HIGH" : "MEDIUM", message: `key ${q(name)} appears more than once`, key });
+    }
+    seen.add(name);
 
     if (isTemplate) {
       if (type === STRING) {
@@ -248,7 +253,7 @@ export function parseGguf(src: ByteSource): GgufParse {
         return;
       }
       out.problems.push({ ruleId: "parse_error", severity: "MEDIUM", message: `${q(key)} has value type ${type}, not string, so it was not extracted`, key });
-    } else if (key === TEMPLATE_LIST_KEY) {
+    } else if (name === TEMPLATE_LIST_KEY) {
       if (type === ARRAY) {
         const { elemType, count } = arrayHeader(cur, key);
         if (elemType === STRING) {
@@ -263,7 +268,7 @@ export function parseGguf(src: ByteSource): GgufParse {
       }
       out.problems.push({ ruleId: "parse_error", severity: "MEDIUM", message: `${q(key)} is not a string array`, key });
       return;
-    } else if (key === "tokenizer.ggml.tokens" && type === ARRAY) {
+    } else if (name === "tokenizer.ggml.tokens" && type === ARRAY) {
       const { elemType, count } = arrayHeader(cur, key);
       if (elemType !== STRING) return cur.skip(count * SCALAR_SIZE[elemType]!);
       // Only offsets are kept; the few special tokens are decoded once token_type is known.
@@ -274,7 +279,7 @@ export function parseGguf(src: ByteSource): GgufParse {
       });
       tokens = spans;
       return;
-    } else if (key === "tokenizer.ggml.token_type" && type === ARRAY) {
+    } else if (name === "tokenizer.ggml.token_type" && type === ARRAY) {
       const { elemType, count } = arrayHeader(cur, key);
       if (elemType === STRING) return walkStrings(cur, count, key);
       const size = SCALAR_SIZE[elemType]!;
@@ -286,8 +291,8 @@ export function parseGguf(src: ByteSource): GgufParse {
         special[i] = t === CONTROL || t === USER_DEFINED ? 1 : 0;
       }
       return;
-    } else if (key.startsWith("general.") && type !== ARRAY) {
-      out.general[key] =
+    } else if (name.startsWith("general.") && (type === STRING || type in SCALAR_SIZE)) {
+      out.general[name] =
         type === STRING ? utf8.decode(cur.bytes(length(cur, MAX_STRING_BYTES, `value of ${q(key)}`, key))) : cur.scalar(type);
       return;
     }
