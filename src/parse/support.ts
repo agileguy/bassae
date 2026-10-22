@@ -101,8 +101,8 @@ export const BENIGN_UNIMPLEMENTED_TESTS = new Set([
   "float", //       type check
   "sameas", //      identity comparison
   "escaped", //     checks for a markup-safe string
-  "filter", //      true when a filter of that name exists; both branches stay visible to the AST rules
-  "test", //        true when a test of that name exists; same as filter
+  "filter", //      true when a filter of that name exists; also HIGH engine_fingerprint (ENGINE_PROBE_TESTS)
+  "test", //        true when a test of that name exists; also HIGH engine_fingerprint (ENGINE_PROBE_TESTS)
   "==", "!=", ">", ">=", "<", "<=", // comparison operator aliases
   "ne", "gt", "ge", "lt", "le", //    comparison operator aliases
   "greaterthan", "lessthan", //       comparison operator aliases
@@ -128,6 +128,10 @@ export const GADGETS = new Set(["cycler", "joiner", "lipsum", "namespace", "dict
 // `x is defined` / `is undefined` on any of these is engine fingerprinting
 // (ISC-15.1). strftime_now is deliberately excluded (stock templates test it).
 export const ENGINE_GLOBALS = new Set(["dict", "cycler", "joiner", "lipsum", "namespace", "range", "raise_exception"]);
+
+// `'attr' is filter` / `'x' is test` exist only to ask the engine what it has:
+// engine fingerprinting too (ISC-15.1), whatever the operand.
+export const ENGINE_PROBE_TESTS = new Set(["filter", "test"]);
 
 // OS/exec surfaces in a callable position (ISC-16).
 export const EXEC_SURFACES = new Set(["os", "popen", "system", "subprocess", "eval", "exec", "open", "import"]);
