@@ -2,7 +2,7 @@
 // pre-lexer. This is the single door the code-execution rules go through; it
 // never renders anything.
 
-import { Template } from "@huggingface/jinja";
+import { parse, tokenize } from "@huggingface/jinja";
 import type { Span } from "../types.ts";
 import { preLex, type PreLexResult, type PreToken } from "./prelexer.ts";
 import {
@@ -27,6 +27,9 @@ import {
 // large and fail closed to incomplete, letting the streaming raw-text fallback
 // scan the interiors (round-2 memory review).
 const MAX_PARSE_UNITS = 512 * 1024;
+
+/** The tokenizer options `new Template(text)` uses; parseTemplate tokenizes and parses as it does. */
+export const LIBRARY_TOKENIZE = { lstrip_blocks: true, trim_blocks: true } as const;
 
 /** The whole-template span, offset 0 with length 0: for a finding about the template as a whole (M5, ISC-26.1). */
 export const WHOLE_TEMPLATE: Readonly<Span> = { start: 0, end: 0, line: 1, col: 1 };
@@ -96,12 +99,12 @@ export function parseTemplate(text: string): ParseOutcome {
   // Below the size cap the text is at most ~1 MB, so the pre-lexer and line map
   // are cheap. The whitespace run must count every Unicode space the library's
   // `\s` preprocess regex matches, or a run of U+00A0/U+3000 slips past (M6).
-  const ws = whitespaceRuns(text);
-  if (ws.max > MAX_WHITESPACE_RUN) {
+  const ws = longWhitespaceRun(text);
+  if (ws) {
     const pre = preLex(text);
     const lines = new LineMap(text);
-    const capAt = lines.span(ws.runStart, ws.runEnd);
-    return { pre, lines, spans: new Map(), unsupported: [], tooLarge: true, parseError: `whitespace run of ${ws.max} exceeds the parse limit`, capAt };
+    const capAt = lines.span(ws.start, ws.end);
+    return { pre, lines, spans: new Map(), unsupported: [], tooLarge: true, parseError: `whitespace run of ${ws.end - ws.start} exceeds the parse limit`, capAt };
   }
 
   const pre = preLex(text);
@@ -112,12 +115,26 @@ export function parseTemplate(text: string): ParseOutcome {
     return { pre, lines, spans: new Map(), unsupported: [], tooLarge: true, parseError: shape.reason, capAt };
   }
 
+  // The library's preprocess rewrites the text before it makes tokens: it strips
+  // generation tags, and trim_blocks drops the newline after `%}`, `#}` or `-}`.
+  // That can make an opener the pre-lexer never sees (`{{%generation%}% if a %}`
+  // is an `{% if a %}` to the library), so the caps are counted again on the
+  // library's own tokens, which are the ones the parser then recurses over
+  // (ISC-31). Those tokens carry no offsets: a cap that trips only here spans the
+  // whole template.
   let program: Node | undefined;
   let parseError: string | undefined;
+  let libraryShape: ReturnType<typeof preParseLimit>;
   try {
-    program = new Template(text).parsed as unknown as Node;
+    const tokens = tokenize(text, LIBRARY_TOKENIZE);
+    libraryShape = preParseLimit(tokens.map(fromLibrary));
+    if (!libraryShape) program = parse(tokens) as unknown as Node;
   } catch (e) {
     parseError = e instanceof Error ? e.message : String(e);
+  }
+  if (libraryShape) {
+    const capAt = { ...WHOLE_TEMPLATE };
+    return { pre, lines, spans: new Map(), unsupported: [], tooLarge: true, parseError: `${libraryShape.reason} in the library's tokens`, capAt };
   }
 
   const spans = program ? correlateSpans(sourceOrderLeaves(program), pre.tokens, lines) : new Map<Node, Span>();
@@ -144,38 +161,43 @@ export function isJsWhitespace(c: number): boolean {
   );
 }
 
-// Longest run of whitespace anywhere in the text (code units), and the bounds of
-// the first run longer than MAX_WHITESPACE_RUN, or -1 when there is none (M5).
-function whitespaceRuns(text: string): { max: number; runStart: number; runEnd: number } {
-  let max = 0;
+// The bounds of the first whitespace run longer than MAX_WHITESPACE_RUN code
+// units, or undefined when there is none. The finding reports this run's length
+// and spans this run (M5), so the two always describe the same run.
+function longWhitespaceRun(text: string): { start: number; end: number } | undefined {
   let run = 0;
-  let runStart = -1;
-  let runEnd = -1;
   for (let i = 0; i < text.length; i++) {
-    if (isJsWhitespace(text.charCodeAt(i))) {
-      if (++run > max) max = run;
-      if (run === MAX_WHITESPACE_RUN + 1 && runStart < 0) runStart = i - MAX_WHITESPACE_RUN;
-    } else {
-      if (runStart >= 0 && runEnd < 0) runEnd = i;
+    if (!isJsWhitespace(text.charCodeAt(i))) {
       run = 0;
+    } else if (++run > MAX_WHITESPACE_RUN) {
+      const start = i - run + 1;
+      let end = i + 1;
+      while (end < text.length && isJsWhitespace(text.charCodeAt(end))) end++;
+      return { start, end };
     }
   }
-  if (runStart >= 0 && runEnd < 0) runEnd = text.length;
-  return { max, runStart, runEnd };
+  return undefined;
 }
 
-// Decide, in one linear pass over the pre-lexer tokens, whether the template's
-// shape is beyond what we will hand to the recursive-descent library parser.
-// Returns the reason and where the cap tripped (M5) when one is exceeded, else
+// The block each opener starts, and the only keyword that closes it (M8). Any
+// other `end*` closes nothing: the library strips `{% endgeneration %}` before
+// it parses, and throws on a closer of another block, so neither pops a level.
+const CLOSER: Readonly<Record<string, string>> = { if: "endif", for: "endfor", macro: "endmacro", call: "endcall", filter: "endfilter" };
+
+// Decide, in one linear pass over a token stream, whether the template's shape
+// is beyond what we will hand to the recursive-descent library parser. Returns
+// the reason and where the cap tripped (M5) when one is exceeded, else
 // undefined. The result is a platform-independent integer count, never a
 // function of the host's stack (ISC-31): an `elif` deepens the open `if` (the
 // parser nests it), a `{% set %}` with no top-level `=` is a block closed by
-// `endset`, and each `end*` releases the whole amount its opener added (M8).
+// `endset`, and the closer of the innermost open block releases the whole
+// amount its opener added (M8).
 function preParseLimit(tokens: PreToken[]): { reason: string; at: { start: number; end: number } } | undefined {
   let tagTokens = 0;
   let bracket = 0;
-  const blockStack: number[] = []; // depth each open block contributes (1, or 1 + elifs for an `if`)
-  let block = 0; // current nesting depth = sum of blockStack
+  // Each open block: its closer, and the depth it contributes (1, or 1 + elifs for an `if`).
+  const blockStack: { close: string; depth: number }[] = [];
+  let block = 0; // current nesting depth = sum of blockStack depths
   let expectBlockKeyword = false; // the identifier right after `{%`
   let pendingSet: PreToken | undefined; // the `set` keyword this tag opened with
   let setHasEquals = false; // a top-level `=` was seen in the pending set
@@ -202,7 +224,7 @@ function preParseLimit(tokens: PreToken[]): { reason: string; at: { start: numbe
     if (t.type === "close") {
       // A `{% set x %}` with no top-level `=` is a block closed by `endset`.
       if (pendingSet && !setHasEquals) {
-        blockStack.push(1);
+        blockStack.push({ close: "endset", depth: 1 });
         if (++block > MAX_BLOCK_DEPTH) return { reason: TOO_DEEP, at: pendingSet };
       }
       continue;
@@ -221,22 +243,48 @@ function preParseLimit(tokens: PreToken[]): { reason: string; at: { start: numbe
     if (expectBlockKeyword && t.type === "identifier") {
       expectBlockKeyword = false;
       const kw = t.value;
-      if (kw === "if" || kw === "for" || kw === "macro" || kw === "call" || kw === "filter") {
-        blockStack.push(1);
+      const close = Object.hasOwn(CLOSER, kw) ? CLOSER[kw] : undefined;
+      if (close) {
+        blockStack.push({ close, depth: 1 });
         if (++block > MAX_BLOCK_DEPTH) return { reason: TOO_DEEP, at: t };
       } else if (kw === "elif") {
         // Each `elif` nests another `if` in the parser; one `endif` releases all.
-        if (blockStack.length) blockStack[blockStack.length - 1]!++;
+        if (blockStack.length) blockStack[blockStack.length - 1]!.depth++;
         if (++block > MAX_BLOCK_DEPTH) return { reason: TOO_DEEP, at: t };
       } else if (kw === "set") {
         pendingSet = t; // block-vs-inline decided when the tag closes
-      } else if (kw.startsWith("end")) {
-        block -= blockStack.pop() ?? 0;
-        if (block < 0) block = 0;
+      } else if (kw === blockStack.at(-1)?.close) {
+        block -= blockStack.pop()!.depth;
       }
     }
   }
   return undefined;
+}
+
+// A library token recast as a pre-lexer token, so preParseLimit counts both
+// streams by the same rules. Library tokens carry no offsets, so these are 0.
+function fromLibrary(t: { value: string; type: string }): PreToken {
+  const tok = (type: PreToken["type"], inTag: boolean): PreToken => ({ type, value: t.value, start: 0, end: 0, inTag });
+  switch (t.type) {
+    case "OpenStatement":
+    case "OpenExpression":
+      return tok("open", false);
+    case "CloseStatement":
+    case "CloseExpression":
+      return tok("close", false);
+    case "Text":
+      return tok("text", false);
+    case "Comment":
+      return tok("comment", false);
+    case "Identifier":
+      return tok("identifier", true);
+    case "StringLiteral":
+      return tok("string", true);
+    case "NumericLiteral":
+      return tok("number", true);
+    default:
+      return tok("punct", true); // brackets, `=`, and every operator
+  }
 }
 
 // Walk the AST for filters, tests and globals the library parses but does not

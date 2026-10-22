@@ -1,5 +1,8 @@
 import { expect, test } from "bun:test";
-import { parseTemplate } from "../../src/parse/parse.ts";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { parse, Template, tokenize } from "@huggingface/jinja";
+import { LIBRARY_TOKENIZE, parseTemplate } from "../../src/parse/parse.ts";
 
 test("a template the library accepts parses with no parse error", () => {
   const out = parseTemplate("{% for m in messages %}{{ m.content }}{% endfor %}");
@@ -57,3 +60,37 @@ test("jinja2 builtin filters and tests are partitioned without gaps or overlap",
   }
   for (const name of s.BENIGN_UNIMPLEMENTED_TESTS) expect(s.JINJA2_BUILTIN_TESTS.has(name)).toBe(true);
 });
+
+// parseTemplate counts its caps on the library's tokens and parses those same
+// tokens, so it must build exactly what `new Template(text)` builds, on every
+// fixture, or the error the library raises when it cannot.
+test("parsing the library's tokens builds what new Template builds", () => {
+  const fixtures = join(import.meta.dir, "../../fixtures");
+  const cases: [string, string][] = [
+    // Shapes the library's preprocess rewrites: generation tags, trim_blocks, lstrip_blocks.
+    ["generation", "{% for m in messages %}{% generation %}{{ m.content }}{% endgeneration %}{% endfor %}"],
+    ["generation inside a tag", "{{%generation%}% if a %}x{% endif %}"],
+    ["trim_blocks", "{{ x -}\n} {% if a %}\n  y\n{% endif %}\n"],
+    ["lstrip_blocks", "  {% if a %}\n\t{%- if b -%} c {% endif %}{% endif %}"],
+    ["parse error", "{{ x %}"],
+  ];
+  for (const rel of ["clean", "jinja2-only", "malicious/codeexec"]) {
+    for (const name of readdirSync(join(fixtures, rel))) {
+      if (name.endsWith(".jinja")) cases.push([`${rel}/${name}`, readFileSync(join(fixtures, rel, name), "utf8")]);
+    }
+  }
+  expect(cases.length).toBeGreaterThan(15);
+  for (const [label, src] of cases) {
+    const viaTemplate = attempt(() => new Template(src).parsed);
+    const viaTokens = attempt(() => parse(tokenize(src, LIBRARY_TOKENIZE)));
+    expect(viaTokens, label).toEqual(viaTemplate);
+  }
+});
+
+function attempt(build: () => unknown): unknown {
+  try {
+    return build();
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : String(e) };
+  }
+}

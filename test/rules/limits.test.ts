@@ -3,11 +3,13 @@
 // in bounded time (round-1 review items 1-3).
 
 import { expect, test } from "bun:test";
+import { join } from "node:path";
 import { analyzeCodeExec } from "../../src/rules/index.ts";
 import { isJsWhitespace } from "../../src/parse/parse.ts";
 import { LineMap } from "../../src/parse/support.ts";
 import { makeTemplateFromString } from "../../src/template.ts";
 import type { RuleResult } from "../../src/types.ts";
+import { analyze, verdict } from "./stack-probe.ts";
 
 function scan(src: string): RuleResult {
   const t = makeTemplateFromString({ kind: "bare", path: "/t", realPath: "/t", name: "default" }, src);
@@ -236,6 +238,67 @@ test("M8: an inline `set x = ...` is NOT a block and does not deepen nesting", (
   expect(r.findings.some((f) => f.ruleId === "unanalyzable")).toBe(false);
 });
 
+// M8 / ISC-31 (Codex N-a) — only the closer of a block the count opened pops it.
+// The library strips `{% endgeneration %}` before it parses, so counting that as
+// a close let 8000 nested ifs through to a parser that overflows a 1 MiB stack.
+const ENDGENERATION = "{% if a %}{% endgeneration %}".repeat(8000) + "{% endif %}".repeat(8000);
+
+// The library's preprocess can also make an opener the pre-lexer never sees. It
+// strips a generation tag lying between `{` and `% if`, and trim_blocks drops the
+// newline in `-}\n}`, closing an expression the pre-lexer reads as still open.
+// Each group of reps ends in `}}`, which closes the pre-lexer's expression (so no
+// one tag passes the token cap) and is plain text to the library.
+function hiddenIfs(rep: string, depth: number): string {
+  let s = "";
+  for (let i = 0; i < depth; i += 120) s += rep.repeat(Math.min(120, depth - i)) + "}}";
+  return s + "{% endif %}".repeat(depth);
+}
+const HIDE_BY_GENERATION = "{{%generation%}% if a %}";
+const HIDE_BY_TRIM = "{{ x -}\n} {% if a %}";
+
+test("M8: a closer pops only the block it closes; {% endgeneration %} pops nothing", () => {
+  const r = scan(ENDGENERATION);
+  const caps = r.findings.filter((f) => f.ruleId === "unanalyzable");
+  expect(r.complete).toBe(false);
+  expect(caps.map((f) => [f.severity, f.message])).toEqual([["HIGH", "block nesting deeper than 128"]]);
+  // Spanned on the `if` that opens level 129.
+  expect(caps[0]!.span?.start).toBe(nth(ENDGENERATION, "if a", 129));
+  // A closer of another kind does not pop either; real closers still do.
+  expect(scan("{% for x in y %}{% endif %}".repeat(129)).findings.map((f) => f.message)).toContain("block nesting deeper than 128");
+  expect(scan("{% if a %}{% endif %}".repeat(1000)).complete).toBe(true);
+  expect(scan("{% for x in y %}{% generation %}x{% endgeneration %}{% endfor %}".repeat(200)).complete).toBe(true);
+});
+
+test("ISC-31: block depth is counted on the library's own tokens, so its preprocess hides no opener", () => {
+  for (const [label, rep] of [["generation strip", HIDE_BY_GENERATION], ["trim_blocks", HIDE_BY_TRIM]] as const) {
+    const r = scan(hiddenIfs(rep, 300));
+    const caps = r.findings.filter((f) => f.ruleId === "unanalyzable");
+    expect({ label, complete: r.complete }).toEqual({ label, complete: false });
+    // The library's tokens carry no offsets, so this is the whole-template case.
+    expect({ label, caps: caps.map((f) => [f.severity, f.message, f.span]) }).toEqual({
+      label,
+      caps: [["HIGH", "block nesting deeper than 128 in the library's tokens", { start: 0, end: 0, line: 1, col: 1 }]],
+    });
+    // At the cap, the same shape still parses.
+    expect({ label, complete: scan(hiddenIfs(rep, 128)).complete }).toEqual({ label, complete: true });
+  }
+});
+
+// ISC-31 — the verdict is the same on a 1 MiB stack. The canary proves the child
+// really has the small stack: the library overflows there on 4000 nested ifs.
+test("ISC-31: these shapes get the same verdict on a 1 MiB stack", () => {
+  const probe = join(import.meta.dir, "stack-probe.ts");
+  const env = { ...process.env, BUN_JSC_maxPerThreadStackUsage: String(2 ** 20) };
+  const child = (args: string[], stdin?: string): unknown => {
+    const p = Bun.spawnSync([process.execPath, probe, ...args], { env, stdin: stdin === undefined ? "ignore" : new TextEncoder().encode(stdin) });
+    return JSON.parse(p.stdout.toString());
+  };
+  expect(child(["canary"])).toEqual({ parsed: false });
+  for (const src of [ENDGENERATION, hiddenIfs(HIDE_BY_GENERATION, 5000), hiddenIfs(HIDE_BY_TRIM, 5000)]) {
+    expect(child([], src)).toEqual(verdict(analyze(src)));
+  }
+}, TIMING_TIMEOUT_MS);
+
 // M5 / ISC-26.1 — a shape-cap finding is spanned where the cap tripped: the
 // whitespace run itself, the token that took block or bracket depth over its
 // limit, or the whole tag that passed the token limit. Each span's line:col is
@@ -291,6 +354,14 @@ test("M5: every shape-cap unanalyzable finding is spanned on the offending text"
   // Over the size cap: the whole template, at offset 0 with length 0.
   const big = scan("{{ x }}" + "a".repeat(512 * 1024)).findings.filter((f) => f.ruleId === "unanalyzable" && f.severity === "HIGH");
   expect(big.map((f) => ({ span: f.span, excerpt: f.excerpt }))).toEqual([{ span: { start: 0, end: 0, line: 1, col: 1 }, excerpt: undefined }]);
+});
+
+// M5 — the whitespace message and its span describe the same run: the first one
+// over the cap, even when a longer one follows (Codex round 3).
+test("M5: the whitespace cap names the length of the run it spans", () => {
+  const src = "{{ x" + " ".repeat(600) + "}}{{ y" + " ".repeat(100_000) + "}}";
+  const caps = scan(src).findings.filter((f) => f.ruleId === "unanalyzable");
+  expect(caps.map((f) => [f.message, f.span?.start, f.span?.end])).toEqual([["whitespace run of 600 exceeds the parse limit", 4, 604]]);
 });
 
 // ISC-26.1 — no HIGH finding is spanless. A library parse error whose message
