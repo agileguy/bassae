@@ -175,7 +175,8 @@ export interface RenderRequest {
   now?: string;
 }
 
-export type RenderFailure = "timeout" | "memory" | "output_limit" | "parse" | "render_error" | "sandbox";
+/** `stack` is a stack overflow inside the render, e.g. a recursive macro; like timeout, memory and output_limit it becomes `render_dos` (ISC-43). */
+export type RenderFailure = "timeout" | "memory" | "output_limit" | "stack" | "parse" | "render_error" | "sandbox";
 
 export type RenderResult =
   | { id: string; ok: true; output: string }
