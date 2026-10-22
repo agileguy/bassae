@@ -1,7 +1,10 @@
 import { Template } from "@huggingface/jinja";
 import { describe, expect, test } from "bun:test";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRenderer, sandboxAvailable } from "../../src/sandbox/index.ts";
+import { darwinRss, linuxTreeRss } from "../../src/sandbox/launcher.ts";
+import { MESSAGE_KEEP, TRUNCATED } from "../../src/sandbox/protocol.ts";
 import type { RenderFailure, RenderRequest, RenderResult } from "../../src/types.ts";
 
 const status = await sandboxAvailable();
@@ -12,7 +15,10 @@ if (!live) {
 
 const BUN = process.execPath;
 const ROGUE = join(import.meta.dir, "rogue-worker.ts");
+const PROBE = join(import.meta.dir, "render-probe.ts");
 const SLOW = 30_000;
+// Spins for hours on small ranges, staying near 100 MiB for its first seconds, so only a timeout or a kill ends it.
+const SPIN = "{% for i in range(1000) %}{% for j in range(1000) %}{% for k in range(1000) %}{% endfor %}{% endfor %}{% endfor %}";
 
 const req = (id: string, context: Record<string, unknown> = {}, extra: Partial<RenderRequest> = {}): RenderRequest => ({
   id,
@@ -56,6 +62,22 @@ describe("fail closed", () => {
   test("an empty batch starts nothing and returns nothing", async () => {
     expect(await createRenderer({ sandbox: "none" }).renderBatch("{{ x }}", [])).toEqual([]);
   });
+});
+
+describe.skipIf(!live)("from any working directory", () => {
+  // The caller's own working directory, not just the worker's: the probe imports and runs the renderer from there.
+  for (const cwd of [tmpdir(), "/"]) {
+    test(
+      `renders when the calling process runs from ${cwd}`,
+      async () => {
+        const proc = Bun.spawn([BUN, PROBE], { cwd, stdout: "pipe", stderr: "pipe" });
+        const [out, err] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+        expect(err).toBe("");
+        expect(JSON.parse(out)).toEqual({ status, results: [ok("a", "hi")] });
+      },
+      SLOW,
+    );
+  }
 });
 
 describe.skipIf(!live)("rendering", () => {
@@ -160,14 +182,23 @@ describe.skipIf(!live)("caps (ISC-43)", () => {
   );
 
   test(
-    "a self-recursive macro fails within the caps and the batch carries on",
+    "a self-recursive macro overflows the stack, which is its own failure, and the batch carries on",
     async () => {
       const src = "{% macro f(n) %}{{ f(n + 1) }}{% endmacro %}{% if boom %}{{ f(0) }}{% endif %}fine";
       const [results, ms] = await timed(() => renderer.renderBatch(src, [req("a"), req("b", { boom: true }), req("c")]));
-      expect(results[0]).toEqual(ok("a", "fine"));
-      expect(results[1]).toMatchObject({ id: "b", ok: false });
-      expect(results[2]).toEqual(ok("c", "fine"));
+      expect(results).toEqual([ok("a", "fine"), failed("b", "stack"), ok("c", "fine")]);
+      expect((results[1] as { message: string }).message).toContain("call stack");
       expect(ms).toBeLessThan(2000 + 1500);
+    },
+    SLOW,
+  );
+
+  test(
+    "a stack overflow while parsing fails every request with stack, once",
+    async () => {
+      const deep = "{{ " + "(".repeat(100_000) + "1" + ")".repeat(100_000) + " }}";
+      const results = await renderer.renderBatch(deep, [req("a"), req("b")]);
+      expect(results).toEqual([failed("a", "stack"), failed("b", "stack")]);
     },
     SLOW,
   );
@@ -194,6 +225,38 @@ describe.skipIf(!live)("caps (ISC-43)", () => {
     SLOW,
   );
 
+  test(
+    "an error message is capped at about 4 KiB, ending in a truncation marker",
+    async () => {
+      // A 2 MiB string raised as an exception, in every request.
+      const src = "{% set ns = namespace(s='x') %}{% for i in range(21) %}{% set ns.s = ns.s ~ ns.s %}{% endfor %}{{ raise_exception(ns.s) }}";
+      const requests = Array.from({ length: 20 }, (_, i) => req(`r${i}`));
+      const results = await renderer.renderBatch(src, requests);
+      expect(results).toEqual(requests.map((r) => failed(r.id, "render_error")));
+      for (const r of results as { message: string }[]) {
+        expect(r.message.length).toBeLessThanOrEqual(MESSAGE_KEEP + TRUNCATED.length);
+        expect(r.message).toEndWith(TRUNCATED);
+      }
+    },
+    SLOW,
+  );
+
+  test(
+    "a slow parse costs one timeout for the whole batch, not one per request",
+    async () => {
+      // The library's preprocessing is quadratic in a whitespace run: 60k spaces take over a second to parse.
+      const slow = " ".repeat(60_000);
+      const eight = Array.from({ length: 8 }, (_, i) => req(`r${i}`));
+      const [one, oneMs] = await timed(() => renderer.renderBatch(slow, [req("a")], { timeoutMs: 500 }));
+      const [all, allMs] = await timed(() => renderer.renderBatch(slow, eight, { timeoutMs: 500 }));
+      console.log(`[sandbox] slow parse at timeoutMs 500: 1 request ${oneMs.toFixed(0)}ms, 8 requests ${allMs.toFixed(0)}ms`);
+      expect(one).toEqual([failed("a", "timeout")]);
+      expect(all).toEqual(eight.map((r) => failed(r.id, "timeout")));
+      expect(allMs).toBeLessThan(oneMs + 400);
+    },
+    SLOW,
+  );
+
   test("the output cap is exact", async () => {
     const src = "{% for i in range(n) %}x{% endfor %}";
     const results = await renderer.renderBatch(src, [req("at", { n: 100 }), req("over", { n: 101 })], { maxOutputBytes: 100 });
@@ -214,8 +277,58 @@ describe.skipIf(!live)("caps (ISC-43)", () => {
   );
 });
 
+describe.skipIf(!live)("the memory cap fails closed (ISC-43)", () => {
+  test(
+    "a worker whose memory stops being readable fails with memory",
+    async () => {
+      // Readable for long enough to start up and get into the render, unreadable from then on.
+      const reads = new Map<number, number>();
+      const blind = createRenderer({
+        residentMemory: (pid) => {
+          reads.set(pid, (reads.get(pid) ?? 0) + 1);
+          return reads.get(pid)! > 30 ? undefined : 1;
+        },
+      });
+      // The cap itself is out of reach, so only the unreadable samples can end this render early.
+      const [results, ms] = await timed(() => blind.renderBatch(SPIN, [req("a")], { timeoutMs: 10_000, maxRssBytes: 2 ** 34 }));
+      expect(results).toEqual([failed("a", "memory")]);
+      expect(ms).toBeLessThan(2000);
+    },
+    SLOW,
+  );
+
+  test(
+    "a memory reader that throws counts as unreadable instead of escaping",
+    async () => {
+      const broken = createRenderer({
+        residentMemory: () => {
+          throw new Error("no libproc");
+        },
+      });
+      const results = await broken.renderBatch(SPIN, [req("a")], { timeoutMs: 10_000, maxRssBytes: 2 ** 34 });
+      // It may fail during startup, which is a sandbox failure, or during the render; either way it fails closed, and fast.
+      expect([[failed("a", "memory")], [failed("a", "sandbox")]]).toContainEqual(results);
+    },
+    SLOW,
+  );
+
+  test.skipIf(process.platform !== "darwin")("darwinRss reads a live process and says undefined, not 0, for a dead one", async () => {
+    expect(darwinRss(process.pid)).toBeGreaterThan(0);
+    const gone = Bun.spawn([BUN, "-e", "0"]);
+    await gone.exited;
+    expect(darwinRss(gone.pid)).toBeUndefined();
+  });
+
+  test.skipIf(process.platform !== "linux")("linuxTreeRss reads a live tree and says undefined, not 0, for a dead one", async () => {
+    expect(linuxTreeRss(process.pid)).toBeGreaterThan(0);
+    const gone = Bun.spawn([BUN, "-e", "0"]);
+    await gone.exited;
+    expect(linuxTreeRss(gone.pid)).toBeUndefined();
+  });
+});
+
 describe.skipIf(!live)("the parent does not trust the worker", () => {
-  const rogue = (mode: string) => createRenderer({ command: [BUN, ROGUE, mode] });
+  const rogue = (mode: string) => createRenderer({ command: [BUN, ROGUE, mode], readable: [ROGUE] });
   const two = [req("a"), req("b")];
 
   test("a worker that never answers is timed out", async () => {
@@ -245,6 +358,27 @@ describe.skipIf(!live)("the parent does not trust the worker", () => {
 
   test("a worker that floods stderr does not stall the batch", async () => {
     expect(await rogue("noisy").renderBatch("", two)).toEqual([ok("a", "noisy"), ok("b", "noisy")]);
+  });
+
+  test("a failure message is capped in the parent, whatever the worker sends", async () => {
+    const results = await rogue("fat-error").renderBatch("", two);
+    expect(results).toEqual([failed("a", "render_error"), failed("b", "render_error")]);
+    for (const r of results as { message: string }[]) expect(r.message).toBe("e".repeat(MESSAGE_KEEP) + TRUNCATED);
+  });
+
+  test("the bound on what one request may send is counted in bytes, for any message", async () => {
+    // 6 x 1000 + 64 KiB is the bound here; the message is 90,000 bytes but only 30,000 characters.
+    expect(await rogue("wide-error").renderBatch("", two, { maxOutputBytes: 1000 })).toEqual([
+      failed("a", "output_limit"),
+      failed("b", "output_limit"),
+    ]);
+  });
+
+  test("an oversized line before the template has parsed fails the whole batch once", async () => {
+    expect(await rogue("fat-parsed").renderBatch("", two, { maxOutputBytes: 1000 })).toEqual([
+      failed("a", "output_limit"),
+      failed("b", "output_limit"),
+    ]);
   });
 });
 

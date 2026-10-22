@@ -35,8 +35,9 @@ async function renderAll(template: string, requests: RenderRequest[], limits: Re
 }
 
 /**
- * Options can only pick a sandbox, declare there is none, or change what runs inside one.
- * Nothing renders outside a sandbox; when none starts, every result is a `sandbox` failure.
+ * Options can only pick a sandbox, declare there is none, change what runs inside one and what it may
+ * read, or change how its memory is read. Nothing renders outside a sandbox; when none starts, every
+ * result is a `sandbox` failure.
  */
 export function createRenderer(options: WorkerOptions = {}): Renderer {
   return {

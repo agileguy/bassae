@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { sandboxAvailable, spawnSandboxed } from "../../src/sandbox/launcher.ts";
 
@@ -13,16 +13,22 @@ const ROOT = join(import.meta.dir, "../..");
 interface CanaryReport {
   write: string;
   read: string;
+  stat: string;
+  home: string;
+  checkout: string;
   spawn: string;
   connect: string;
 }
 
-/** Runs the canary against a fresh temp dir and a live local TCP listener. */
+/** Runs the canary against fresh temp dirs, one of them in $HOME, a file in this checkout, and a live local TCP listener. */
 async function runCanary(start: (argv: string[]) => { stdout: ReadableStream<Uint8Array>; exited: Promise<number> } | undefined) {
   const dir = mkdtempSync(join(tmpdir(), "bassae-canary-"));
+  const home = mkdtempSync(join(homedir(), ".bassae-canary-"));
   const writePath = join(dir, "written.txt");
   const readPath = join(dir, "secret.txt");
+  const homePath = join(home, "secret.txt");
   writeFileSync(readPath, "secret");
+  writeFileSync(homePath, "secret");
   let accepted = 0;
   const server = Bun.listen({
     hostname: "127.0.0.1",
@@ -36,7 +42,7 @@ async function runCanary(start: (argv: string[]) => { stdout: ReadableStream<Uin
     },
   });
   try {
-    const proc = start([process.execPath, CANARY, writePath, String(server.port), readPath]);
+    const proc = start([process.execPath, CANARY, writePath, String(server.port), readPath, homePath, join(ROOT, "package.json")]);
     if (!proc) throw new Error("sandbox refused to start the canary");
     const out = await new Response(proc.stdout).text();
     await proc.exited;
@@ -44,6 +50,7 @@ async function runCanary(start: (argv: string[]) => { stdout: ReadableStream<Uin
   } finally {
     server.stop(true);
     rmSync(dir, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
   }
 }
 
@@ -56,17 +63,21 @@ test("sandbox availability is reported, and required where CI says so", () => {
 
 test("control: outside the sandbox the canary can write, read and connect", async () => {
   const { report, wrote, accepted } = await runCanary((argv) => Bun.spawn(argv, { stdout: "pipe" }));
-  expect(report).toEqual({ write: "ok", read: "ok", spawn: "ok", connect: "ok" });
+  expect(report).toEqual({ write: "ok", read: "ok", stat: "ok", home: "ok", checkout: "ok", spawn: "ok", connect: "ok" });
   expect(wrote).toBe(true);
   expect(accepted).toBe(1);
 });
 
 test.skipIf(!status.available)("under the worker's sandbox wrapper the canary cannot write, read or connect (ISC-43.1)", async () => {
-  const { report, wrote, accepted } = await runCanary((argv) => spawnSandboxed(argv));
+  const { report, wrote, accepted } = await runCanary((argv) => spawnSandboxed(argv, { readable: [CANARY] }));
   console.log(`[sandbox] canary under ${status.available ? status.kind : "-"}: ${JSON.stringify(report)}`);
   expect(report.write).toStartWith("denied");
   expect(report.read).toStartWith("denied");
   expect(report.connect).toStartWith("denied");
+  // Nothing beyond what the worker needs: not $HOME, not the rest of the checkout, not even a stat.
+  expect(report.home).toStartWith("denied");
+  expect(report.checkout).toStartWith("denied");
+  expect(report.stat).toStartWith("denied");
   expect(wrote).toBe(false);
   expect(accepted).toBe(0);
   // bwrap has no exec filter; the macOS profile denies fork outright.
@@ -74,7 +85,7 @@ test.skipIf(!status.available)("under the worker's sandbox wrapper the canary ca
 });
 
 test("with no sandbox, nothing is started at all", () => {
-  expect(spawnSandboxed([process.execPath, "-e", "0"], "none")).toBeUndefined();
+  expect(spawnSandboxed([process.execPath, "-e", "0"], { sandbox: "none" })).toBeUndefined();
 });
 
 async function sourceFiles(dir: string): Promise<{ path: string; text: string }[]> {
