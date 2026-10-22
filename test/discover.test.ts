@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync } from "node:fs";
+import { chmodSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { discover } from "../src/discover.ts";
@@ -91,6 +91,24 @@ describe("ISC-2: every HF/MLX model directory", () => {
       ["scanner_error", "MEDIUM", join(root, "missing")],
       ["scanner_error", "MEDIUM", join(root, "dangling")],
     ]);
+  });
+
+  // Root reads through mode 0, so this only holds for other users.
+  test.skipIf(process.getuid?.() === 0)("a file too locked to check for the GGUF magic is a finding, not a silent no", async () => {
+    const root = makeTree({ "locked.bin": GGUF_BYTES, "ok.gguf": GGUF_BYTES });
+    chmodSync(join(root, "locked.bin"), 0);
+    const { models, findings } = await discover([root]);
+    expect(ids(models, "gguf")).toEqual([join(root, "ok.gguf")]);
+    expect(findings.map((f) => [f.ruleId, f.severity, f.file])).toEqual([["scanner_error", "MEDIUM", join(root, "locked.bin")]]);
+    expect(findings[0]!.message).toContain("GGUF");
+  });
+
+  test("a FIFO named like a GGUF is not a model and does not block the walk", async () => {
+    const root = makeTree({ m: { "chat_template.jinja": "x" } });
+    expect(Bun.spawnSync(["mkfifo", join(root, "x.gguf")]).exitCode).toBe(0);
+    const got = await Promise.race([discover([root]), Bun.sleep(2000).then(() => undefined)]);
+    expect(got?.findings).toEqual([]);
+    expect(got?.models.map((m) => m.id)).toEqual([join(root, "m")]);
   });
 });
 

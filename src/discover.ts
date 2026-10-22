@@ -1,7 +1,7 @@
 import type { Dirent, Stats } from "node:fs";
 import { lstat, readdir, realpath, stat } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
-import { isGguf } from "./gguf/magic.ts";
+import { checkGguf } from "./gguf/magic.ts";
 import { firstHfCacheLocation } from "./hf/cache.ts";
 import { HF_SOURCE_NAMES, problem } from "./hf/sources.ts";
 import type { DiscoveredModel, Finding, Severity } from "./types.ts";
@@ -44,7 +44,7 @@ class Walker {
   // A walked directory reached again elsewhere: whatever was found under the key is reachable under each value too.
   private readonly aliases = new Map<string, string[]>();
   private readonly models = new Map<string, DiscoveredModel>();
-  // GGUF verdict per realpath, so a blob linked from many snapshots is opened once.
+  // GGUF verdict per realpath, so a blob linked from many snapshots is opened once. Unreadable counts as no.
   private readonly magic = new Map<string, boolean>();
   private readonly findings: Finding[] = [];
   private entries = 0;
@@ -143,12 +143,14 @@ class Walker {
     return fs !== undefined;
   }
 
-  // GGUF by magic bytes only, whatever the name (ISC-1).
+  // GGUF by magic bytes only, whatever the name (ISC-1). A file that cannot be checked is reported once.
   private async file(path: string, real: string): Promise<void> {
     let gguf = this.magic.get(real);
     if (gguf === undefined) {
-      gguf = await isGguf(real);
+      const check = await checkGguf(real);
+      gguf = "gguf" in check && check.gguf;
       this.magic.set(real, gguf);
+      if ("error" in check) this.finding("MEDIUM", path, "cannot read to check for the GGUF magic", check.error);
     }
     if (gguf) this.add("gguf", real, path);
   }
