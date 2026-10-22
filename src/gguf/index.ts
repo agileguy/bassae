@@ -45,7 +45,8 @@ export function readGgufSource(src: ByteSource, path: string, realPath = path): 
     record.findings.push(scannerError(path, e));
     return record;
   }
-  record.templates = extractTemplates(parse.templates, path, realPath);
+  const { templates, views, findings } = extractTemplates(parse.templates, path, realPath);
+  record.templates = [...templates, ...views];
   record.specialTokens = parse.specialTokens;
   record.ggufGeneral = parse.general;
   record.extractionComplete = parse.complete;
@@ -57,7 +58,8 @@ export function readGgufSource(src: ByteSource, path: string, realPath = path): 
     }
     record.findings.push(f);
   }
-  // A list check on a partial parse would blame keys that were never reached.
-  if (parse.kvEnd !== undefined) record.findings.push(...checkTemplateList(record.templates, parse.templateList, path));
+  record.findings.push(...findings);
+  // A list check on a partial parse would blame keys that were never reached. Views are not keys, so they stay out of it.
+  if (parse.kvEnd !== undefined) record.findings.push(...checkTemplateList(templates, parse.templateList, path));
   return record;
 }

@@ -1,3 +1,4 @@
+import { LineMap } from "../parse/support.ts";
 import { makeTemplate } from "../template.ts";
 import type { ExtractedTemplate, Finding } from "../types.ts";
 import type { RawTemplate } from "./reader.ts";
@@ -25,8 +26,42 @@ export function templateName(key: string): string {
   return CHAT_TEMPLATE_KEY.exec(cKey(key))?.[1] ?? "default";
 }
 
-export function extractTemplates(raw: RawTemplate[], path: string, realPath: string): ExtractedTemplate[] {
-  return raw.map((r) => makeTemplate({ kind: "gguf", path, realPath, name: templateName(r.key), key: r.key }, r.bytes));
+/** The key a llama.cpp view is recorded under: the stored key, then how many bytes of its value llama.cpp sees. */
+export const viewKey = (key: string, n: number) => `${key}[:${n}]`;
+
+export interface Extraction {
+  /** Each value as stored. */
+  templates: ExtractedTemplate[];
+  /** For a value holding a NUL, the bytes before it: what llama.cpp renders. */
+  views: ExtractedTemplate[];
+  findings: Finding[];
+}
+
+export function extractTemplates(raw: RawTemplate[], path: string, realPath: string): Extraction {
+  const out: Extraction = { templates: [], views: [], findings: [] };
+  for (const r of raw) {
+    const source = { kind: "gguf", path, realPath, name: templateName(r.key), key: r.key } as const;
+    const t = makeTemplate(source, r.bytes);
+    out.templates.push(t);
+    const n = r.bytes.indexOf(0);
+    if (n < 0) continue;
+    // llama.cpp reads string values through c_str(), so it renders only the bytes before the NUL while
+    // gguf-py and HF tooling show the whole value. Both get analyzed.
+    const view = makeTemplate({ ...source, key: viewKey(r.key, n) }, r.bytes.slice(0, n));
+    out.views.push(view);
+    const at = t.text.indexOf("\0");
+    out.findings.push({
+      ruleId: "parse_error",
+      severity: "HIGH",
+      message: `${JSON.stringify(r.key)} holds a NUL at byte ${n}; llama.cpp renders only the ${n} bytes before it`,
+      file: path,
+      templateName: source.name,
+      templateSha256: t.sha256,
+      span: new LineMap(t.text).span(at, at + 1),
+      detail: { key: r.key, byteOffset: n, fileOffset: r.offset + n, viewSha256: view.sha256 },
+    });
+  }
+  return out;
 }
 
 /** ISC-4.1: names listed with no key, and named keys missing from the list. Only checked when the list exists. */

@@ -5,7 +5,7 @@
 // Where bassae's bytes differ only in those ways the row says ORACLE-LOSSY, not MISMATCH.
 import { gguf } from "@huggingface/gguf";
 import { openFileSource, readGgufModel, readGgufSource } from "../src/gguf/index.ts";
-import { isTemplateKey } from "../src/gguf/templates.ts";
+import { isTemplateKey, viewKey } from "../src/gguf/templates.ts";
 
 const encoder = new TextEncoder();
 const stripBom = (s: string) => (s.startsWith("\uFEFF") ? s.slice(1) : s);
@@ -39,8 +39,10 @@ for (const path of paths) {
 
   const lines: string[] = [];
   let fileOk = true;
+  // The oracle has no llama.cpp views of values that hold a NUL, so those get their own rows.
+  const viewKeys = new Set(ours.templates.flatMap((t) => (t.bytes.includes(0) ? [viewKey(t.source.key!, t.bytes.indexOf(0))] : [])));
   const keys = new Set([
-    ...ours.templates.map((t) => t.source.key!),
+    ...ours.templates.map((t) => t.source.key!).filter((k) => !viewKeys.has(k)),
     ...Object.keys(oracle).filter(isTemplateKey),
   ]);
   for (const key of keys) {
@@ -61,6 +63,11 @@ for (const path of paths) {
     lines.push(`  ${verdict.padEnd(12)} ${key}  ${t ? `${t.bytes.length} bytes  sha256 ${t.sha256.slice(0, 16)}  utf8 ${t.validUtf8 ? "valid" : "INVALID"}` : ""}`);
   }
   if (keys.size === 0) lines.push("  (no chat template keys in either reader)");
+  for (const t of ours.templates.filter((t) => viewKeys.has(t.source.key!))) {
+    lines.push(`  ${"VIEW".padEnd(12)} ${t.source.key}  ${t.bytes.length} bytes  sha256 ${t.sha256.slice(0, 16)}  what llama.cpp renders`);
+  }
+  if (!ours.extractionComplete) fileOk = false;
+  lines.push(`  ${(ours.extractionComplete ? "MATCH" : "INCOMPLETE").padEnd(12)} extraction complete  ${ours.extractionComplete}`);
 
   const tokens = oracle["tokenizer.ggml.tokens"] as string[] | undefined;
   const types = oracle["tokenizer.ggml.token_type"] as number[] | undefined;

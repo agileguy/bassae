@@ -5,7 +5,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readGgufModel } from "../../src/gguf/index.ts";
-import { CHAT_TEMPLATE_KEY } from "../../src/gguf/templates.ts";
+import { CHAT_TEMPLATE_KEY, viewKey } from "../../src/gguf/templates.ts";
+import type { RuleId, Severity } from "../../src/types.ts";
 import { arr, bigVocabKvs, buildGguf, str, T, typicalKvs, type Tensor, type Value } from "./builder.ts";
 
 const dir = mkdtempSync(join(tmpdir(), "bassae-gguf-parity-"));
@@ -23,16 +24,20 @@ const templates: Record<string, string> = {
   large: "{{ 'pad' }}".repeat(30_000) + "😀",
 };
 
-async function compare(name: string, kvs: [string, Value][], tensors: Tensor[] = []) {
+async function compare(name: string, kvs: [string, Value][], tensors: Tensor[] = [], findings: [RuleId, Severity][] = []) {
   const path = join(dir, `${name}.gguf`);
   writeFileSync(path, buildGguf(kvs, { tensors }).bytes);
   const oracle = (await gguf(path, { allowLocalFile: true })).metadata as Record<string, unknown>;
   const ours = await readGgufModel(path);
-  expect(ours.findings).toEqual([]);
+  expect(ours.findings.map((f) => [f.ruleId, f.severity])).toEqual(findings);
 
+  // The oracle has no llama.cpp views of values that hold a NUL; only the stored values are compared.
+  const views = new Set(ours.templates.flatMap((t) => (t.bytes.includes(0) ? [viewKey(t.source.key!, t.bytes.indexOf(0))] : [])));
+  const stored = ours.templates.filter((t) => !views.has(t.source.key!));
+  expect(stored).toHaveLength(ours.templates.length - views.size);
   const oracleKeys = Object.keys(oracle).filter((k) => CHAT_TEMPLATE_KEY.test(k));
-  expect(ours.templates.map((t) => t.source.key)).toEqual(oracleKeys);
-  for (const t of ours.templates) {
+  expect(stored.map((t) => t.source.key)).toEqual(oracleKeys);
+  for (const t of stored) {
     const expected = new TextEncoder().encode(oracle[t.source.key!] as string);
     expect(Buffer.from(t.bytes).equals(Buffer.from(expected))).toBe(true);
   }
@@ -46,7 +51,8 @@ async function compare(name: string, kvs: [string, Value][], tensors: Tensor[] =
 
 for (const [name, template] of Object.entries(templates)) {
   test(`ISC-3: ${name} template is byte-identical to the oracle`, async () => {
-    await compare(name, typicalKvs(template));
+    // llama.cpp renders only what comes before a NUL, so that template is HIGH.
+    await compare(name, typicalKvs(template), [], template.includes("\0") ? [["parse_error", "HIGH"]] : []);
   });
 }
 

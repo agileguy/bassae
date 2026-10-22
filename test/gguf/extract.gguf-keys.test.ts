@@ -168,3 +168,38 @@ test("a chat template key holding a non-string is a MEDIUM parse_error, is not e
   expect(r.extractionComplete).toBe(false);
 });
 
+// llama.cpp reads string values through gguf_get_val_str, which returns c_str(): it renders only the
+// bytes before the first NUL, while gguf-py and HF tooling see the whole value.
+test("a NUL inside a template value is HIGH with its offsets, and the part llama.cpp renders is extracted too", () => {
+  const value = new TextEncoder().encode("é{{ a }}\n\u0000{{ evil }}\u0000tail");
+  const { bytes } = buildGguf([
+    ["general.name", str("x")],
+    ["tokenizer.chat_template", str(value)],
+    ["tokenizer.chat_templates", arr(T.STRING, ["tool_use"])],
+    ["tokenizer.chat_template.tool_use", str("ok")],
+  ]);
+  const r = readGgufSource(bytesSource(bytes), "/m.gguf");
+  expect(rules(r)).toEqual([["parse_error", "HIGH"]]);
+  const f = r.findings[0]!;
+  expect(f.templateName).toBe("default");
+  expect(f.templateSha256).toBe(r.templates[0]!.sha256);
+  // é is two bytes and one UTF-16 unit, so the NUL is byte 10, text offset 9, line 2 column 1.
+  expect(f.detail).toMatchObject({ key: "tokenizer.chat_template", byteOffset: 10, fileOffset: Buffer.from(bytes).indexOf(Buffer.from(value)) + 10 });
+  expect(f.span).toEqual({ start: 9, end: 10, line: 2, col: 1 });
+  expect(r.templates.map((t) => [t.source.name, t.source.key, t.text])).toEqual([
+    ["default", "tokenizer.chat_template", "é{{ a }}\n\u0000{{ evil }}\u0000tail"],
+    ["tool_use", "tokenizer.chat_template.tool_use", "ok"],
+    ["default", "tokenizer.chat_template[:10]", "é{{ a }}\n"],
+  ]);
+  expect(f.detail).toMatchObject({ viewSha256: r.templates[2]!.sha256 });
+  expect(r.extractionComplete).toBe(true);
+});
+
+test("a NUL at byte 0 of a named template gives an empty llama.cpp view", () => {
+  const r = read([["tokenizer.chat_template.tool_use", str("\u0000{{ evil }}")]]);
+  expect(rules(r)).toEqual([["parse_error", "HIGH"]]);
+  expect(r.templates.map((t) => [t.source.name, t.source.key, t.text])).toEqual([
+    ["tool_use", "tokenizer.chat_template.tool_use", "\u0000{{ evil }}"],
+    ["tool_use", "tokenizer.chat_template.tool_use[:0]", ""],
+  ]);
+});
