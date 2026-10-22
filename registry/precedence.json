@@ -1,0 +1,46 @@
+{
+  "order": {
+    "transformers-tokenizer": ["additional_chat_templates", "chat_template_jinja", "tokenizer_config", "gguf"],
+    "transformers-processor": ["processor_config", "chat_template_json", "chat_template_jinja", "additional_chat_templates"],
+    "mlx-lm": ["additional_chat_templates", "chat_template_jinja", "tokenizer_config"],
+    "llama.cpp": ["gguf"]
+  },
+  "provenance": {
+    "transformers-tokenizer": "huggingface/transformers@v5.20.2 (18329f1065382e54db698e242cf98bd3f3e5a766):src/transformers/tokenization_utils_base.py L1639-1689 (chat_template_file and additional_chat_templates/*.jinja become vocab files) and L1795-1812 (chat_template.jinja is read first, then every additional template, which overwrite by name, then the result replaces tokenizer_config.json's chat_template); GGUF: src/transformers/integrations/gguf/gguf_tokenizer_mapping.py L62-64 maps only tokenizer.chat_template. The tokenizer never reads chat_template.json or processor_config.json.",
+    "transformers-processor": "huggingface/transformers@v5.20.2 (18329f1065382e54db698e242cf98bd3f3e5a766):src/transformers/processing_utils.py L1277-1303 and L1324-1352 (file lookup), L1397-1451 (legacy chat_template.json wins over chat_template.jinja and additional templates, chat_template.jinja overwrites additional_chat_templates/default.jinja, and a chat_template key in processor_config.json keeps priority over all of them). Unconfirmed: how a list-valued chat_template inside processor_config.json picks its default.",
+    "mlx-lm": "ml-explore/mlx-lm@v0.31.3 (ed1fca4cef15a824c5f1702c80f70b4cffc8e4dd):mlx_lm/tokenizer_utils.py L611-644 (AutoTokenizer.from_pretrained, so the transformers-tokenizer order; setup.py L29 requires transformers>=5.0.0) and L620-623 (chat_template_type in tokenizer_config.json swaps in a built-in Python template for every Jinja source).",
+    "llama.cpp": "ggml-org/llama.cpp@b11827 (970b51ce7c9ba5fff0726c5e9994f1c2f0e4eedc):common/chat.cpp L729-758 (the default is tokenizer.chat_template; when it is absent, empty or \"chatml\", tokenizer.chat_template.tool_use, else the built-in chatml) and src/llama-model.cpp L1364-1373 and L3758-3775 (keys and values are kept as C strings and the first key wins)."
+  },
+  "rules": {
+    "transformers-tokenizer": {
+      "defaultNames": { "additional_chat_templates": ["default", "file"] },
+      "ignoredWhenPresent": { "tokenizer_config": ["chat_template_jinja", "additional_chat_templates"] },
+      "names": { "gguf": ["default"] }
+    },
+    "transformers-processor": {
+      "ignoredWhenPresent": {
+        "chat_template_json": ["processor_config"],
+        "chat_template_jinja": ["processor_config", "chat_template_json"],
+        "additional_chat_templates": ["processor_config", "chat_template_json"]
+      }
+    },
+    "mlx-lm": {
+      "defaultNames": { "additional_chat_templates": ["default", "file"] },
+      "ignoredWhenPresent": { "tokenizer_config": ["chat_template_jinja", "additional_chat_templates"] },
+      "builtinWhenHint": "chatTemplateType"
+    },
+    "llama.cpp": {
+      "cStrings": true,
+      "names": { "gguf": ["default", "tool_use"] },
+      "fallback": { "whenDefaultIs": ["", "chatml"], "name": "tool_use" }
+    }
+  },
+  "notes": {
+    "defaultNames": "Template names in a source kind that load as the default, highest first. additional_chat_templates/file.jinja takes the vocab key chat_template_file, the same key as chat_template.jinja, so it replaces chat_template.jinja; default.jinja is read after it and wins (tokenization_utils_base.py L1645, L1679, L1797-1808). Absent means [\"default\"].",
+    "ignoredWhenPresent": "A source kind the runtime never reads while any source of the listed kinds exists in the model.",
+    "names": "The only template names the runtime reads from a source kind. Absent means every name.",
+    "builtinWhenHint": "When the model sets this hint, the runtime renders with a built-in template and loads none of the model's own.",
+    "cStrings": "Keys and values are read as C strings: a key ends at its first NUL, the first matching key wins, and a value ends at its first NUL.",
+    "fallback": "When the default template is absent or its value is one of whenDefaultIs, the runtime loads this named template instead."
+  }
+}
