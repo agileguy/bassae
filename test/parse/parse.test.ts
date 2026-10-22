@@ -41,3 +41,19 @@ test("spans correlate to the right occurrence when a name repeats", () => {
   expect(spans).toHaveLength(2);
   expect(spans[0]!.start).not.toBe(spans[1]!.start);
 });
+
+// Every jinja2 builtin filter is classified exactly once: implemented by the
+// library, MEDIUM benign, or HIGH dangerous. Everything else is a non-builtin.
+test("jinja2 builtin filters and tests are partitioned without gaps or overlap", async () => {
+  const s = await import("../../src/parse/support.ts");
+  for (const name of s.JINJA2_BUILTIN_FILTERS) {
+    const hits = [s.IMPLEMENTED_FILTERS, s.BENIGN_UNIMPLEMENTED_FILTERS, s.DANGEROUS_FILTERS].filter((set) => set.has(name));
+    expect([name, hits.length]).toEqual([name, 1]);
+  }
+  for (const name of [...s.BENIGN_UNIMPLEMENTED_FILTERS, ...s.DANGEROUS_FILTERS]) expect(s.JINJA2_BUILTIN_FILTERS.has(name)).toBe(true);
+  for (const name of s.JINJA2_BUILTIN_TESTS) {
+    const hits = [s.IMPLEMENTED_TESTS, s.BENIGN_UNIMPLEMENTED_TESTS].filter((set) => set.has(name));
+    expect([name, hits.length]).toEqual([name, 1]);
+  }
+  for (const name of s.BENIGN_UNIMPLEMENTED_TESTS) expect(s.JINJA2_BUILTIN_TESTS.has(name)).toBe(true);
+});

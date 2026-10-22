@@ -20,8 +20,30 @@ export const IMPLEMENTED_STATEMENTS = new Set([
   "for", "endfor", "call", "endcall", "break", "continue", "filter", "endfilter", "generation", "endgeneration",
 ]);
 
+// Every filter and test Python jinja2 3.1 ships (jinja2/filters.py FILTERS,
+// jinja2/tests.py TESTS); transformers adds no filter beyond overriding tojson.
+// A name outside these either fails in every engine or exists in one engine
+// only, and that difference is a fingerprint: HIGH unanalyzable (ISC-12.1).
+export const JINJA2_BUILTIN_FILTERS = new Set([
+  "abs", "attr", "batch", "capitalize", "center", "count", "d", "default", "dictsort", "e", "escape",
+  "filesizeformat", "first", "float", "forceescape", "format", "groupby", "indent", "int", "items", "join",
+  "last", "length", "list", "lower", "map", "max", "min", "pprint", "random", "reject", "rejectattr",
+  "replace", "reverse", "round", "safe", "select", "selectattr", "slice", "sort", "string", "striptags",
+  "sum", "title", "tojson", "trim", "truncate", "unique", "upper", "urlencode", "urlize", "wordcount",
+  "wordwrap", "xmlattr",
+]);
+
+export const JINJA2_BUILTIN_TESTS = new Set([
+  "odd", "even", "divisibleby", "defined", "undefined", "filter", "test", "none", "boolean", "false", "true",
+  "integer", "float", "lower", "upper", "string", "mapping", "number", "sequence", "iterable", "callable",
+  "sameas", "escaped", "in", "==", "eq", "equalto", "!=", "ne", ">", "gt", "greaterthan", ">=", "ge",
+  "<", "lt", "lessthan", "<=", "le",
+]);
+
 // Filters the interpreter actually handles. `map` is implemented only with
 // `attribute=`; a bare `map('upper')` throws at render, so it is not "safe".
+// `bool`, `keys`, `values` and `get` work here but are not jinja2 builtins, so
+// a template using them as filters is still HIGH.
 export const IMPLEMENTED_FILTERS = new Set([
   "safe", "tojson", "list", "first", "last", "length", "reverse", "sort", "join", "string", "unique",
   "upper", "lower", "title", "capitalize", "trim", "indent", "int", "float", "abs", "items", "bool",
@@ -30,29 +52,34 @@ export const IMPLEMENTED_FILTERS = new Set([
 
 // Jinja2 builtin filters the library lacks, each MEDIUM unanalyzable rather
 // than a code-exec HIGH (team-lead, 2026-10-22). Moving one to HIGH is a
-// one-line change. Two more MEDIUM paths live in parse.ts: `map` with a
+// one-line change. One more MEDIUM filter path lives in parse.ts: `map` with a
 // positional filter name (map('upper') throws at render, only `attribute=` is
-// implemented) and any test outside IMPLEMENTED_TESTS (undefined test, render error).
+// implemented).
 export const BENIGN_UNIMPLEMENTED_FILTERS = new Set([
-  "reject", //      calls a named test on each item; tests cannot reach attributes
-  "select", //      same as reject, inverted
-  "count", //       alias of length
-  "sum", //         arithmetic over items, attribute= is a dotted lookup like map
-  "min", //         comparison over items, attribute= as in sum
-  "max", //         comparison over items, attribute= as in sum
-  "batch", //       regroups a sequence into fixed-size chunks
-  "slice", //       regroups a sequence into n columns
-  "groupby", //     regroups by a dotted attribute path, no call
-  "wordcount", //   returns an int
-  "round", //       numeric only
-  "center", //      pads a string
-  "truncate", //    shortens a string
-  "urlize", //      wraps URLs in <a>, string to string
-  "striptags", //   removes markup, string to string
-  "pprint", //      repr of the value, no attribute access by name
-  "e", //           alias of escape
-  "escape", //      HTML-escapes a string
-  "forceescape", // HTML-escapes a string even when marked safe
+  "reject", //         calls a named test on each item; tests cannot reach attributes
+  "select", //         same as reject, inverted
+  "count", //          alias of length
+  "sum", //            arithmetic over items, attribute= is a dotted lookup like map
+  "min", //            comparison over items, attribute= as in sum
+  "max", //            comparison over items, attribute= as in sum
+  "batch", //          regroups a sequence into fixed-size chunks
+  "slice", //          regroups a sequence into n columns
+  "groupby", //        regroups by a dotted attribute path, no call
+  "wordcount", //      returns an int
+  "round", //          numeric only
+  "center", //         pads a string
+  "truncate", //       shortens a string
+  "urlize", //         wraps URLs in <a>, string to string
+  "striptags", //      removes markup, string to string
+  "pprint", //         repr of the value, no attribute access by name
+  "e", //              alias of escape
+  "escape", //         HTML-escapes a string
+  "forceescape", //    HTML-escapes a string even when marked safe
+  "d", //              alias of default
+  "filesizeformat", // formats a number as a byte size
+  "urlencode", //      percent-encodes a string or the items of a dict
+  "wordwrap", //       wraps a string at a width
+  "xmlattr", //        renders a dict as escaped HTML attributes
 ]);
 
 // Filters that are HIGH when the library lacks them: `attr`/`format` reach
@@ -65,6 +92,25 @@ export const IMPLEMENTED_TESTS = new Set([
   "boolean", "callable", "odd", "even", "false", "true", "none", "string", "number", "integer",
   "iterable", "mapping", "sequence", "lower", "upper", "defined", "undefined", "equalto", "eq",
 ]);
+
+// Jinja2 builtin tests the library lacks. An unknown test is a render error and
+// a test only sees the value it is applied to: MEDIUM.
+export const BENIGN_UNIMPLEMENTED_TESTS = new Set([
+  "in", //          membership; stock Qwen3-Coder uses it through reject("in", ...)
+  "divisibleby", // arithmetic
+  "float", //       type check
+  "sameas", //      identity comparison
+  "escaped", //     checks for a markup-safe string
+  "filter", //      true when a filter of that name exists; both branches stay visible to the AST rules
+  "test", //        true when a test of that name exists; same as filter
+  "==", "!=", ">", ">=", "<", "<=", // comparison operator aliases
+  "ne", "gt", "ge", "lt", "le", //    comparison operator aliases
+  "greaterthan", "lessthan", //       comparison operator aliases
+]);
+
+// Engine globals the library lacks. Calling one, or any use of `self`, is HIGH
+// unanalyzable (ISC-12.1); keyword-only `dict(...)` is not a finding.
+export const UNIMPLEMENTED_CALLABLE_GLOBALS = new Set(["cycler", "joiner", "lipsum"]);
 
 // Globals the library defines. Everything else a template names as a global is
 // silently UndefinedValue at render time, which is both how fingerprinting works

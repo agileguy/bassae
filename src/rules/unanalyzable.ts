@@ -54,7 +54,7 @@ export function runUnanalyzable(outcome: ParseOutcome, knownGood: boolean, base:
   // Parsed, but uses constructs the library does not implement (ISC-12.1).
   for (const u of outcome.unsupported) {
     const what = u.form ? `'${u.name}' (${u.form})` : `'${u.name}'`;
-    const f = mk(u.severity, `unsupported ${u.kind} ${what} is not implemented by @huggingface/jinja`, u.span);
+    const f = mk(u.severity, `unsupported ${u.kind} ${what} ${u.reason ?? "is not implemented by @huggingface/jinja"}`, u.span);
     if (u.span) f.excerpt = text.slice(u.span.start, u.span.end);
     findings.push(f);
   }
