@@ -38,7 +38,7 @@ export function runFold(ctx: RuleCtx): Finding[] {
           message: `literal expression folds to a dunder '${folded}'`,
           file: ctx.file,
           templateName: ctx.templateName,
-          templateSha256: ctx.sha256,
+          templateSha256: ctx.templateSha256,
           span,
           excerpt: span ? ctx.text.slice(span.start, span.end) : undefined,
           detail: { folded },

@@ -9,11 +9,7 @@
 import type { Finding, Severity } from "../types.ts";
 import type { ParseOutcome } from "../parse/parse.ts";
 
-interface Base {
-  file: string;
-  templateName: string;
-  sha256: string;
-}
+type Base = Pick<Finding, "file" | "templateName" | "templateSha256">;
 
 // Pull the offending keyword out of the library's parse-error text, e.g.
 // "Unknown statement type: with" -> "with".
@@ -29,9 +25,7 @@ export function runUnanalyzable(outcome: ParseOutcome, knownGood: boolean, base:
     ruleId: "unanalyzable",
     severity,
     message,
-    file: base.file,
-    templateName: base.templateName,
-    templateSha256: base.sha256,
+    ...base,
     span,
   });
 
@@ -39,10 +33,12 @@ export function runUnanalyzable(outcome: ParseOutcome, knownGood: boolean, base:
     if (!knownGood) {
       const named = outcome.parseError ? namedConstruct(outcome.parseError) : undefined;
       // Point at the named construct in the raw text when we can find it.
-      const tok = named ? outcome.pre.tokens.find((t) => t.type === "identifier" && t.value === named) : undefined;
-      const span = tok ? outcome.lines.span(tok.start, tok.end) : undefined;
+      const tok = named && outcome.pre ? outcome.pre.tokens.find((t) => t.type === "identifier" && t.value === named) : undefined;
+      const span = tok && outcome.lines ? outcome.lines.span(tok.start, tok.end) : undefined;
+      // Carry the real reason for a size/shape cap, not a generic blurb (item D):
+      // parseError holds e.g. "whitespace run of 5000 exceeds the parse limit".
       const detail = outcome.tooLarge
-        ? "template too large to parse in-process"
+        ? (outcome.parseError ?? "template too large to parse in-process")
         : named
           ? `@huggingface/jinja cannot parse this template (construct: ${named})`
           : `@huggingface/jinja cannot parse this template: ${outcome.parseError}`;
