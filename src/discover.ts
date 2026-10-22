@@ -27,6 +27,14 @@ const SKIP_NAMES = new Set([".no_exist"]);
 
 // Kernel filesystems: huge or endless, full of files that block or change when read, and no place for a model.
 const PSEUDO_FS = ["/proc", "/sys", "/dev"];
+// Except /dev/shm: an ordinary tmpfs anyone can write, so a model linked into it must be read.
+const WALKED_IN_DEV = "/dev/shm";
+
+/** The kernel filesystem a realpath lies in, or undefined when it may be walked. */
+export function kernelFs(real: string): string | undefined {
+  const under = (p: string) => real === p || real.startsWith(p + sep);
+  return under(WALKED_IN_DEV) ? undefined : PSEUDO_FS.find(under);
+}
 
 // Bounds the path list a pathological symlink graph could otherwise grow without end.
 const MAX_PATHS_PER_MODEL = 256;
@@ -138,7 +146,7 @@ class Walker {
   }
 
   private pseudo(path: string, real: string): boolean {
-    const fs = PSEUDO_FS.find((p) => real === p || real.startsWith(p + sep));
+    const fs = kernelFs(real);
     if (fs) this.finding("MEDIUM", path, `resolves into ${fs} (${real}); kernel filesystems are not walked`);
     return fs !== undefined;
   }

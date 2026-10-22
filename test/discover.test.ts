@@ -1,8 +1,8 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { discover } from "../src/discover.ts";
+import { discover, kernelFs } from "../src/discover.ts";
 import { hfCacheLocations } from "../src/hf/cache.ts";
 import type { DiscoveredModel } from "../src/types.ts";
 import { GGUF_BYTES, link, makeTree, removeTrees } from "./helpers/tree.ts";
@@ -146,6 +146,26 @@ describe("bounded walk", () => {
       ["scanner_error", "MEDIUM", join(root, "fd")],
       ["scanner_error", "MEDIUM", join(root, "n")],
     ]);
+  });
+
+  test("/dev/shm is walked; the rest of /proc, /sys and /dev is not", () => {
+    for (const p of ["/dev/shm", "/dev/shm/m", "/home/m"]) expect(kernelFs(p)).toBeUndefined();
+    const fs = ["/dev", "/dev/null", "/dev/shmx", "/proc/self", "/sys/class", "/proc"].map(kernelFs);
+    expect(fs).toEqual(["/dev", "/dev", "/dev", "/proc", "/sys", "/proc"]);
+  });
+
+  // macOS has no /dev/shm, so this runs where it exists (Linux).
+  test.skipIf(!existsSync("/dev/shm"))("a model linked into /dev/shm is found", async () => {
+    const shm = mkdtempSync(join("/dev/shm", "bassae-"));
+    try {
+      writeFileSync(join(shm, "chat_template.jinja"), "x");
+      const root = makeTree({ m: link(shm) });
+      const { models, findings } = await discover([root]);
+      expect(findings).toEqual([]);
+      expect(models).toEqual([{ format: "hf", id: shm, paths: [join(root, "m")] }]);
+    } finally {
+      rmSync(shm, { recursive: true, force: true });
+    }
   });
 
   test("aliases expand into every reaching path without scanning every alias", async () => {
