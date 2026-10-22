@@ -6,6 +6,7 @@ import { Template } from "@huggingface/jinja";
 import type { Span } from "../types.ts";
 import { preLex, type PreLexResult, type PreToken } from "./prelexer.ts";
 import {
+  BARE_ENGINE_GLOBALS,
   BENIGN_UNIMPLEMENTED_FILTERS,
   correlateSpans,
   DANGEROUS_FILTERS,
@@ -16,7 +17,6 @@ import {
   LineMap,
   type Node,
   sourceOrderLeaves,
-  UNIMPLEMENTED_CALLABLE_GLOBALS,
 } from "./support.ts";
 
 // Templates longer than this (in UTF-16 code units) are not parsed in-process;
@@ -28,15 +28,17 @@ const MAX_PARSE_UNITS = 512 * 1024;
 // Shape caps checked linearly BEFORE the library parser runs, so the result is
 // decided by integer token counts that are identical on every platform (ISC-31)
 // — never by whether a given machine's stack survives a hostile nesting depth.
-// The corpus maxima are 37 / 35 / 3 / 10, so these leave 50x-100x headroom and
-// never trip a stock template. Over any of them: HIGH unanalyzable, no parse.
-const MAX_WHITESPACE_RUN = 4096;
+// The corpus maxima are 37 / 35 / 3 / 10, so these leave wide headroom and never
+// trip a stock template. Over any of them: HIGH unanalyzable, no parse. The
+// whitespace cap is 512 (corpus max run 37): the library's preprocess step is
+// superlinear on long runs, so a lower cap keeps a pathological run cheap (N2).
+const MAX_WHITESPACE_RUN = 512;
 const MAX_TAG_TOKENS = 2048;
 const MAX_BRACKET_DEPTH = 100;
 const MAX_BLOCK_DEPTH = 128;
 
 export interface UnsupportedConstruct {
-  kind: "statement" | "filter" | "test" | "global" | "operator";
+  kind: "statement" | "filter" | "test" | "global" | "operator" | "method";
   name: string;
   /** HIGH for exec gadgets and unparseable constructs, MEDIUM for benign data filters. */
   severity: "HIGH" | "MEDIUM";
@@ -195,6 +197,10 @@ function findUnsupported(program: Node, spans: Map<Node, Span>): UnsupportedCons
     // throws at render, so it is a benign MEDIUM, not a code-exec HIGH.
     if (name === "map" && filter.type === "CallExpression" && !args.some((a) => a.type === "KeywordArgumentExpression")) {
       add({ kind: "filter", name, severity: "MEDIUM", form: "positional filter argument", span: spans.get(id) });
+    } else if (name === "unique" && filter.type === "CallExpression" && args.length > 0) {
+      // Plain `|unique` works, but `|unique(...)` (any argument, including
+      // attribute=) throws at render in @huggingface/jinja (N3).
+      add({ kind: "filter", name, severity: "MEDIUM", form: "called with arguments", reason: "throws at render in @huggingface/jinja", span: spans.get(id) });
     } else {
       classifyFilter(name, id);
     }
@@ -227,12 +233,18 @@ function findUnsupported(program: Node, spans: Map<Node, Span>): UnsupportedCons
     } else if (n.type === "KeywordArgumentExpression") {
       skip = "key";
     } else if (n.type === "CallExpression") {
+      // A `.join(...)` method call: @huggingface/jinja has no join method on any
+      // type (join is a filter), so it throws at render — MEDIUM unanalyzable (N3).
       const callee = n.callee as Node;
-      if (callee.type === "Identifier" && UNIMPLEMENTED_CALLABLE_GLOBALS.has(String(callee.value))) {
-        add({ kind: "global", name: String(callee.value), severity: "HIGH", form: "called", span: spans.get(callee) });
+      if (callee.type === "MemberExpression") {
+        const p = callee.property as Node;
+        const m = p.type === "Identifier" || p.type === "StringLiteral" ? String(p.value) : undefined;
+        if (m === "join") add({ kind: "method", name: "join", severity: "MEDIUM", form: "no join method on a string or sequence", reason: "throws at render in @huggingface/jinja", span: spans.get(p) });
       }
-    } else if (n.type === "Identifier" && n.value === "self") {
-      add({ kind: "global", name: "self", severity: "HIGH", span: spans.get(n) });
+    } else if (n.type === "Identifier" && BARE_ENGINE_GLOBALS.has(String(n.value))) {
+      // Any reference to self/cycler/joiner/lipsum — called or not — is a gadget
+      // handle the library lacks (ISC-12.1, ISC-15, M2 fix 1).
+      add({ kind: "global", name: String(n.value), severity: "HIGH", reason: "has no benign use and @huggingface/jinja lacks it; a reference is an engine-gadget handle", span: spans.get(n) });
     } else if (n.type === "BinaryExpression" && (n.operator as { value: string }).value === "*" && isStringStar(n)) {
       // ISC-12.1 / item 6 — `'x' * 3` parses but the library throws on it at
       // render ("Unknown operator * between StringValue and IntegerValue"), so a

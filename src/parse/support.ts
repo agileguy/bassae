@@ -105,9 +105,12 @@ export const BENIGN_UNIMPLEMENTED_TESTS = new Set([
   "greaterthan", "lessthan", //       comparison operator aliases
 ]);
 
-// Engine globals the library lacks. Calling one, or any use of `self`, is HIGH
-// unanalyzable (ISC-12.1); keyword-only `dict(...)` is not a finding.
-export const UNIMPLEMENTED_CALLABLE_GLOBALS = new Set(["cycler", "joiner", "lipsum"]);
+// Engine globals the library lacks entirely: any reference — called or not — is
+// HIGH unanalyzable (ISC-12.1, ISC-15, M2 fix 1). The library provides none of
+// them and they have no benign use in a chat template, so no stock template can
+// trip this; `self` has always been flagged, cycler/joiner/lipsum join it so a
+// laundered handle (`[lipsum]`, `lipsum if ... else 0`) is caught at the source.
+export const BARE_ENGINE_GLOBALS = new Set(["self", "cycler", "joiner", "lipsum"]);
 
 // ---- code-execution surfaces ----
 
@@ -354,44 +357,33 @@ export function correlateSpans(leaves: Leaf[], tokens: PreToken[], lines: LineMa
   return spans;
 }
 
-// ---- runtime-data classifier (ISC-14.1 carve-out) ----
+// ---- binding environment (ISC-14.1 carve-out) ----
+//
+// The carve-out is strict: a subscript key, attribute name or callee is exempt
+// only when it is PROVABLY runtime data — a plain reference whose binding chain
+// is rooted in a runtime input, with no string operation, method call or gadget
+// anywhere along it. Everything else is folded and checked, or it is a dynamic
+// attribute reach. To decide that per use site we first resolve what every local
+// name is bound to, carrying taint through `set`, two-step `set`, namespace-
+// attribute assignment (`set ns.k = ...`), loop variables and macro parameters,
+// including values built inside containers or conditionals.
 
-/** Collect names bound locally: loop variables, set targets, macro and caller parameters. */
-export function collectBoundNames(program: Node): Set<string> {
-  const names = new Set<string>();
-  const addTarget = (node: unknown): void => {
-    const n = node as Node | undefined;
-    if (!n) return;
-    if (n.type === "Identifier") names.add(String(n.value));
-    else if (n.type === "TupleLiteral" || n.type === "ArrayLiteral") for (const c of n.value as Node[]) addTarget(c);
-    // A set on `ns.attr` binds nothing new.
-  };
-  const addParams = (args: unknown): void => {
-    for (const a of (args as Node[] | undefined) ?? []) {
-      if (a.type === "Identifier") names.add(String(a.value));
-      else if (a.type === "KeywordArgumentExpression") names.add(String((a.key as Node).value));
-    }
-  };
-  // Explicit stack so a deeply nested AST cannot overflow (ISC-31).
-  const stack: unknown[] = [program];
-  while (stack.length) {
-    const node = stack.pop();
-    if (!node || typeof node !== "object") continue;
-    if (Array.isArray(node)) {
-      for (const c of node) stack.push(c);
-      continue;
-    }
-    const n = node as Node;
-    if (n.type === "For") addTarget(n.loopvar);
-    else if (n.type === "Set") addTarget(n.assignee);
-    else if (n.type === "Macro") addParams(n.args);
-    else if (n.type === "CallStatement") addParams(n.callerArgs);
-    for (const v of Object.values(n)) stack.push(v);
-  }
-  return names;
-}
+/** What a local name resolves to, for the carve-out. */
+export type Binding =
+  | { t: "const"; value: FoldValue } // folds to a compile-time constant
+  | { t: "runtime" } //                a loop var, macro parameter, or `set` of runtime-rooted data
+  | { t: "built" } //                  assembled by a string op, filter, method or call — never exempt
+  | { t: "gadget" } //                 an engine-gadget handle (cycler/joiner/lipsum/namespace/dict/self)
+  | { t: "opaque" }; //                a local of unknown nature (a call result, a filtered value)
 
-/** The base identifier a member/subscript chain hangs off, if any. */
+export type BindingEnv = Map<string, Binding>;
+
+const BINDING_RUNTIME: Binding = { t: "runtime" };
+const BINDING_BUILT: Binding = { t: "built" };
+const BINDING_GADGET: Binding = { t: "gadget" };
+const BINDING_OPAQUE: Binding = { t: "opaque" };
+
+/** The base identifier a member/subscript/call/filter chain hangs off, if any. */
 export function rootIdentifier(node: Node): string | undefined {
   let cur: Node | undefined = node;
   while (cur) {
@@ -404,47 +396,219 @@ export function rootIdentifier(node: Node): string | undefined {
   return undefined;
 }
 
-/** True when a subscript/getattr root is runtime data and so exempt from ISC-14.1. */
-export function isDataObject(node: Node, bound: Set<string>): boolean {
+/** The `ns.attr` env key for a non-computed `object.property` of two identifiers, else undefined. */
+function attrKey(n: Node): string | undefined {
+  if (n.type !== "MemberExpression" || n.computed) return undefined;
+  const obj = n.object as Node;
+  const prop = n.property as Node;
+  if (obj?.type === "Identifier" && prop?.type === "Identifier") return `${String(obj.value)}.${String(prop.value)}`;
+  return undefined;
+}
+
+/** Classify a value expression against the current bindings (depth-capped, ISC-31). */
+function classifyValue(node: unknown, env: BindingEnv, depth = 0): Binding {
+  if (depth > 40 || !node || typeof node !== "object") return BINDING_OPAQUE;
+  const n = node as Node;
+  const folded = foldLiteral(n, 0, env);
+  if (folded !== undefined) return { t: "const", value: folded };
+  switch (n.type) {
+    case "Identifier": {
+      const v = String(n.value);
+      if (GADGETS.has(v)) return BINDING_GADGET;
+      if (RUNTIME_INPUTS.has(v)) return BINDING_RUNTIME;
+      return env.get(v) ?? BINDING_OPAQUE;
+    }
+    case "MemberExpression": {
+      const key = attrKey(n);
+      if (key) {
+        const b = env.get(key);
+        if (b) return b;
+      }
+      const ob = classifyValue(n.object, env, depth + 1);
+      if (ob.t === "gadget") return BINDING_GADGET;
+      if (ob.t === "built") return BINDING_BUILT;
+      if (ob.t === "runtime") return BINDING_RUNTIME; // a field of runtime data is runtime
+      return BINDING_OPAQUE;
+    }
+    case "BinaryExpression": {
+      const op = (n.operator as { value: string }).value;
+      if (op === "~") return BINDING_BUILT;
+      if ((op === "+" || op === "*") && (foldsToString(n.left, env) || foldsToString(n.right, env))) return BINDING_BUILT;
+      return BINDING_RUNTIME; // numeric arithmetic never names an attribute
+    }
+    case "FilterExpression":
+      return BINDING_BUILT;
+    case "CallExpression": {
+      const callee = n.callee as Node;
+      if (callee.type === "Identifier" && (String(callee.value) === "namespace" || String(callee.value) === "dict")) return BINDING_OPAQUE;
+      return BINDING_BUILT; // a method or function call assembles a value
+    }
+    case "Ternary":
+      return joinBindings(classifyValue(n.trueExpr, env, depth + 1), classifyValue(n.falseExpr, env, depth + 1));
+    case "ArrayLiteral":
+    case "TupleLiteral": {
+      for (const c of (n.value as Node[]) ?? []) if (classifyValue(c, env, depth + 1).t === "gadget") return BINDING_GADGET;
+      return BINDING_OPAQUE;
+    }
+    case "ObjectLiteral": {
+      const map = n.value as Map<unknown, unknown>;
+      if (map instanceof Map) for (const v of map.values()) if (classifyValue(v, env, depth + 1).t === "gadget") return BINDING_GADGET;
+      return BINDING_OPAQUE;
+    }
+    default:
+      return BINDING_OPAQUE;
+  }
+}
+
+function joinBindings(a: Binding, b: Binding): Binding {
+  if (a.t === "gadget" || b.t === "gadget") return BINDING_GADGET;
+  if (a.t === "built" || b.t === "built") return BINDING_BUILT;
+  if (a.t === "runtime" && b.t === "runtime") return BINDING_RUNTIME;
+  return BINDING_OPAQUE;
+}
+
+/**
+ * Resolve what every local name (and `ns.attr` slot) is bound to. A straight
+ * recursive descent over STATEMENTS, whose nesting parse.ts caps at 128 before
+ * the parser runs, so it cannot overflow; value expressions are classified
+ * non-recursively with a depth cap (ISC-31). Straight-line, last-write-wins: a
+ * `set` inside a branch is treated as having happened, which can only add taint.
+ */
+export function resolveBindings(program: Node): BindingEnv {
+  const env: BindingEnv = new Map();
+  const bindTarget = (target: Node | undefined, b: Binding): void => {
+    if (!target) return;
+    if (target.type === "Identifier") env.set(String(target.value), b);
+    else if (target.type === "TupleLiteral" || target.type === "ArrayLiteral") for (const c of (target.value as Node[]) ?? []) bindTarget(c, BINDING_RUNTIME);
+  };
+  const walk = (stmts: unknown): void => {
+    if (!Array.isArray(stmts)) return;
+    for (const s of stmts as Node[]) {
+      if (!s || typeof s !== "object") continue;
+      switch (s.type) {
+        case "Set": {
+          const assignee = s.assignee as Node;
+          const value = s.value as Node | undefined;
+          const b = value ? classifyValue(value, env) : BINDING_OPAQUE;
+          if (assignee?.type === "Identifier") {
+            env.set(String(assignee.value), b);
+            recordNamespaceInit(String(assignee.value), value, env);
+          } else {
+            const key = attrKey(assignee);
+            if (key) env.set(key, b);
+          }
+          walk(s.body); // {% set x %}...{% endset %} block body
+          continue;
+        }
+        case "For":
+          bindTarget(s.loopvar as Node, BINDING_RUNTIME);
+          walk(s.body);
+          walk(s.defaultBlock);
+          continue;
+        case "Macro":
+          for (const a of (s.args as Node[] | undefined) ?? []) {
+            if (a.type === "Identifier") env.set(String(a.value), BINDING_RUNTIME);
+            else if (a.type === "KeywordArgumentExpression") env.set(String((a.key as Node).value), classifyValue(a.value, env));
+          }
+          walk(s.body);
+          continue;
+        case "CallStatement":
+          for (const a of (s.callerArgs as Node[] | undefined) ?? []) if (a.type === "Identifier") env.set(String(a.value), BINDING_RUNTIME);
+          walk(s.body);
+          continue;
+        case "If":
+          walk(s.body);
+          walk(s.alternate);
+          continue;
+        case "FilterStatement":
+          walk(s.body);
+          continue;
+        default:
+          continue;
+      }
+    }
+  };
+  walk((program as Node).body);
+  return env;
+}
+
+/** `set ns = namespace(k=V, ...)` seeds `ns.k` bindings (same for dict()). */
+function recordNamespaceInit(target: string, value: Node | undefined, env: BindingEnv): void {
+  if (!value || value.type !== "CallExpression") return;
+  const callee = value.callee as Node;
+  if (callee.type !== "Identifier" || (String(callee.value) !== "namespace" && String(callee.value) !== "dict")) return;
+  for (const a of (value.args as Node[] | undefined) ?? []) {
+    if (a.type === "KeywordArgumentExpression") env.set(`${target}.${String((a.key as Node).value)}`, classifyValue(a.value, env));
+  }
+}
+
+/** True when a subscript/getattr object root is provably runtime data (ISC-14.1, M2 fix 3). */
+export function isDataObject(node: Node, env: BindingEnv): boolean {
   const root = rootIdentifier(node);
   if (root === undefined) return false;
-  return bound.has(root) || RUNTIME_INPUTS.has(root);
+  if (RUNTIME_INPUTS.has(root)) return true;
+  return env.get(root)?.t === "runtime";
 }
 
 /** How a key/attribute/callee position resolves (ISC-14, ISC-14.1, ISC-16). */
 export interface ResolvedKey {
-  /** The string the position resolves to, when it is literal or folds from literals. */
+  /** The string the position resolves to, when it is literal or folds from literals (env-aware). */
   value?: string;
-  /** True when the position is assembled by a string operation (`~`, string `+`/`*`, a filter, a string slice). The carve-out never covers this. */
+  /** True when the position is assembled by a string op, filter, method or call, or is bound to one. The carve-out never covers this. */
   built: boolean;
 }
 
-/** True when `node` folds to a string, or is a string literal. */
-function foldsToString(node: unknown): boolean {
-  return typeof foldLiteral(node) === "string";
+/** True when `node` folds to a string under the current bindings. */
+function foldsToString(node: unknown, env?: BindingEnv): boolean {
+  return typeof foldLiteral(node, 0, env) === "string";
 }
 
-/** True when a key node is built by a string-producing operation. */
-function keyStringOp(node: Node): boolean {
+/** True when a key node is assembled by a string-producing operation, or bound to one. */
+function keyStringOp(node: Node, env?: BindingEnv): boolean {
+  if (env) {
+    const b = node.type === "Identifier" ? env.get(String(node.value)) : env.get(attrKey(node) ?? "\u0000");
+    if (b && (b.t === "built" || b.t === "gadget")) return true;
+  }
   switch (node.type) {
     case "BinaryExpression": {
       const op = (node.operator as { value: string }).value;
       if (op === "~") return true; // `~` always stringifies
-      if (op === "+" || op === "*") return foldsToString(node.left) || foldsToString(node.right);
+      if (op === "+" || op === "*") return foldsToString(node.left, env) || foldsToString(node.right, env);
       return false;
     }
     case "FilterExpression":
       // A filter applied to build the key itself (|reverse, |join, |replace, |upper, ...).
       return true;
+    case "CallExpression":
+      return true; // a method or function call builds the key (M4)
     default:
       return false;
   }
 }
 
 /** Resolve a key/attribute/callee node for the dunder, exec and dynamic-attribute checks. */
-export function resolveKey(node: Node): ResolvedKey {
-  const folded = foldLiteral(node);
-  return { value: typeof folded === "string" ? folded : undefined, built: keyStringOp(node) };
+export function resolveKey(node: Node, env?: BindingEnv): ResolvedKey {
+  const folded = foldLiteral(node, 0, env);
+  return { value: typeof folded === "string" ? folded : undefined, built: keyStringOp(node, env) };
+}
+
+/** A composite node has no span of its own; point at its first leaf (ISC-26.1, M5). */
+export function firstLeafSpan(node: Node, spans: Map<Node, Span>): Span | undefined {
+  const stack: unknown[] = [node];
+  while (stack.length) {
+    const x = stack.pop();
+    if (!x || typeof x !== "object") continue;
+    if (Array.isArray(x)) {
+      for (let i = x.length - 1; i >= 0; i--) stack.push(x[i]);
+      continue;
+    }
+    const nn = x as Node;
+    const s = spans.get(nn);
+    if (s) return s;
+    const vals = Object.values(nn);
+    for (let i = vals.length - 1; i >= 0; i--) stack.push(vals[i]);
+  }
+  return undefined;
 }
 
 /**
@@ -498,8 +662,13 @@ export function gadgetAliases(program: Node): Set<string> {
 
 export type FoldValue = string | number | boolean | null | FoldValue[];
 
-/** Evaluate a literal-only expression, or return undefined if it depends on runtime input. */
-export function foldLiteral(node: unknown, depth = 0): FoldValue | undefined {
+/**
+ * Evaluate a literal-only expression, or return undefined if it depends on
+ * runtime input. With an `env`, identifiers and `ns.attr` slots bound to a
+ * compile-time constant are substituted, so a dunder assembled across `set`
+ * statements still folds (M1).
+ */
+export function foldLiteral(node: unknown, depth = 0, env?: BindingEnv): FoldValue | undefined {
   if (depth > 40 || !node || typeof node !== "object") return undefined;
   const n = node as Node;
   switch (n.type) {
@@ -513,28 +682,32 @@ export function foldLiteral(node: unknown, depth = 0): FoldValue | undefined {
       if (v === "true" || v === "True") return true;
       if (v === "false" || v === "False") return false;
       if (v === "none" || v === "None") return null;
+      if (env) {
+        const b = env.get(v);
+        if (b?.t === "const") return b.value;
+      }
       return undefined;
     }
     case "ArrayLiteral":
     case "TupleLiteral": {
       const out: FoldValue[] = [];
       for (const c of n.value as Node[]) {
-        const f = foldLiteral(c, depth + 1);
+        const f = foldLiteral(c, depth + 1, env);
         if (f === undefined) return undefined;
         out.push(f);
       }
       return out;
     }
     case "UnaryExpression": {
-      const a = foldLiteral(n.argument, depth + 1);
+      const a = foldLiteral(n.argument, depth + 1, env);
       const op = (n.operator as { value: string }).value;
       if (typeof a === "number") return op === "-" ? -a : op === "+" ? a : undefined;
       if (op === "not") return !truthy(a);
       return undefined;
     }
     case "BinaryExpression": {
-      const l = foldLiteral(n.left, depth + 1);
-      const r = foldLiteral(n.right, depth + 1);
+      const l = foldLiteral(n.left, depth + 1, env);
+      const r = foldLiteral(n.right, depth + 1, env);
       if (l === undefined || r === undefined) return undefined;
       const op = (n.operator as { value: string }).value;
       if (op === "~") return `${stringify(l)}${stringify(r)}`;
@@ -552,22 +725,42 @@ export function foldLiteral(node: unknown, depth = 0): FoldValue | undefined {
       return undefined;
     }
     case "FilterExpression":
-      return foldFilter(n, depth);
+      return foldFilter(n, depth, env);
+    case "CallExpression": {
+      // M4 — string methods the library implements at render (receiver folds):
+      // 'x'.replace/lower/upper/strip/title/capitalize. Any other method is a
+      // key built dynamically; keyStringOp flags that, foldLiteral stays undefined.
+      const callee = n.callee as Node;
+      if (callee.type !== "MemberExpression" || callee.computed) return undefined;
+      const recv = foldLiteral(callee.object, depth + 1, env);
+      if (typeof recv !== "string") return undefined;
+      const prop = callee.property as Node;
+      const method = prop.type === "Identifier" ? String(prop.value) : undefined;
+      const a = (n.args as Node[]).map((x) => foldLiteral(x, depth + 1, env));
+      return foldStringMethod(recv, method, a);
+    }
     case "MemberExpression": {
-      if (!n.computed) return undefined;
-      const obj = foldLiteral(n.object, depth + 1);
+      if (!n.computed) {
+        const key = attrKey(n);
+        if (key && env) {
+          const b = env.get(key);
+          if (b?.t === "const") return b.value;
+        }
+        return undefined;
+      }
+      const obj = foldLiteral(n.object, depth + 1, env);
       const prop = n.property as Node;
       if (prop.type === "SliceExpression") {
         const items = typeof obj === "string" ? obj.split("") : Array.isArray(obj) ? obj : undefined;
         if (!items) return undefined;
-        const start = prop.start === undefined ? undefined : foldLiteral(prop.start, depth + 1);
-        const stop = prop.stop === undefined ? undefined : foldLiteral(prop.stop, depth + 1);
-        const step = prop.step === undefined ? undefined : foldLiteral(prop.step, depth + 1);
+        const start = prop.start === undefined ? undefined : foldLiteral(prop.start, depth + 1, env);
+        const stop = prop.stop === undefined ? undefined : foldLiteral(prop.stop, depth + 1, env);
+        const step = prop.step === undefined ? undefined : foldLiteral(prop.step, depth + 1, env);
         if ([start, stop, step].some((v) => v !== undefined && typeof v !== "number")) return undefined;
         const sliced = pySlice(items, start as number | undefined, stop as number | undefined, step as number | undefined);
         return typeof obj === "string" ? sliced.join("") : sliced;
       }
-      const key = foldLiteral(prop, depth + 1);
+      const key = foldLiteral(prop, depth + 1, env);
       if (typeof obj === "string" && typeof key === "number") return obj[pyIndex(key, obj.length)] ?? undefined;
       if (Array.isArray(obj) && typeof key === "number") return obj[pyIndex(key, obj.length)];
       return undefined;
@@ -577,6 +770,36 @@ export function foldLiteral(node: unknown, depth = 0): FoldValue | undefined {
     default:
       return undefined;
   }
+}
+
+/** Fold a string method the library renders, or undefined for anything else (M4). */
+function foldStringMethod(recv: string, method: string | undefined, args: (FoldValue | undefined)[]): FoldValue | undefined {
+  switch (method) {
+    case "lower":
+      return recv.toLowerCase();
+    case "upper":
+      return recv.toUpperCase();
+    case "strip":
+      return typeof args[0] === "string" ? stripChars(recv, args[0]) : recv.trim();
+    case "title":
+      return recv.replace(/[A-Za-z]+/g, (w) => w[0]!.toUpperCase() + w.slice(1).toLowerCase());
+    case "capitalize":
+      return recv.length ? recv[0]!.toUpperCase() + recv.slice(1).toLowerCase() : recv;
+    case "replace":
+      return typeof args[0] === "string" && typeof args[1] === "string" ? recv.split(args[0]).join(args[1]) : undefined;
+    default:
+      return undefined;
+  }
+}
+
+/** Python str.strip(chars): trim any leading/trailing character in `chars`. */
+function stripChars(s: string, chars: string): string {
+  const set = new Set(chars.split(""));
+  let i = 0;
+  let j = s.length;
+  while (i < j && set.has(s[i]!)) i++;
+  while (j > i && set.has(s[j - 1]!)) j--;
+  return s.slice(i, j);
 }
 
 /** Normalize a Python index (negative counts from the end). */
@@ -602,13 +825,13 @@ function pySlice<T>(items: T[], start: number | undefined, stop: number | undefi
   return out;
 }
 
-function foldFilter(n: Node, depth: number): FoldValue | undefined {
-  const operand = foldLiteral(n.operand, depth + 1);
+function foldFilter(n: Node, depth: number, env?: BindingEnv): FoldValue | undefined {
+  const operand = foldLiteral(n.operand, depth + 1, env);
   if (operand === undefined) return undefined;
   const filter = n.filter as Node;
   const name = filter.type === "Identifier" ? String(filter.value) : String((filter.callee as Node).value);
   const argNodes = filter.type === "CallExpression" ? (filter.args as Node[]) : [];
-  const args = argNodes.map((a) => foldLiteral(a, depth + 1));
+  const args = argNodes.map((a) => foldLiteral(a, depth + 1, env));
   switch (name) {
     case "upper":
       return typeof operand === "string" ? operand.toUpperCase() : undefined;
