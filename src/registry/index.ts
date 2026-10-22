@@ -165,6 +165,8 @@ export function registryStatus(match: RegistryMatch): TemplateStatus | undefined
 export interface ProfileRules {
   /** Names in a kind that load as the default, highest first. Absent: ["default"]. */
   defaultNames?: Partial<Record<SourceKind, string[]>>;
+  /** The runtime raises while loading, and uses no template, when every kind in one of these sets is present. */
+  failsWhenPresent?: SourceKind[][];
   /** A kind is not read while any source of the listed kinds exists. */
   ignoredWhenPresent?: Partial<Record<SourceKind, SourceKind[]>>;
   /** The only names read from a kind. Absent: every name. */
@@ -210,6 +212,10 @@ function parseRules(v: unknown, where: string): ProfileRules {
     const w = `${where}.${k}`;
     if (k === "defaultNames") r.defaultNames = kindMap(x, w, stringList);
     else if (k === "ignoredWhenPresent") r.ignoredWhenPresent = kindMap(x, w, kindList);
+    else if (k === "failsWhenPresent") {
+      if (!Array.isArray(x)) throw new Error(`${w}: expected a list of source-kind lists`);
+      r.failsWhenPresent = x.map((set, i) => kindList(set, `${w}[${i}]`));
+    }
     else if (k === "names") r.names = kindMap(x, w, stringList);
     else if (k === "builtinWhenHint") {
       if (x !== "chatTemplateType" && x !== "toolParserType") throw new Error(`${w}: unknown hint`);
@@ -297,6 +303,7 @@ function resolver(model: ModelRecord, index: ModelIndex, table: PrecedenceTable,
   const order = table.order[profile] ?? [];
   const rules: ProfileRules = (table as Partial<PrecedenceRules>).rules?.[profile] ?? {};
   const ignored = (kind: SourceKind) => (rules.ignoredWhenPresent?.[kind] ?? []).some((k) => index.present.has(k));
+  const fails = (rules.failsWhenPresent ?? []).some((set) => set.every((k) => index.present.has(k)));
 
   const find = (kind: SourceKind, name: string): ExtractedTemplate | undefined => {
     const readable = rules.names?.[kind];
@@ -323,7 +330,7 @@ function resolver(model: ModelRecord, index: ModelIndex, table: PrecedenceTable,
 
   return {
     load(name) {
-      if (rules.builtinWhenHint && model.hints[rules.builtinWhenHint] !== undefined) return undefined;
+      if (fails || (rules.builtinWhenHint && model.hints[rules.builtinWhenHint] !== undefined)) return undefined;
       const t = lookup(name);
       const fb = rules.fallback;
       if (name !== "default" || !fb) return t;

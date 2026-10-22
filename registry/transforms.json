@@ -19,6 +19,11 @@
       "id": "fold-system-into-first-user",
       "description": "A leading system message is not rendered under its own role: its content, followed by a blank line, is prefixed to the first user turn.",
       "source": "mlx-community/gemma-3-1b-it-4bit@2d44e83dc9e80843d22fb941d3d699a0b1351aa6:tokenizer_config.json chat_template lines 2-14 and 27"
+    },
+    {
+      "id": "drop-past-analysis",
+      "description": "A past assistant turn renders only its content, on the final channel; its thinking (the analysis channel) is dropped. A tool-call turn's analysis is kept only while no later assistant turn without tool calls follows.",
+      "source": "mlx-community/gpt-oss-120b-MXFP4-Q8@81e5ac3ad0af6efb1298a8e8c7a10ed2990c137b:chat_template.jinja lines 273-295 and 312-314"
     }
   ]
 }

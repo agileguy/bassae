@@ -1,0 +1,12 @@
+{
+  "entries": [
+    {
+      "family": "fixture",
+      "repo": "bassae-fixtures/unparseable-with",
+      "revision": "0123456789abcdef0123456789abcdef01234567",
+      "path": "chat_template.jinja",
+      "templateName": "default",
+      "sha256": "f33a1551a53970cc67a010834698b5e1c71face8d008fe5f4c18b2b3aea0b480"
+    }
+  ]
+}
