@@ -9,12 +9,13 @@ import {
   BENIGN_UNIMPLEMENTED_FILTERS,
   correlateSpans,
   DANGEROUS_FILTERS,
-  IMPLEMENTED_FILTERS,
-  IMPLEMENTED_GLOBALS,
   IMPLEMENTED_TESTS,
+  JINJA2_BUILTIN_FILTERS,
+  JINJA2_BUILTIN_TESTS,
   LineMap,
   type Node,
   sourceOrderLeaves,
+  UNIMPLEMENTED_CALLABLE_GLOBALS,
 } from "./support.ts";
 
 // Templates larger than this are not parsed in-process; the library's
@@ -27,8 +28,14 @@ export interface UnsupportedConstruct {
   name: string;
   /** HIGH for exec gadgets and unparseable constructs, MEDIUM for benign data filters. */
   severity: "HIGH" | "MEDIUM";
+  /** Which use of `name` is unsupported, when the library implements other uses of it. */
+  form?: string;
+  /** Why it is flagged, when that is not "the library lacks it". */
+  reason?: string;
   span?: Span;
 }
+
+const NOT_BUILTIN = "is not a jinja2 builtin";
 
 export interface ParseOutcome {
   pre: PreLexResult;
@@ -66,30 +73,57 @@ export function parseTemplate(text: string): ParseOutcome {
   return { pre, lines, program, spans, parseError, unsupported, tooLarge: false };
 }
 
-// Walk the AST for filters, tests and global names the library parses but does
-// not implement. Unparseable statements never reach here; they surface as a
-// parse error whose text names the construct.
+// Walk the AST for filters, tests and globals the library parses but does not
+// implement, and for filter and test names that are not jinja2 builtins.
+// Unparseable statements never reach here; they surface as a parse error whose
+// text names the construct.
 function findUnsupported(program: Node, spans: Map<Node, Span>): UnsupportedConstruct[] {
   const out: UnsupportedConstruct[] = [];
   const seen = new Set<string>();
+  const add = (u: UnsupportedConstruct): void => {
+    const key = `${u.kind}:${u.name}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(u);
+  };
 
-  const filterName = (filter: Node): Node => (filter.type === "CallExpression" ? (filter.callee as Node) : filter);
+  const classifyFilter = (name: string, at: Node, form?: string): void => {
+    const span = spans.get(at);
+    if (!JINJA2_BUILTIN_FILTERS.has(name)) add({ kind: "filter", name, severity: "HIGH", form, reason: NOT_BUILTIN, span });
+    else if (DANGEROUS_FILTERS.has(name)) add({ kind: "filter", name, severity: "HIGH", form, span });
+    else if (BENIGN_UNIMPLEMENTED_FILTERS.has(name)) add({ kind: "filter", name, severity: "MEDIUM", form, span });
+  };
+
+  const classifyTest = (name: string, at: Node, form?: string): void => {
+    const span = spans.get(at);
+    if (!JINJA2_BUILTIN_TESTS.has(name)) add({ kind: "test", name, severity: "HIGH", form, reason: NOT_BUILTIN, span });
+    else if (!IMPLEMENTED_TESTS.has(name)) add({ kind: "test", name, severity: "MEDIUM", form, span });
+  };
+
+  // map('upper'), reject('in', xs) and selectattr('a', 'eq', 1) name another
+  // filter or test by string; classify that name as if it were used directly.
+  const checkNamedArg = (name: string, args: Node[]): void => {
+    const positional = args.filter((a) => a.type !== "KeywordArgumentExpression");
+    const at = name === "selectattr" || name === "rejectattr" ? 1 : 0;
+    const arg = positional[at];
+    if (arg?.type !== "StringLiteral") return;
+    const named = String(arg.value);
+    if (name === "map") classifyFilter(named, arg, "named in map()");
+    else if (name === "select" || name === "reject" || name === "selectattr" || name === "rejectattr") classifyTest(named, arg, `named in ${name}()`);
+  };
 
   const checkFilter = (filter: Node): void => {
-    const id = filterName(filter);
+    const id = filter.type === "CallExpression" ? (filter.callee as Node) : filter;
     const name = String(id.value);
-    const key = `filter:${name}`;
-    if (seen.has(key)) return;
+    const args = filter.type === "CallExpression" ? (filter.args as Node[]) : [];
     // `map` is only implemented with attribute=; a positional arg (e.g. map('upper'))
     // throws at render, so it is a benign MEDIUM, not a code-exec HIGH.
-    const mapMisuse = name === "map" && filter.type === "CallExpression" && !(filter.args as Node[]).some((a) => a.type === "KeywordArgumentExpression");
-    if (DANGEROUS_FILTERS.has(name)) {
-      seen.add(key);
-      out.push({ kind: "filter", name, severity: "HIGH", span: spans.get(id) });
-    } else if (!IMPLEMENTED_FILTERS.has(name) || BENIGN_UNIMPLEMENTED_FILTERS.has(name) || mapMisuse) {
-      seen.add(key);
-      out.push({ kind: "filter", name, severity: "MEDIUM", span: spans.get(id) });
+    if (name === "map" && filter.type === "CallExpression" && !args.some((a) => a.type === "KeywordArgumentExpression")) {
+      add({ kind: "filter", name, severity: "MEDIUM", form: "positional filter argument", span: spans.get(id) });
+    } else {
+      classifyFilter(name, id);
     }
+    checkNamedArg(name, args);
   };
 
   const visit = (node: unknown): void => {
@@ -99,18 +133,30 @@ function findUnsupported(program: Node, spans: Map<Node, Span>): UnsupportedCons
       return;
     }
     const n = node as Node;
-    if (n.type === "FilterExpression") checkFilter(n.filter as Node);
-    else if (n.type === "FilterStatement") checkFilter(n.filter as Node);
-    else if (n.type === "TestExpression") {
-      const id = n.test as Node;
-      const name = String(id.value);
-      const key = `test:${name}`;
-      if (!IMPLEMENTED_TESTS.has(name) && !seen.has(key)) {
-        seen.add(key);
-        out.push({ kind: "test", name, severity: "MEDIUM", span: spans.get(id) });
+    // Children that hold a name rather than an expression: a filter or test
+    // name, a dotted attribute name, a keyword-argument name.
+    let skip: string | undefined;
+    if (n.type === "FilterExpression" || n.type === "FilterStatement") {
+      const filter = n.filter as Node;
+      checkFilter(filter);
+      if (filter.type === "CallExpression") visit(filter.args);
+      skip = "filter";
+    } else if (n.type === "TestExpression") {
+      classifyTest(String((n.test as Node).value), n.test as Node);
+      skip = "test";
+    } else if (n.type === "MemberExpression" && !n.computed) {
+      skip = "property";
+    } else if (n.type === "KeywordArgumentExpression") {
+      skip = "key";
+    } else if (n.type === "CallExpression") {
+      const callee = n.callee as Node;
+      if (callee.type === "Identifier" && UNIMPLEMENTED_CALLABLE_GLOBALS.has(String(callee.value))) {
+        add({ kind: "global", name: String(callee.value), severity: "HIGH", form: "called", span: spans.get(callee) });
       }
+    } else if (n.type === "Identifier" && n.value === "self") {
+      add({ kind: "global", name: "self", severity: "HIGH", span: spans.get(n) });
     }
-    for (const v of Object.values(n)) visit(v);
+    for (const [k, v] of Object.entries(n)) if (k !== skip) visit(v);
   };
   visit(program);
   return out;

@@ -6,6 +6,7 @@ import type { Finding, Span } from "../types.ts";
 import type { ParseOutcome } from "../parse/parse.ts";
 import {
   ENGINE_GLOBALS,
+  ENGINE_PROBE_TESTS,
   EXEC_SURFACES,
   GADGETS,
   hasDunder,
@@ -126,12 +127,23 @@ export function runCodeExec(ctx: RuleCtx): Finding[] {
       if (name === "attr" || name === "format") {
         add("dynamic_attribute", `'|${name}' reaches attributes by name`, id);
       }
+      // ISC-15.1 — select('filter') and friends run the engine-probe test by name.
+      if (filter.type === "CallExpression") {
+        const positional = (filter.args as Node[]).filter((a) => a.type !== "KeywordArgumentExpression");
+        const arg = name === "select" || name === "reject" ? positional[0] : name === "selectattr" || name === "rejectattr" ? positional[1] : undefined;
+        if (arg?.type === "StringLiteral" && ENGINE_PROBE_TESTS.has(String(arg.value))) {
+          add("engine_fingerprint", `${name}('${String(arg.value)}') asks the engine whether a ${String(arg.value)} exists`, arg);
+        }
+      }
     }
 
-    // ISC-15.1 — `is defined` / `is undefined` on an engine global.
+    // ISC-15.1 — `is defined` / `is undefined` on an engine global, and `is filter` / `is test`.
     if (n.type === "TestExpression") {
       const test = String((n.test as Node).value);
       const operand = n.operand as Node;
+      if (ENGINE_PROBE_TESTS.has(test)) {
+        add("engine_fingerprint", `'is ${test}' asks the engine whether a ${test} exists`, n.test as Node);
+      }
       if ((test === "defined" || test === "undefined") && operand.type === "Identifier" && ENGINE_GLOBALS.has(String(operand.value))) {
         findings.push({
           ruleId: "engine_fingerprint",

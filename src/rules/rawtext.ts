@@ -5,7 +5,7 @@
 // these add the specific offending spans.
 
 import type { Finding, RuleId, Span } from "../types.ts";
-import { ENGINE_GLOBALS, EXEC_SURFACES, GADGETS, LineMap } from "../parse/support.ts";
+import { ENGINE_GLOBALS, ENGINE_PROBE_TESTS, EXEC_SURFACES, GADGETS, LineMap } from "../parse/support.ts";
 import type { TextRun } from "../parse/prelexer.ts";
 
 interface RawPattern {
@@ -32,6 +32,16 @@ const PATTERNS: RawPattern[] = [
     ruleId: "engine_fingerprint",
     re: new RegExp(`\\b(${[...ENGINE_GLOBALS].join("|")})\\s+is\\s+(not\\s+)?(un)?defined\\b`, "g"),
     message: (m) => `tests engine global '${m[1]}' with 'is defined'`,
+  },
+  {
+    ruleId: "engine_fingerprint",
+    re: new RegExp(`\\bis\\s+(?:not\\s+)?(${[...ENGINE_PROBE_TESTS].join("|")})\\b`, "g"),
+    message: (m) => `'is ${m[1]}' asks the engine whether a ${m[1]} exists`,
+  },
+  {
+    ruleId: "engine_fingerprint",
+    re: new RegExp(`\\b(?:select|reject|selectattr|rejectattr)\\s*\\([^)]*?['"](${[...ENGINE_PROBE_TESTS].join("|")})['"]`, "g"),
+    message: (m) => `'${m[1]}' named in select/reject asks the engine whether it exists`,
   },
 ];
 

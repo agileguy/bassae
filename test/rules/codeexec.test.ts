@@ -108,3 +108,21 @@ test("a known-good template still runs the code-exec rules (only unanalyzable is
   // knownGood suppresses the parse-failure HIGH, not a real gadget traversal.
   expect(scan("{{ cycler.foo }}", true).some((f) => f.ruleId === "gadget_traversal")).toBe(true);
 });
+
+// ISC-15.1 — `is filter` / `is test` ask the engine what it has (team-lead, 2026-10-22).
+test("ISC-15.1: `is filter` and `is test` are HIGH engine_fingerprint, span on the test name", () => {
+  for (const src of ["{% if 'attr' is filter %}x{% endif %}", "{% if 'banana' is not test %}x{% endif %}"]) {
+    const f = scan(src).find((x) => x.ruleId === "engine_fingerprint");
+    expect(f?.severity).toBe("HIGH");
+    const name = src.includes("filter") ? "filter" : "test";
+    expect(f?.excerpt).toBe(name);
+    expect(f?.span?.start).toBe(src.indexOf(name));
+  }
+  // The same probe named by string inside select/reject.
+  expect(highs("{{ ['attr', 'x'] | select('filter') | list }}")).toContain("engine_fingerprint");
+  expect(highs("{{ ['in'] | reject('test') | list }}")).toContain("engine_fingerprint");
+  // Raw-text fallback on a template the library cannot parse.
+  expect(highs("{% with a = 1 %}{% if 'attr' is filter %}x{% endif %}{% endwith %}")).toContain("engine_fingerprint");
+  // A {% filter %} block is not the test.
+  expect(highs("{% filter upper %}hi{% endfilter %}")).not.toContain("engine_fingerprint");
+});
