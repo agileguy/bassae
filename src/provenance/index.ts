@@ -16,10 +16,10 @@ export function upstreamCandidates(model: ModelRecord): string[] {
   throw new Error("not implemented");
 }
 
-/** Fetches every chat template of `repo` at the pinned `revision` (--online --upstream). The only network call bassae makes (ISC-41). */
-export async function fetchUpstream(repo: string, revision: string, fetcher?: typeof fetch): Promise<Baseline[]> {
-  throw new Error("not implemented");
-}
+// fetchUpstream(repo, revision, fetcher?, options?) fetches every chat template of `repo` at the pinned `revision`
+// (--online --upstream), the only network call bassae makes (ISC-41). It lives in online.ts so the network code
+// stays in one file.
+export { type FetchOptions, fetchUpstream, UpstreamError } from "./online.ts";
 
 /** The trusted baseline for a template: the registry entry it matches or that is pinned to its repo, else a fetched upstream, else `none` (ISC-41.2). Never a sibling file, never a `general.*` guess. */
 export function selectBaseline(template: ExtractedTemplate, model: ModelRecord, registry: Registry, upstream?: readonly Baseline[]): Baseline {
