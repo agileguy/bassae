@@ -1,11 +1,13 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { truncateSync } from "node:fs";
 import { join } from "node:path";
 import { readHfModel } from "../../src/hf/index.ts";
 import { MAX_SOURCE_BYTES } from "../../src/hf/sources.ts";
 import type { ExtractedTemplate, ModelRecord } from "../../src/types.ts";
-import { link, makeTree } from "../helpers/tree.ts";
+import { link, makeTree, removeTrees } from "../helpers/tree.ts";
+
+afterAll(removeTrees);
 
 const json = (v: unknown) => JSON.stringify(v);
 const sha = (s: string | Uint8Array) => createHash("sha256").update(s).digest("hex");

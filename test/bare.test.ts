@@ -1,8 +1,10 @@
-import { expect, test } from "bun:test";
+import { afterAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { readBareTemplate } from "../src/bare.ts";
-import { link, makeTree } from "./helpers/tree.ts";
+import { link, makeTree, removeTrees } from "./helpers/tree.ts";
+
+afterAll(removeTrees);
 
 test("ISC-39: a bare .jinja file becomes a one-template record", async () => {
   const body = "{% for m in messages %}{{ m.content }}{% endfor %}";

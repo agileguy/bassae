@@ -89,7 +89,8 @@ class Walker {
       if (SKIP_NAMES.has(entry.name)) continue;
       const child = join(path, entry.name);
       if (entry.isFile()) await this.file(child);
-      else if (entry.isDirectory() || entry.isSymbolicLink()) {
+      else {
+        // Links, directories, and entries whose type the filesystem did not report.
         const st = await this.stat(child);
         if (st) await this.visit(child, st);
       }

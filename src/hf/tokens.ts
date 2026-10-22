@@ -1,3 +1,5 @@
+import { isObject } from "./sources.ts";
+
 // Every added token counts, special or not: Qwen3's <think> and <tool_call> are added with
 // special=false, and llama.cpp keeps them as user-defined tokens, which the GGUF side treats
 // as scaffolding too. Leaving them out would make stock templates look like injected text.
@@ -19,8 +21,4 @@ function addContent(out: Set<string>, token: unknown): void {
 
 function field(value: unknown, key: string): unknown {
   return isObject(value) ? value[key] : undefined;
-}
-
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

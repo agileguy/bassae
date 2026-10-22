@@ -1,11 +1,13 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { discover, walk } from "../src/discover.ts";
 import { hfCacheLocations } from "../src/hf/cache.ts";
 import type { DiscoveredModel } from "../src/types.ts";
-import { GGUF_BYTES, link, makeTree } from "./helpers/tree.ts";
+import { GGUF_BYTES, link, makeTree, removeTrees } from "./helpers/tree.ts";
+
+afterAll(removeTrees);
 
 const ids = (models: DiscoveredModel[], format: "gguf" | "hf") =>
   models.filter((m) => m.format === format).map((m) => m.id).sort();
