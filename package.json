@@ -1,0 +1,20 @@
+{
+  "name": "bassae",
+  "version": "0.1.0",
+  "description": "Finds MLX and GGUF models, extracts their chat templates, and flags malicious ones",
+  "type": "module",
+  "private": true,
+  "bin": { "bassae": "src/cli.ts" },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@huggingface/jinja": "0.5.10"
+  },
+  "devDependencies": {
+    "@huggingface/gguf": "0.4.6",
+    "@types/bun": "latest",
+    "typescript": "^5.6.0"
+  }
+}
