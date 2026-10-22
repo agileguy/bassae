@@ -112,6 +112,7 @@ for (const [sha, list] of [...bySha].sort((a, b) => a[1][0]!.source.path.localeC
     `${String(high.length).padStart(4)} ${String(medium.length).padStart(4)}  ${result.complete ? "yes " : "NO  "}  ${sha.slice(0, 12)}  ${t.source.name.padEnd(10)}  ${where}${list.length > 1 ? ` (+${list.length - 1} more)` : ""}`,
   );
   if (verbose) {
+    for (const other of list.slice(1)) console.log(`        also ${other.source.path.replace(homedir(), "~")}`);
     for (const f of result.findings) {
       const at = f.span ? `${f.span.line}:${f.span.col}` : "-";
       console.log(`        ${f.severity} ${f.ruleId} ${at} ${f.message} ${JSON.stringify(f.excerpt ?? "")}`);

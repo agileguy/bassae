@@ -19,7 +19,7 @@ export function analyzeCodeExec(ctx: AnalysisContext): RuleResult {
   const findings: Finding[] = [];
 
   // ISC-12 / ISC-12.1 / ISC-12.2 — coverage.
-  findings.push(...runUnanalyzable(outcome, ctx.knownGood, base));
+  findings.push(...runUnanalyzable(outcome, ctx.knownGood, base, ctx.template.text));
 
   if (outcome.program) {
     const ruleCtx: RuleCtx = {

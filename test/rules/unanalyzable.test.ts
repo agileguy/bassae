@@ -65,3 +65,18 @@ test("a benign unimplemented filter is MEDIUM and marks the template incomplete"
   expect(r.findings.some((f) => f.severity === "HIGH")).toBe(false);
   expect(r.complete).toBe(false);
 });
+
+// map('upper') is the gemma-4 stock pattern: MEDIUM, naming the positional form,
+// with the span and excerpt on the filter name so Phase 3 can locate it.
+test("map with a positional filter name is MEDIUM, names the form, and points at 'map'", () => {
+  const src = "{{ (v | map('upper') | list) }}";
+  const r = scan(src);
+  const f = r.findings.find((x) => x.ruleId === "unanalyzable");
+  expect(f?.severity).toBe("MEDIUM");
+  expect(f?.message).toContain("'map' (positional filter argument)");
+  expect(f?.excerpt).toBe("map");
+  expect(f?.span?.start).toBe(src.indexOf("map"));
+  expect(r.complete).toBe(false);
+  // The implemented attribute= form is not a finding.
+  expect(scan("{{ v | map(attribute='name') | list }}").findings).toHaveLength(0);
+});

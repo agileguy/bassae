@@ -22,7 +22,7 @@ function namedConstruct(message: string): string | undefined {
   return m?.[1] ?? m?.[2] ?? m?.[3];
 }
 
-export function runUnanalyzable(outcome: ParseOutcome, knownGood: boolean, base: Base): Finding[] {
+export function runUnanalyzable(outcome: ParseOutcome, knownGood: boolean, base: Base, text: string): Finding[] {
   const findings: Finding[] = [];
 
   const mk = (severity: Severity, message: string, span?: Finding["span"]): Finding => ({
@@ -53,7 +53,10 @@ export function runUnanalyzable(outcome: ParseOutcome, knownGood: boolean, base:
 
   // Parsed, but uses constructs the library does not implement (ISC-12.1).
   for (const u of outcome.unsupported) {
-    findings.push(mk(u.severity, `unsupported ${u.kind} '${u.name}' is not implemented by @huggingface/jinja`, u.span));
+    const what = u.form ? `'${u.name}' (${u.form})` : `'${u.name}'`;
+    const f = mk(u.severity, `unsupported ${u.kind} ${what} is not implemented by @huggingface/jinja`, u.span);
+    if (u.span) f.excerpt = text.slice(u.span.start, u.span.end);
+    findings.push(f);
   }
   return findings;
 }

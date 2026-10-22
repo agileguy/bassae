@@ -27,6 +27,8 @@ export interface UnsupportedConstruct {
   name: string;
   /** HIGH for exec gadgets and unparseable constructs, MEDIUM for benign data filters. */
   severity: "HIGH" | "MEDIUM";
+  /** Which use of `name` is unsupported, when the library implements other uses of it. */
+  form?: string;
   span?: Span;
 }
 
@@ -88,7 +90,7 @@ function findUnsupported(program: Node, spans: Map<Node, Span>): UnsupportedCons
       out.push({ kind: "filter", name, severity: "HIGH", span: spans.get(id) });
     } else if (!IMPLEMENTED_FILTERS.has(name) || BENIGN_UNIMPLEMENTED_FILTERS.has(name) || mapMisuse) {
       seen.add(key);
-      out.push({ kind: "filter", name, severity: "MEDIUM", span: spans.get(id) });
+      out.push({ kind: "filter", name, severity: "MEDIUM", form: mapMisuse ? "positional filter argument" : undefined, span: spans.get(id) });
     }
   };
 
@@ -105,6 +107,7 @@ function findUnsupported(program: Node, spans: Map<Node, Span>): UnsupportedCons
       const id = n.test as Node;
       const name = String(id.value);
       const key = `test:${name}`;
+      // An unimplemented test is a render error, and a test only sees the value it is applied to: MEDIUM.
       if (!IMPLEMENTED_TESTS.has(name) && !seen.has(key)) {
         seen.add(key);
         out.push({ kind: "test", name, severity: "MEDIUM", span: spans.get(id) });

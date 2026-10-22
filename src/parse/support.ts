@@ -28,12 +28,31 @@ export const IMPLEMENTED_FILTERS = new Set([
   "selectattr", "rejectattr", "map", "default", "replace", "dictsort", "keys", "values", "get",
 ]);
 
-// Jinja2 builtin filters the library lacks. These only reshape data and fail
-// loudly at render, so they are MEDIUM unanalyzable rather than a code-exec HIGH
-// (team-lead, 2026-10-22). Moving any back to HIGH is a one-line change.
+// Jinja2 builtin filters the library lacks, each MEDIUM unanalyzable rather
+// than a code-exec HIGH (team-lead, 2026-10-22). Moving one to HIGH is a
+// one-line change. Two more MEDIUM paths live in parse.ts: `map` with a
+// positional filter name (map('upper') throws at render, only `attribute=` is
+// implemented) and any test outside IMPLEMENTED_TESTS (undefined test, render error).
 export const BENIGN_UNIMPLEMENTED_FILTERS = new Set([
-  "reject", "select", "count", "sum", "min", "max", "batch", "slice", "groupby", "wordcount",
-  "round", "center", "truncate", "urlize", "striptags", "pprint", "e", "escape", "forceescape",
+  "reject", //      calls a named test on each item; tests cannot reach attributes
+  "select", //      same as reject, inverted
+  "count", //       alias of length
+  "sum", //         arithmetic over items, attribute= is a dotted lookup like map
+  "min", //         comparison over items, attribute= as in sum
+  "max", //         comparison over items, attribute= as in sum
+  "batch", //       regroups a sequence into fixed-size chunks
+  "slice", //       regroups a sequence into n columns
+  "groupby", //     regroups by a dotted attribute path, no call
+  "wordcount", //   returns an int
+  "round", //       numeric only
+  "center", //      pads a string
+  "truncate", //    shortens a string
+  "urlize", //      wraps URLs in <a>, string to string
+  "striptags", //   removes markup, string to string
+  "pprint", //      repr of the value, no attribute access by name
+  "e", //           alias of escape
+  "escape", //      HTML-escapes a string
+  "forceescape", // HTML-escapes a string even when marked safe
 ]);
 
 // Filters that are HIGH when the library lacks them: `attr`/`format` reach
