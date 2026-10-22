@@ -2,7 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { discover, walk } from "../src/discover.ts";
+import { discover } from "../src/discover.ts";
 import { hfCacheLocations } from "../src/hf/cache.ts";
 import type { DiscoveredModel } from "../src/types.ts";
 import { GGUF_BYTES, link, makeTree, removeTrees } from "./helpers/tree.ts";
@@ -11,6 +11,9 @@ afterAll(removeTrees);
 
 const ids = (models: DiscoveredModel[], format: "gguf" | "hf") =>
   models.filter((m) => m.format === format).map((m) => m.id).sort();
+
+// For the tests about models; findings have tests of their own.
+const found = async (...args: Parameters<typeof discover>) => (await discover(...args)).models;
 
 const byId = (models: DiscoveredModel[], id: string) => {
   const m = models.find((x) => x.id === id);
@@ -28,7 +31,7 @@ describe("ISC-1: GGUF by magic only", () => {
       "empty.gguf": "",
       "notes.txt": "GGU",
     });
-    const models = await discover([root]);
+    const models = await found([root]);
     expect(ids(models, "gguf")).toEqual(
       [
         join(root, "model.gguf"),
@@ -41,7 +44,7 @@ describe("ISC-1: GGUF by magic only", () => {
 
   test("a GGUF file passed directly as a root is found", async () => {
     const root = makeTree({ "blob": GGUF_BYTES });
-    const models = await discover([join(root, "blob")]);
+    const models = await found([join(root, "blob")]);
     expect(models).toEqual([{ format: "gguf", id: join(root, "blob"), paths: [join(root, "blob")] }]);
   });
 });
@@ -57,34 +60,83 @@ describe("ISC-2: every HF/MLX model directory", () => {
       f: { "config.json": "{}", "model.safetensors": "x" },
       g: { h: { "tokenizer_config.json": "{}" } },
     });
-    const models = await discover([root]);
+    const models = await found([root]);
     expect(ids(models, "hf")).toEqual(["a", "b", "c", "d", "e", "g/h"].map((d) => join(root, d)));
   });
 
   test("a model directory passed directly as a root is found", async () => {
     const root = makeTree({ m: { "chat_template.jinja": "x" } });
-    expect(ids(await discover([join(root, "m")]), "hf")).toEqual([join(root, "m")]);
+    expect(ids(await found([join(root, "m")]), "hf")).toEqual([join(root, "m")]);
   });
 
   test(".no_exist sentinel trees are skipped", async () => {
     const root = makeTree({
       "models--org--name": { ".no_exist": { abc: { "chat_template.jinja": "", "processor_config.json": "" } } },
     });
-    expect(await discover([root])).toEqual([]);
+    expect(await found([root])).toEqual([]);
   });
 
   test("a GGUF inside a model directory is its own model", async () => {
     const root = makeTree({ m: { "tokenizer_config.json": "{}", "q8.gguf": GGUF_BYTES } });
-    const models = await discover([root]);
+    const models = await found([root]);
     expect(ids(models, "hf")).toEqual([join(root, "m")]);
     expect(ids(models, "gguf")).toEqual([join(root, "m/q8.gguf")]);
   });
 
-  test("missing roots and unreadable entries do not throw, and are reported by walk", async () => {
+  test("missing roots and unreadable entries do not throw, and are findings", async () => {
     const root = makeTree({ m: { "chat_template.jinja": "x" }, dangling: link("nowhere") });
-    const { models, errors } = await walk([join(root, "missing"), root]);
+    const { models, findings } = await discover([join(root, "missing"), root]);
     expect(ids(models, "hf")).toEqual([join(root, "m")]);
-    expect(errors.map((e) => e.path).sort()).toEqual([join(root, "dangling"), join(root, "missing")]);
+    expect(findings.map((f) => [f.ruleId, f.severity, f.file])).toEqual([
+      ["scanner_error", "MEDIUM", join(root, "missing")],
+      ["scanner_error", "MEDIUM", join(root, "dangling")],
+    ]);
+  });
+});
+
+describe("bounded walk", () => {
+  test("the entry budget stops the walk with a HIGH finding, never silently", async () => {
+    const root = makeTree({ a: { "chat_template.jinja": "x" }, b: { c: {}, d: {}, e: {} }, z: { "chat_template.jinja": "x" } });
+    const { models, findings } = await discover([root], { maxEntries: 4 });
+    expect(findings.map((f) => [f.ruleId, f.severity])).toEqual([["scanner_error", "HIGH"]]);
+    expect(findings[0]!.message).toContain("entry budget");
+    expect(ids(models, "hf")).toEqual([join(root, "a")]);
+  });
+
+  test("the symlink budget stops following links with a HIGH finding; real directories are still walked", async () => {
+    const root = makeTree({
+      l1: link("real/m"),
+      l2: link("real/m"),
+      l3: link("real/m"),
+      l4: link("w"),
+      real: { m: { "chat_template.jinja": "x" } },
+      w: { "chat_template.jinja": "x" },
+    });
+    const { models, findings } = await discover([root], { maxSymlinks: 2 });
+    expect(findings.map((f) => [f.ruleId, f.severity, f.file])).toEqual([["scanner_error", "HIGH", join(root, "l3")]]);
+    expect(findings[0]!.detail?.skipped).toBe(2);
+    expect(ids(models, "hf")).toEqual([join(root, "real/m"), join(root, "w")]);
+  });
+
+  test("links into /dev are reported and not followed", async () => {
+    // /dev/fd resolves into /proc on Linux and stays in /dev on macOS.
+    const root = makeTree({ d: link("/dev"), fd: link("/dev/fd"), n: link("/dev/null"), m: { "chat_template.jinja": "x" } });
+    const { models, findings } = await discover([root], { maxEntries: 50 });
+    expect(ids(models, "hf")).toEqual([join(root, "m")]);
+    expect(findings.map((f) => [f.ruleId, f.severity, f.file])).toEqual([
+      ["scanner_error", "MEDIUM", join(root, "d")],
+      ["scanner_error", "MEDIUM", join(root, "fd")],
+      ["scanner_error", "MEDIUM", join(root, "n")],
+    ]);
+  });
+
+  test("aliases expand into every reaching path without scanning every alias", async () => {
+    // 300 links to one directory: the path list stops at its cap rather than growing without end.
+    const links = Object.fromEntries(Array.from({ length: 300 }, (_, i) => [`l${String(i).padStart(3, "0")}`, link("real")]));
+    const root = makeTree({ ...links, real: { m: { "chat_template.jinja": "x" } } });
+    const { models, findings } = await discover([root]);
+    expect(findings).toEqual([]);
+    expect(byId(models, join(root, "real/m")).paths).toHaveLength(256);
   });
 });
 
@@ -103,7 +155,7 @@ describe("ISC-11: HF cache file symlinks", () => {
 
   test("each snapshot is a model directory with its cache location", async () => {
     const root = cache();
-    const models = await discover([root]);
+    const models = await found([root]);
     const snap = (r: string) => join(root, "models--org--name/snapshots", r);
     expect(ids(models, "hf")).toEqual([snap("r1"), snap("r2")]);
     expect(byId(models, snap("r1")).hfCache).toEqual({ repo: "org/name", revision: "r1", pathInRepo: "" });
@@ -112,7 +164,7 @@ describe("ISC-11: HF cache file symlinks", () => {
 
   test("a blob reached from several snapshots is one model listing every path", async () => {
     const tree = cache();
-    const models = await discover([tree]);
+    const models = await found([tree]);
     const blob = join(tree, "models--org--name/blobs/bbb");
     expect(ids(models, "gguf")).toEqual([blob]);
     const m = byId(models, blob);
@@ -133,7 +185,7 @@ describe("ISC-11.1: directory symlinks", () => {
       omlx: { models: { ft: link("../../lab/runs/r1/fused") } },
       lab: { runs: { r1: { fused: { "chat_template.jinja": "x", "tokenizer_config.json": "{}" } } } },
     });
-    const models = await discover([join(root, "omlx")]);
+    const models = await found([join(root, "omlx")]);
     expect(models).toEqual([{ format: "hf", id: join(root, "lab/runs/r1/fused"), paths: [join(root, "omlx/models/ft")] }]);
   });
 
@@ -142,7 +194,7 @@ describe("ISC-11.1: directory symlinks", () => {
       real: { m1: { "tokenizer_config.json": "{}", "w.gguf": GGUF_BYTES } },
       links: { m1: link("../real/m1"), parent: link("../real") },
     });
-    const models = await discover([join(root, "links"), join(root, "real")]);
+    const models = await found([join(root, "links"), join(root, "real")]);
     expect(ids(models, "hf")).toEqual([join(root, "real/m1")]);
     expect(byId(models, join(root, "real/m1")).paths.sort()).toEqual(
       [join(root, "links/m1"), join(root, "links/parent/m1"), join(root, "real/m1")].sort(),
@@ -163,13 +215,18 @@ describe("ISC-11.1: directory symlinks", () => {
       x: link("y"),
       y: link("x"),
     });
-    const models = await discover([root]);
+    const { models, findings } = await discover([root]);
     expect(models).toEqual([{ format: "hf", id: join(root, "a"), paths: [join(root, "a")] }]);
+    // Directory loops are quiet; links that resolve to nothing are unreadable entries.
+    expect(findings.map((f) => [f.ruleId, f.severity, f.file])).toEqual([
+      ["scanner_error", "MEDIUM", join(root, "x")],
+      ["scanner_error", "MEDIUM", join(root, "y")],
+    ]);
   });
 
   test("the same root given twice is walked once", async () => {
     const root = makeTree({ m: { "chat_template.jinja": "x" } });
-    const models = await discover([root, root]);
+    const models = await found([root, root]);
     expect(models).toEqual([{ format: "hf", id: join(root, "m"), paths: [join(root, "m")] }]);
   });
 
@@ -178,7 +235,7 @@ describe("ISC-11.1: directory symlinks", () => {
       hub: { "models--o--n": { snapshots: { r9: { "chat_template.jinja": "x" } } } },
       omlx: { n: link("../hub/models--o--n/snapshots/r9") },
     });
-    const models = await discover([join(root, "omlx")]);
+    const models = await found([join(root, "omlx")]);
     expect(models).toEqual([
       {
         format: "hf",
@@ -194,7 +251,7 @@ describe("ISC-11.1: directory symlinks", () => {
 const omlx = join(homedir(), ".omlx");
 const lab = join(homedir(), "mlx-lab");
 test.skipIf(!existsSync(omlx) || !existsSync(lab))("ISC-11.1 probe: ~/.omlx reports the three mlx-lab fine-tunes", async () => {
-  const models = await discover([omlx]);
+  const models = await found([omlx]);
   const fromLab = models.filter((m) => m.id.startsWith(lab + "/")).map((m) => m.paths.map((p) => p.slice(omlx.length + 1)));
   expect(fromLab.flat().sort()).toEqual(
     ["models/Qwen3-8B-sre-v1-150", "models/Qwen3-8B-sre-v1-300", "models/gemma-4-e4b-kp-alltime"].sort(),
