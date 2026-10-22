@@ -148,9 +148,10 @@ const killLive = () => {
 process.on("exit", killLive);
 
 // "exit" does not run when a signal ends the process, so the usual ones kill the workers too, every
-// time: a host program that lives through one may start more workers. When no one else listens, the
-// listener steps aside and raises the signal again, so it takes its default action as if we had not
-// been here, and cannot come back to us. Nothing runs on SIGKILL or an OOM kill: bwrap's
+// time: a host program that lives through one may start more workers. The listener goes ahead of any
+// the host has, so it counts them all, a once listener included, and leaves the signal to them; when
+// no one else listens, it steps aside and raises the signal again, so it takes its default action as
+// if we had not been here, and cannot come back to us. Nothing runs on SIGKILL or an OOM kill: bwrap's
 // --die-with-parent covers Linux. On macOS the orphaned worker runs on until it next writes to its
 // dead parent, at the end of the step it is in, and dies of the broken pipe. A step that never ends
 // dies at the worker's own CPU limit: 1.5 × timeoutMs and a second, rounded up to a whole second, so
@@ -166,7 +167,7 @@ function killLiveOnSignals(): void {
       process.off(signal, onSignal);
       process.kill(process.pid, signal);
     };
-    process.on(signal, onSignal);
+    process.prependListener(signal, onSignal);
   }
 }
 

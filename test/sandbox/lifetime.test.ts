@@ -130,18 +130,20 @@ test.skipIf(!status.available || process.platform !== "linux" || process.getuid?
   },
 );
 
-test.skipIf(!status.available)(
-  "SIGTERM to the renderer takes its worker down with it at once",
-  async () => {
-    const { survivors, ms, parentSignal } = await killMidRender("wait", "SIGTERM", 10_000);
-    console.log(`[sandbox] worker gone ${ms.toFixed(0)}ms after SIGTERM to its parent`);
-    expect(survivors).toEqual([]);
-    expect(ms).toBeLessThan(1000);
-    // The renderer's handler kills the workers, then lets the signal end the process as it would have.
-    expect(parentSignal).toBe("SIGTERM");
-  },
-  30_000,
-);
+for (const signal of ["SIGTERM", "SIGINT"] as const) {
+  test.skipIf(!status.available)(
+    `${signal} to a renderer with no listener of its own takes its worker down with it at once`,
+    async () => {
+      const { survivors, ms, parentSignal } = await killMidRender("wait", signal, 10_000);
+      console.log(`[sandbox] worker gone ${ms.toFixed(0)}ms after ${signal} to its parent`);
+      expect(survivors).toEqual([]);
+      expect(ms).toBeLessThan(1000);
+      // The renderer's handler kills the workers, then lets the signal end the process as it would have.
+      expect(parentSignal).toBe(signal);
+    },
+    30_000,
+  );
+}
 
 test.skipIf(!status.available)(
   "a host that lives through SIGINT and renders again has its new workers killed by the next SIGINT too",
@@ -169,6 +171,38 @@ test.skipIf(!status.available)(
     } finally {
       parent.kill("SIGKILL");
       for (const pid of seen) if (running(pid)) process.kill(pid, "SIGKILL");
+    }
+  },
+  30_000,
+);
+
+// The host's listener is a once listener added before the renderer's, which is gone by the time a listener
+// that ran after it could count the listeners: such a listener would think itself alone and end the process.
+test.skipIf(!status.available)(
+  "a host that shuts down in its own time on SIGTERM gets to finish, and its workers die at the signal",
+  async () => {
+    const parent = Bun.spawn([process.execPath, PARENT, "graceful"], { stdout: "pipe", stderr: "inherit" });
+    let workers: number[] = [];
+    try {
+      const out = new Response(parent.stdout).text();
+      while (descendants(parent.pid).length === 0) await Bun.sleep(50);
+      await Bun.sleep(500);
+      workers = descendants(parent.pid);
+      expect(workers.every(running)).toBe(true);
+      parent.kill("SIGTERM");
+      const start = performance.now();
+      while (workers.some(running) && performance.now() - start < 800) await Bun.sleep(20);
+      // Gone while the host is still a second into its shutdown, so the renderer killed them, not the exit.
+      const atSignal = { survivors: workers.filter(running), hostRunning: parent.exitCode === null && parent.signalCode === null };
+      await parent.exited;
+      expect({ atSignal, said: await out, exit: parent.signalCode ?? parent.exitCode }).toEqual({
+        atSignal: { survivors: [], hostRunning: true },
+        said: "rendering\nshut down\n",
+        exit: 0,
+      });
+    } finally {
+      parent.kill("SIGKILL");
+      for (const pid of workers) if (running(pid)) process.kill(pid, "SIGKILL");
     }
   },
   30_000,
