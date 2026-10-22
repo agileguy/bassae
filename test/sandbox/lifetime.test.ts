@@ -2,6 +2,7 @@
 // Each test runs a real renderer in its own process, kills that process mid-render, and watches the worker.
 
 import { expect, test } from "bun:test";
+import { readFileSync, statSync } from "node:fs";
 import { constants } from "node:os";
 import { join } from "node:path";
 import { sandboxAvailable } from "../../src/sandbox/index.ts";
@@ -11,6 +12,8 @@ import { encode } from "../../src/sandbox/protocol.ts";
 const status = await sandboxAvailable();
 const PARENT = join(import.meta.dir, "orphan-parent.ts");
 const WORKER = join(import.meta.dir, "../../src/sandbox/worker.ts");
+// Where a core-dumping death sends its core. A pipe to a handler, as on GitHub's Ubuntu runners, can hold the dying process for seconds.
+const CORE_PATTERN = process.platform === "linux" ? readFileSync("/proc/sys/kernel/core_pattern", "utf8").trim() : "-";
 
 /** Every process under root, found by walking ps's parent links. */
 function descendants(root: number): number[] {
@@ -64,21 +67,44 @@ test.skipIf(!status.available)(
       worker.stdin.write(encode({ t: "init", template: spin, maxOutputBytes: 1000, cpuMs: 500 }));
       worker.stdin.write(encode({ t: "req", request: { id: "a", context: {}, profile: "hf-default" } }));
       worker.stdin.end();
-      const [out, code] = await Promise.race([
-        Promise.all([new Response(worker.stdout).text(), worker.exited]),
-        Bun.sleep(10_000).then(() => ["", -1] as const),
-      ]);
+      const out = new Response(worker.stdout).text();
+      const err = new Response(worker.stderr).text();
+      const ended = await Promise.race([worker.exited.then(() => true), Bun.sleep(10_000).then(() => false)]);
       const ms = performance.now() - start;
-      console.log(`[sandbox] worker ended by ${worker.signalCode ?? `exit ${code}`} after ${ms.toFixed(0)}ms at cpuMs 500`);
-      expect(out).toBe('{"t":"ready"}\n{"t":"parsed"}\n');
+      const how = ended ? `ended by ${worker.signalCode ?? `exit ${worker.exitCode}`}` : "still running";
+      console.log(`[sandbox] worker ${how} after ${ms.toFixed(0)}ms at cpuMs 500, core_pattern ${CORE_PATTERN}`);
+      expect(ended).toBe(true);
+      console.log(`[sandbox] its stderr: ${(await err).trim() || "-"}`);
+      expect(await out).toBe('{"t":"ready"}\n{"t":"parsed"}\n');
       // bwrap reports a child killed by a signal as exit 128 + the signal.
-      expect(worker.signalCode === "SIGXCPU" || code === 128 + constants.signals.SIGXCPU).toBe(true);
+      expect(worker.signalCode === "SIGXCPU" || worker.exitCode === 128 + constants.signals.SIGXCPU).toBe(true);
       expect(ms).toBeLessThan(3000);
     } finally {
       worker.kill("SIGKILL");
     }
   },
   30_000,
+);
+
+// The kernel hands the /proc files of a process it will not dump to root, and leaves a dumpable one's with its
+// own uid. As root the two look alike, so this runs for an ordinary user only, as it does in CI.
+test.skipIf(!status.available || process.platform !== "linux" || process.getuid?.() === 0)(
+  "the worker turns off its own core dumps before it says it is ready",
+  async () => {
+    const owners: Record<string, number> = {};
+    const runs = { "plain bun": [process.execPath, "-e", "console.log('up'); setInterval(() => {}, 1000)"], worker: [process.execPath, "--no-install", WORKER] };
+    for (const [name, argv] of Object.entries(runs)) {
+      const proc = spawnSandboxed(argv)!;
+      try {
+        await proc.stdout.getReader().read();
+        const bun = descendants(proc.pid).find((pid) => readFileSync(`/proc/${pid}/comm`, "utf8").trim() === "bun");
+        owners[name] = statSync(`/proc/${bun}/status`).uid;
+      } finally {
+        proc.kill("SIGKILL");
+      }
+    }
+    expect(owners).toEqual({ "plain bun": process.getuid!(), worker: 0 });
+  },
 );
 
 test.skipIf(!status.available)(

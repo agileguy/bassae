@@ -2,6 +2,7 @@
 // that the parent enforces the caps itself instead of trusting the worker.
 // Usage: bun rogue-worker.ts <stall|wrong-id|claim-timeout|huge|exit|noisy|skip-ready|fat-error|wide-error|fat-parsed|xcpu>
 
+import { dlopen, FFIType } from "bun:ffi";
 import { encode, type RequestMessage } from "../../src/sandbox/protocol.ts";
 
 const mode = process.argv[2];
@@ -52,7 +53,10 @@ switch (mode) {
     setInterval(() => {}, 1000);
     break;
   case "xcpu":
-    // What the kernel does once a step has used its CPU allowance.
+    // What the kernel does once a step has used its CPU allowance, to a worker that has turned off core dumps as the real one does.
+    if (process.platform === "linux") {
+      dlopen("libc.so.6", { prctl: { args: [FFIType.i32, FFIType.u64, FFIType.u64, FFIType.u64, FFIType.u64], returns: FFIType.i32 } }).symbols.prctl(4, 0, 0, 0, 0);
+    }
     process.kill(process.pid, "SIGXCPU");
     setInterval(() => {}, 1000);
     break;

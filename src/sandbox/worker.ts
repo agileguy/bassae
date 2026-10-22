@@ -22,6 +22,19 @@ const { symbols: libc } = dlopen(process.platform === "darwin" ? "/usr/lib/libSy
 const rlimit = new BigUint64Array(2);
 if (libc.getrlimit(RLIMIT_CPU, ptr(rlimit)) !== 0) throw new Error("getrlimit(RLIMIT_CPU) failed");
 
+// SIGXCPU dumps core. Where core_pattern pipes the core to a handler, as systemd-coredump does on
+// GitHub's Ubuntu runners, the kernel holds the dying worker, pipes and all, until the handler has
+// read and analysed it: seconds, not milliseconds. A non-dumpable process skips the dump whatever
+// core_pattern says, and keeps its templates and contexts out of the host's crash store too.
+// macOS writes cores only to /cores, which only root may write, and the default RLIMIT_CORE is 0.
+if (process.platform === "linux") {
+  const PR_SET_DUMPABLE = 4;
+  const { symbols } = dlopen("libc.so.6", {
+    prctl: { args: [FFIType.i32, FFIType.u64, FFIType.u64, FFIType.u64, FFIType.u64], returns: FFIType.i32 },
+  });
+  if (symbols.prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) !== 0) throw new Error("prctl(PR_SET_DUMPABLE) failed");
+}
+
 const min = (a: bigint, b: bigint) => (a < b ? a : b);
 
 /** Lets the process use `ms` more CPU time before SIGXCPU, and lowers the hard limit to `totalMs` more when given. */

@@ -349,8 +349,11 @@ describe.skipIf(!live)("the parent does not trust the worker", () => {
   });
 
   test("a worker killed by its own CPU limit timed out, however the sandbox reports the death", async () => {
-    expect(await rogue("xcpu").renderBatch("", two)).toEqual([failed("a", "timeout"), failed("b", "timeout")]);
-  });
+    const start = performance.now();
+    // The parent's own timer is far off, so only the exit path can call these timeouts this soon.
+    expect(await rogue("xcpu").renderBatch("", two, { timeoutMs: 10_000 })).toEqual([failed("a", "timeout"), failed("b", "timeout")]);
+    expect(performance.now() - start).toBeLessThan(5000);
+  }, 30_000);
 
   test("a worker that exits mid-batch fails the in-flight request", async () => {
     expect(await rogue("exit").renderBatch("", two)).toEqual([failed("a", "render_error"), failed("b", "render_error")]);
