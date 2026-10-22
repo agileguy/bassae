@@ -7,7 +7,7 @@
 // position; that is handled position-aware in codeexec.ts — ISC-16, item 9).
 
 import type { Finding, Span } from "../types.ts";
-import { firstLeafSpan, foldLiteral, hasDunder, type Node } from "../parse/support.ts";
+import { children, firstLeafSpan, foldLiteral, hasDunder, type Node } from "../parse/support.ts";
 import type { RuleCtx } from "./codeexec.ts";
 
 // Node kinds worth folding: a bare StringLiteral is not obfuscation, so we only
@@ -46,7 +46,7 @@ export function runFold(ctx: RuleCtx): Finding[] {
         continue; // don't also flag the nested pieces
       }
     }
-    for (const v of Object.values(n)) stack.push(v);
+    for (const c of children(n)) stack.push(c);
   }
   return findings;
 }

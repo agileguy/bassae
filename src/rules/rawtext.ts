@@ -109,42 +109,56 @@ class IncrementalPos {
 }
 
 // The interior [start, end) of the next {{ }} or {% %} tag at or after `from`,
-// plus the index just past its close. Lightweight: no object-literal depth, no
-// token array. Returns null when no further tag opens.
+// plus the index just past its close, or null when no further tag opens. The
+// bounds are the pre-lexer's (lexTag), found in one pass with no token array: a
+// {# #} comment is skipped whole, a quoted string (with backslash escapes) never
+// closes a tag, and `}}` closes an expression only at object-literal depth 0.
+// Ending a tag at a quoted or nested close would leave the rest of it unscanned.
 function nextTag(text: string, from: number): { start: number; end: number; next: number } | null {
   const n = text.length;
-  for (let i = from; i < n - 1; i++) {
-    const c = text.charCodeAt(i);
-    if (c !== 0x7b) continue; // '{'
+  let i = from;
+  while (i < n - 1) {
+    if (text.charCodeAt(i) !== 0x7b) {
+      i++; // not '{'
+      continue;
+    }
     const d = text.charCodeAt(i + 1);
+    if (d === 0x23) {
+      // '{#': a comment runs to '#}', or to the end when unclosed.
+      i += 2;
+      while (i < n && !(text.charCodeAt(i) === 0x23 && text.charCodeAt(i + 1) === 0x7d)) i++;
+      i += 2;
+      continue;
+    }
     const expr = d === 0x7b; // '{{'
-    if (!expr && d !== 0x25) continue; // '{%'
-    let s = i + 2;
-    const mod = text.charCodeAt(s);
-    if (mod === 0x2d || mod === 0x2b) s++; // '-' / '+'
-    const closeExpr = "}}";
-    const closeStmt = "%}";
-    let j = s;
-    let end = n;
-    let next = n;
-    while (j < n - 1) {
-      const two = text.substr(j, 2);
-      if (two === (expr ? closeExpr : closeStmt)) {
-        end = j;
-        next = j + 2;
-        break;
+    if (!expr && d !== 0x25) {
+      i++; // not '{%'
+      continue;
+    }
+    let j = i + 2;
+    const mod = text.charCodeAt(j);
+    if (mod === 0x2d || mod === 0x2b) j++; // '-' / '+'
+    const start = j;
+    let depth = 0; // object-literal braces open inside the tag
+    while (j < n) {
+      const c = text.charCodeAt(j);
+      // A close may follow a '-' or '+' modifier.
+      const k = c === 0x2d || c === 0x2b ? j + 1 : j;
+      const c1 = text.charCodeAt(k);
+      const c2 = text.charCodeAt(k + 1);
+      if (expr ? depth === 0 && c1 === 0x7d && c2 === 0x7d : c1 === 0x25 && c2 === 0x7d) return { start, end: j, next: k + 2 };
+      if (c === 0x27 || c === 0x22) {
+        // A quoted string, to its closing quote; a backslash escapes the next unit.
+        j++;
+        while (j < n && text.charCodeAt(j) !== c) j += text.charCodeAt(j) === 0x5c ? 2 : 1;
+        j++;
+        continue;
       }
-      if (text.charCodeAt(j) === 0x2d || text.charCodeAt(j) === 0x2b) {
-        const t2 = text.substr(j + 1, 2);
-        if (t2 === (expr ? closeExpr : closeStmt)) {
-          end = j;
-          next = j + 3;
-          break;
-        }
-      }
+      if (c === 0x7b) depth++;
+      else if (c === 0x7d && depth > 0) depth--;
       j++;
     }
-    return { start: s, end, next };
+    return { start, end: n, next: n };
   }
   return null;
 }

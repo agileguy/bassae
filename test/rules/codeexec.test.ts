@@ -498,3 +498,86 @@ test("ISC-14.1 object rule: a runtime key on a template-made object is HIGH", ()
   // A runtime key on a runtime object is the carve-out, and stays clean.
   expect(highs("{% for m in messages %}{{ m[m.role] }}{% endfor %}")).toEqual([]);
 });
+
+// Round-3 D1 — the library keeps a dict literal's entries in a Map, which a
+// walker enumerating node fields with Object.values never enters. Every rule
+// must see a dict's values and keys, at any depth.
+test("D1: the rules see inside dict literals: values, keys and nested dicts", () => {
+  expect(highs("{{ {'a': messages[0].__class__} }}")).toContain("dunder_access");
+  expect(highs("{{ {messages[0].__class__: 1} }}")).toContain("dunder_access");
+  expect(highs("{{ {'a': {'b': messages[0].__class__}} }}")).toContain("dunder_access");
+  expect(highs("{{ {'a': os.popen('x')} }}")).toContain("exec_surface");
+  expect(highs("{{ {'a': messages|attr(k)} }}")).toContain("dynamic_attribute");
+  expect(highs("{{ {'a': '__cla' ~ 'ss__'} }}")).toContain("folded_dunder");
+  expect(highs("{{ {'a': namespace} }}")).toContain("gadget_traversal");
+  // A macro whose name is used inside a dict escapes, so its parameters are not runtime.
+  expect(highs("{% macro f(o) %}{{ o[messages[0].role] }}{% endmacro %}{{ {'a': f} }}{{ f(messages) }}")).toContain("dynamic_attribute");
+});
+
+// Structural form of D1: whatever an expression raises at top level, it raises
+// in a dict value, a dict key, a nested dict and a dict inside a list, and the
+// template is complete in each exactly when it is at top level.
+test("D1: every rule that fires on an expression also fires when it sits in a dict", () => {
+  const EXPRS = [
+    "messages[0].__class__",
+    "messages[0]['__class__']",
+    "messages[0][k]",
+    "'__cla' ~ 'ss__'",
+    "['__mr', 'o__'] | join",
+    "'{0.__class__}'.format(x)",
+    "payload.format(x)",
+    "x | attr('foo')",
+    "x | format('y')",
+    "os.popen('x')",
+    "namespace",
+    "dict.items",
+    "self",
+    "joiner",
+    "lipsum()",
+    "cycler('a')",
+    "cycler is defined",
+    "x is filter",
+    "x | select('filter')",
+    "x | nosuchfilter",
+    "x is nosuchtest",
+    "x | wordwrap",
+    "x.join(y)",
+    "'x' * 3",
+  ];
+  const sig = (src: string): { complete: boolean; rules: string[] } => {
+    const t = makeTemplate({ kind: "bare", path: "/t", realPath: "/t", name: "default" }, new TextEncoder().encode(src));
+    const r = analyzeCodeExec({ template: t, scaffolding: new Set(), knownGood: false });
+    return { complete: r.complete, rules: [...new Set(r.findings.map((f) => `${f.ruleId}:${f.severity}`))].sort() };
+  };
+  for (const e of EXPRS) {
+    const top = sig(`{{ ${e} }}`);
+    expect({ e, fires: top.rules.length > 0 }).toEqual({ e, fires: true });
+    for (const wrapped of [`{{ {'k': ${e}} }}`, `{{ {${e}: 1} }}`, `{{ {'k': {'j': ${e}}} }}`, `{{ [{'k': ${e}}] }}`]) {
+      const got = sig(wrapped);
+      const missing = top.rules.filter((r) => !got.rules.includes(r));
+      expect({ wrapped, complete: got.complete, missing }).toEqual({ wrapped, complete: top.complete, missing: [] });
+    }
+  }
+});
+
+// Round-3 D2 — a binary expression that does not fold is runtime data only
+// when every operand is. Two template-sourced macro arguments joined with `+`,
+// `*` or `%` can spell any attribute name, so as a key they are dynamic.
+test("D2: a non-folding binary expression is runtime only when its operands are", () => {
+  expect(highs("{% macro f(p, q) %}{{ messages[0][p + q] }}{% endmacro %}{{ f('__cla', 'ss__') }}").length).toBeGreaterThan(0);
+  expect(highs("{% set s = 'abc' %}{% macro f(p, q) %}{{ s[p + q] }}{% endmacro %}{{ f('up', 'per') }}")).toContain("dynamic_attribute");
+  expect(highs("{% macro f(p, q) %}{{ messages[0][p + q]() }}{% endmacro %}{{ f(messages[0].role, 'x') }}")).toContain("dynamic_attribute");
+  expect(highs("{% macro f(p, n) %}{{ messages[0][p * n]() }}{% endmacro %}{{ f(messages[0].role, 1) }}")).toContain("dynamic_attribute");
+  expect(highs("{% macro f(p, q) %}{{ messages[0][p % q]() }}{% endmacro %}{{ f(messages[0].role, 'upper') }}")).toContain("dynamic_attribute");
+  // Literal operands still fold to the dunder.
+  expect(highs("{% set a = '__cla' %}{% set b = 'ss__' %}{{ messages[0][a + b] }}")).toContain("dunder_access");
+  // Runtime with runtime stays runtime; a number, a comparison and a counter never name an attribute.
+  const clean = [
+    "{% for m in messages %}{{ m[m.role + m.content] }}{% endfor %}",
+    "{% for m in messages %}{{ messages[loop.index0 + 1] }}{{ messages[loop.index - 1] }}{% endfor %}",
+    "{% macro f(p, q) %}{{ messages[p + q] }}{% endmacro %}{{ f(1, 2) }}",
+    "{% for m in messages %}{{ messages[(m.role == 'user') + 0] }}{% endfor %}",
+    "{% set ns = namespace(i=0) %}{% for m in messages %}{{ messages[ns.i * 2 // 2] }}{% endfor %}",
+  ];
+  for (const src of clean) expect({ src, highs: highs(src) }).toEqual({ src, highs: [] });
+});
