@@ -4,10 +4,7 @@
 
 import type { Baseline, ExtractedTemplate, Finding, ModelRecord, Registry, Renderer, RuleResult } from "../types.ts";
 
-/** HIGH local_tamper for each HF-cache blob, or file with a .cache/huggingface/download/*.metadata record, whose content no longer matches its git blob hash (ISC-40). */
-export async function checkLocalTamper(model: ModelRecord): Promise<Finding[]> {
-  throw new Error("not implemented");
-}
+export { checkLocalTamper, type TamperOptions } from "./tamper.ts";
 
 /** local_comparison findings for a GGUF beside or linked to an HF source with its own template: labeled as a local comparison, never upstream, with a unified diff (ISC-23). */
 export function compareLocal(gguf: ModelRecord, hf: ModelRecord): Finding[] {
