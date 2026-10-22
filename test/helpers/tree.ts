@@ -40,3 +40,16 @@ function write(dir: string, tree: Tree): void {
     else write(path, value as Tree);
   }
 }
+
+/** Writes a file whose name is raw bytes. False where the filesystem refuses names that are not UTF-8, as APFS does. */
+export function writeRawName(dir: string, name: Uint8Array, data: string): boolean {
+  try {
+    writeFileSync(Buffer.concat([Buffer.from(dir + "/"), name]), data);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Whether this machine's temp filesystem stores names that are not UTF-8 (Linux does, macOS does not). */
+export const RAW_NAMES = writeRawName(makeTree({}), Uint8Array.of(0xff), "");

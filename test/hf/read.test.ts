@@ -3,9 +3,9 @@ import { createHash } from "node:crypto";
 import { truncateSync } from "node:fs";
 import { join } from "node:path";
 import { readHfModel } from "../../src/hf/index.ts";
-import { MAX_SOURCE_BYTES, readRegularFile } from "../../src/hf/sources.ts";
+import { jinjaNames, MAX_SOURCE_BYTES, readRegularFile } from "../../src/hf/sources.ts";
 import type { ExtractedTemplate, ModelRecord } from "../../src/types.ts";
-import { link, makeTree, removeTrees } from "../helpers/tree.ts";
+import { link, makeTree, RAW_NAMES, removeTrees, writeRawName } from "../helpers/tree.ts";
 
 afterAll(removeTrees);
 
@@ -415,5 +415,29 @@ describe("ISC-11: HF cache snapshots resolve to blobs", () => {
     expect(r.hfCache).toEqual({ repo: "o/n", revision: "r9", pathInRepo: "" });
     expect(only(r).source.path).toBe(join(root, "omlx/n/chat_template.jinja"));
     expect(only(r).source.realPath).toBe(join(root, "hub/models--o--n/snapshots/r9/chat_template.jinja"));
+  });
+});
+
+describe("file names that are not valid UTF-8", () => {
+  const enc = (s: string) => new TextEncoder().encode(s);
+  const bad = Uint8Array.from([...enc("bad"), 0xff, ...enc(".jinja")]);
+
+  test("raw .jinja names that cannot be decoded are kept, escaped, rather than dropped", () => {
+    expect(jinjaNames([enc("b.jinja"), bad, enc("a.jinja"), enc("notes.txt"), Uint8Array.of(0xfe)])).toEqual({
+      names: ["a.jinja", "b.jinja"],
+      unnamed: ["bad\\xff.jinja"],
+    });
+  });
+
+  // APFS refuses such names, so this runs where the filesystem keeps raw bytes (Linux).
+  test.skipIf(!RAW_NAMES)("an additional template with such a name is a HIGH finding, not a silent skip", async () => {
+    const root = makeTree({ m: { additional_chat_templates: { "ok.jinja": "A" } } });
+    const dir = join(root, "m/additional_chat_templates");
+    expect(writeRawName(dir, bad, "B")).toBe(true);
+    const r = await readHfModel(join(root, "m"));
+    expect(summary(r).map((s) => s.name)).toEqual(["ok"]);
+    expect(failures(r)).toEqual([["parse_error", "HIGH", dir]]);
+    expect(r.findings[0]!.detail?.names).toEqual(["bad\\xff.jinja"]);
+    expect(r.extractionComplete).toBe(false);
   });
 });

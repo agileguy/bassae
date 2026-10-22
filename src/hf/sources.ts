@@ -75,7 +75,15 @@ export async function readTemplateSources(dir: string, reader: SourceReader): Pr
 async function readAdditional(dir: string, reader: SourceReader): Promise<ExtractedTemplate[]> {
   let names: string[];
   try {
-    names = (await readdir(dir)).filter((n) => n.endsWith(".jinja")).sort();
+    // Raw names: a name that is not UTF-8 would otherwise decode to U+FFFD, fail to open, and look absent.
+    const listed = jinjaNames(await readdir(dir, { encoding: "buffer" }));
+    names = listed.names;
+    if (listed.unnamed.length > 0) {
+      reader.fail("template", dir, `${listed.unnamed.length} .jinja file name(s) not valid UTF-8; not read`, undefined, {
+        names: listed.unnamed.slice(0, 20),
+        count: listed.unnamed.length,
+      });
+    }
   } catch (e) {
     if (!(await isAbsent(e, dir))) reader.fail("template", dir, "cannot list additional_chat_templates", e);
     return [];
@@ -98,6 +106,26 @@ async function readAdditional(dir: string, reader: SourceReader): Promise<Extrac
     if (file) out.push(makeTemplate(sourceOf("additional_chat_templates", file, name.slice(0, -".jinja".length)), file.bytes));
   }
   return out;
+}
+
+const JINJA = new TextEncoder().encode(".jinja");
+
+/**
+ * The .jinja names among raw directory entries, sorted. A name that is not valid UTF-8 cannot be
+ * held in a path string, so it comes back in `unnamed`, with each byte outside printable ASCII as \xNN.
+ */
+export function jinjaNames(raw: Uint8Array[]): { names: string[]; unnamed: string[] } {
+  const names: string[] = [];
+  const unnamed: string[] = [];
+  for (const name of raw) {
+    if (name.length < JINJA.length || !JINJA.every((b, i) => name[name.length - JINJA.length + i] === b)) continue;
+    try {
+      names.push(strictUtf8.decode(name));
+    } catch {
+      unnamed.push([...name].map((b) => (b >= 0x20 && b < 0x7f && b !== 0x5c ? String.fromCharCode(b) : `\\x${b.toString(16).padStart(2, "0")}`)).join(""));
+    }
+  }
+  return { names: names.sort(), unnamed };
 }
 
 interface Loaded {
