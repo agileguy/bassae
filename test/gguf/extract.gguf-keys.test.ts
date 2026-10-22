@@ -164,6 +164,9 @@ test("a chat template key holding a non-string is a MEDIUM parse_error, is not e
     ["tokenizer.chat_template.n", u32(5)],
   ]);
   expect(rules(r)).toEqual([["parse_error", "MEDIUM"], ["parse_error", "MEDIUM"]]);
+  // llama.cpp skips array values when it builds its metadata map, and renders a scalar as its text.
+  expect(r.findings[0]!.message).toContain("llama.cpp has no template here");
+  expect(r.findings[1]!.message).toContain("llama.cpp renders as its text");
   expect(r.templates).toEqual([]);
   expect(r.extractionComplete).toBe(false);
 });

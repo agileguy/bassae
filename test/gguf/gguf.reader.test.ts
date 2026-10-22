@@ -46,6 +46,28 @@ test("a token_type array whose length differs from tokens is a MEDIUM parse_erro
   expect(r.specialTokens).toEqual(["<eos>"]);
 });
 
+// llama.cpp reads token_type as int32 whatever type it declares, so any other type gives no special tokens.
+test("a token_type that is not an int32 array is a MEDIUM parse_error, and the walk carries on", () => {
+  for (const types of [arr(T.U8, [1, 3, 4]), arr(T.U32, [1, 3, 4]), arr(T.STRING, ["1", "3", "4"]), u32(3)]) {
+    const r = read([
+      ["tokenizer.ggml.tokens", arr(T.STRING, ["a", "<eos>", "<x>"])],
+      ["tokenizer.ggml.token_type", types],
+      ["tokenizer.chat_template", str("{{ x }}")],
+    ]);
+    expect(r.findings.map((f) => [f.ruleId, f.severity, f.detail?.key])).toEqual([["parse_error", "MEDIUM", "tokenizer.ggml.token_type"]]);
+    expect(r.specialTokens).toEqual([]);
+    expect(r.templates).toHaveLength(1);
+  }
+});
+
+test("an empty CONTROL or USER_DEFINED token is not a special token", () => {
+  const r = read([
+    ["tokenizer.ggml.tokens", arr(T.STRING, ["", "<eos>", "", "a"])],
+    ["tokenizer.ggml.token_type", arr(T.I32, [TOKEN.CONTROL, TOKEN.CONTROL, TOKEN.USER_DEFINED, TOKEN.NORMAL])],
+  ]);
+  expect(r.specialTokens).toEqual(["<eos>"]);
+});
+
 test("ggufGeneral holds every general.* scalar and nothing else", () => {
   const r = read([
     ["general.architecture", str("qwen3")],

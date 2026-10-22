@@ -138,9 +138,9 @@ test("ISC-10.1: peak RSS stays under 512 MB on huge declared strings", () => {
   const tiny = join(dir, "huge-string.gguf");
   writeFileSync(tiny, new Writer().header(1).str("tokenizer.chat_template").u32(T.STRING).u64(2n ** 60n).bytes(new Uint8Array(64)).finish());
 
-  // 900 MiB declared inside a 1 GiB sparse file: the bounds check passes, so only the string cap can stop it.
+  // 200 MiB declared inside a 1 GiB sparse file: it fits under the KV section cap, so only the string cap keeps it from being read.
   const sparse = join(dir, "huge-string-sparse.gguf");
-  writeFileSync(sparse, new Writer().header(1).str("tokenizer.chat_template").u32(T.STRING).u64(900 * 2 ** 20).finish());
+  writeFileSync(sparse, new Writer().header(1).str("tokenizer.chat_template").u32(T.STRING).u64(200 * 2 ** 20).finish());
   truncateSync(sparse, GiB);
 
   const baseline = join(dir, "baseline.gguf");

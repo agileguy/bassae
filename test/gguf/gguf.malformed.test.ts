@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readGgufModel, readGgufSource } from "../../src/gguf/index.ts";
-import { MAX_ARRAY_LENGTH, MAX_KEY_BYTES, MAX_KV_COUNT, MAX_STRING_BYTES } from "../../src/gguf/limits.ts";
+import { MAX_ARRAY_LENGTH, MAX_KEY_BYTES, MAX_KV_COUNT, MAX_KV_SECTION_BYTES, MAX_STRING_BYTES } from "../../src/gguf/limits.ts";
 import { bytesSource } from "../../src/gguf/reader.ts";
 import type { ModelRecord, RuleId, Severity } from "../../src/types.ts";
 import { buildGguf, str, T, typicalKvs, Writer } from "./builder.ts";
@@ -26,33 +26,33 @@ function expectStopped(r: ModelRecord, severity: Severity) {
 const KEY = "tokenizer.chat_template";
 const one = () => new Writer().header(1);
 
-// Each fixture, and the severity of the error that stops it: HIGH when it stops on a template key.
+// Each fixture, and the severity of the error that stops it: MEDIUM when no engine would load the file, HIGH once the magic and version are good.
 const hostile: Record<string, [() => Uint8Array, Severity]> = {
   "empty file": [() => new Uint8Array(0), "MEDIUM"],
   "magic only": [() => new Writer().bytes(new TextEncoder().encode("GGUF")).finish(), "MEDIUM"],
   "wrong magic": [() => new Writer().bytes(new TextEncoder().encode("GGML")).u32(3).u64(0).u64(0).finish(), "MEDIUM"],
-  "header cut inside tensor_count": [() => new Writer().header(0).finish().subarray(0, 12), "MEDIUM"],
+  "header cut inside tensor_count": [() => new Writer().header(0).finish().subarray(0, 12), "HIGH"],
   "version 0": [() => new Writer().header(0, 0).finish(), "MEDIUM"],
   "version 1": [() => new Writer().header(0, 1).finish(), "MEDIUM"],
   "version 4": [() => new Writer().header(0, 4).finish(), "MEDIUM"],
   "version 0xFFFFFFFF": [() => new Writer().header(0, 0xffffffff).finish(), "MEDIUM"],
   "big-endian version 3": [() => new Writer().header(0, 0x03000000).finish(), "MEDIUM"],
-  "KV count 2^64-1": [() => new Writer().header(2n ** 64n - 1n).finish(), "MEDIUM"],
-  "KV count one past the cap": [() => new Writer().header(MAX_KV_COUNT + 1).kv("a", str("b")).finish(), "MEDIUM"],
-  "KV count larger than the KVs present": [() => new Writer().header(10).kv("general.name", str("x")).finish(), "MEDIUM"],
+  "KV count 2^64-1": [() => new Writer().header(2n ** 64n - 1n).finish(), "HIGH"],
+  "KV count one past the cap": [() => new Writer().header(MAX_KV_COUNT + 1).kv("a", str("b")).finish(), "HIGH"],
+  "KV count larger than the KVs present": [() => new Writer().header(10).kv("general.name", str("x")).finish(), "HIGH"],
   "2^60-byte template string": [() => one().str(KEY).u32(T.STRING).u64(2n ** 60n).bytes(new Uint8Array(64)).finish(), "HIGH"],
-  "2^60-byte key": [() => one().u64(2n ** 60n).bytes(new Uint8Array(64)).finish(), "MEDIUM"],
+  "2^60-byte key": [() => one().u64(2n ** 60n).bytes(new Uint8Array(64)).finish(), "HIGH"],
   "string length that wraps a u64 offset": [() => one().str(KEY).u32(T.STRING).u64(2n ** 64n - 16n).bytes(new Uint8Array(64)).finish(), "HIGH"],
-  "array of 2^62 u64s": [() => one().str("a").u32(T.ARRAY).u32(T.U64).u64(2n ** 62n).finish(), "MEDIUM"],
-  "array whose byte size wraps a u64": [() => one().str("a").u32(T.ARRAY).u32(T.U64).u64(2n ** 61n).u64(1).finish(), "MEDIUM"],
-  "string array one past the length cap": [() => one().str("tokenizer.ggml.tokens").u32(T.ARRAY).u32(T.STRING).u64(MAX_ARRAY_LENGTH + 1).finish(), "MEDIUM"],
-  "array under the cap but past end of file": [() => one().str("tokenizer.ggml.tokens").u32(T.ARRAY).u32(T.STRING).u64(MAX_ARRAY_LENGTH).u64(1).finish(), "MEDIUM"],
-  "nested array": [() => one().str("a").u32(T.ARRAY).u32(T.ARRAY).u64(1).u32(T.U8).u64(1).u8(1).finish(), "MEDIUM"],
+  "array of 2^62 u64s": [() => one().str("a").u32(T.ARRAY).u32(T.U64).u64(2n ** 62n).finish(), "HIGH"],
+  "array whose byte size wraps a u64": [() => one().str("a").u32(T.ARRAY).u32(T.U64).u64(2n ** 61n).u64(1).finish(), "HIGH"],
+  "string array one past the length cap, with no elements": [() => one().str("tokenizer.ggml.tokens").u32(T.ARRAY).u32(T.STRING).u64(MAX_ARRAY_LENGTH + 1).finish(), "HIGH"],
+  "array under the cap but past end of file": [() => one().str("tokenizer.ggml.tokens").u32(T.ARRAY).u32(T.STRING).u64(MAX_ARRAY_LENGTH).u64(1).finish(), "HIGH"],
+  "nested array": [() => one().str("a").u32(T.ARRAY).u32(T.ARRAY).u64(1).u32(T.U8).u64(1).u8(1).finish(), "HIGH"],
   "nested array as a chat template": [() => one().str(KEY).u32(T.ARRAY).u32(T.ARRAY).u64(1).u32(T.STRING).u64(1).str("{{x}}").finish(), "HIGH"],
-  "unknown KV type 13": [() => one().str("a").u32(13).u64(0).finish(), "MEDIUM"],
-  "unknown KV type 0xFFFFFFFF": [() => one().str("a").u32(0xffffffff).u64(0).finish(), "MEDIUM"],
+  "unknown KV type 13": [() => one().str("a").u32(13).u64(0).finish(), "HIGH"],
+  "unknown KV type 0xFFFFFFFF": [() => one().str("a").u32(0xffffffff).u64(0).finish(), "HIGH"],
   "unknown type on a chat template key": [() => one().str("tokenizer.chat_template.x").u32(13).u64(0).finish(), "HIGH"],
-  "unknown array element type 13": [() => one().str("a").u32(T.ARRAY).u32(13).u64(1).u64(0).finish(), "MEDIUM"],
+  "unknown array element type 13": [() => one().str("a").u32(T.ARRAY).u32(13).u64(1).u64(0).finish(), "HIGH"],
 };
 
 for (const [name, [make, severity]] of Object.entries(hostile)) {
@@ -66,11 +66,61 @@ for (const [name, [make, severity]] of Object.entries(hostile)) {
 test("each length cap fires on its own, even when the file holds every declared byte", () => {
   const overString = one().str(KEY).u32(T.STRING).u64(MAX_STRING_BYTES + 1).bytes(new Uint8Array(MAX_STRING_BYTES + 1)).finish();
   const overKey = one().u64(MAX_KEY_BYTES + 1).bytes(new Uint8Array(MAX_KEY_BYTES + 64)).finish();
-  for (const [bytes, cap, severity] of [[overString, MAX_STRING_BYTES, "HIGH"], [overKey, MAX_KEY_BYTES, "MEDIUM"]] as const) {
+  for (const [bytes, cap] of [[overString, MAX_STRING_BYTES], [overKey, MAX_KEY_BYTES]] as const) {
     const r = read(bytes);
-    expectStopped(r, severity);
+    expectStopped(r, "HIGH");
     expect(r.findings[0]!.message).toContain(`the cap is ${cap}`);
   }
+});
+
+// Gemini R1: a cap trip used to stop the walk, so a pad before the template hid it.
+const zeros = (n: number) => new Uint8Array(n);
+const pads: Record<string, (w: Writer) => Writer> = {
+  "u8 array one past the length cap": (w) => w.str("pad").u32(T.ARRAY).u32(T.U8).u64(MAX_ARRAY_LENGTH + 1).bytes(zeros(MAX_ARRAY_LENGTH + 1)),
+  "string array one past the length cap": (w) => w.str("pad").u32(T.ARRAY).u32(T.STRING).u64(MAX_ARRAY_LENGTH + 1).bytes(zeros((MAX_ARRAY_LENGTH + 1) * 8)),
+  "string array with an element past the string cap": (w) => w.str("pad").u32(T.ARRAY).u32(T.STRING).u64(1).u64(MAX_STRING_BYTES + 1).bytes(zeros(MAX_STRING_BYTES + 1)),
+  "string one past the string cap": (w) => w.str("pad").u32(T.STRING).u64(MAX_STRING_BYTES + 1).bytes(zeros(MAX_STRING_BYTES + 1)),
+  "general.* string one past the string cap": (w) => w.str("general.description").u32(T.STRING).u64(MAX_STRING_BYTES + 1).bytes(zeros(MAX_STRING_BYTES + 1)),
+};
+
+for (const [name, pad] of Object.entries(pads)) {
+  test(`a ${name} is skipped by its size, and the template after it is extracted`, () => {
+    const r = read(pad(new Writer().header(2)).kv(KEY, str("{{ messages }}")).finish());
+    expect(r.findings).toEqual([]);
+    expect(r.extractionComplete).toBe(true);
+    expect(r.templates.map((t) => t.text)).toEqual(["{{ messages }}"]);
+  });
+}
+
+test("a kept array past its cap is a MEDIUM parse_error, and the template after it is extracted", () => {
+  const kept: [string, number, number][] = [
+    ["tokenizer.ggml.tokens", T.STRING, 8],
+    ["tokenizer.ggml.token_type", T.I32, 4],
+    ["tokenizer.chat_templates", T.STRING, 8],
+  ];
+  for (const [key, type, size] of kept) {
+    const w = new Writer().header(2).str(key).u32(T.ARRAY).u32(type).u64(MAX_ARRAY_LENGTH + 1).bytes(zeros((MAX_ARRAY_LENGTH + 1) * size));
+    const r = read(w.kv(KEY, str("{{ messages }}")).finish());
+    expect(r.findings.map((f) => [f.ruleId, f.severity, f.detail?.key])).toEqual([["parse_error", "MEDIUM", key]]);
+    expect(r.extractionComplete).toBe(true);
+    expect(r.templates).toHaveLength(1);
+  }
+});
+
+test("a template past the string cap is HIGH and incomplete, and the template after it is still extracted", () => {
+  const w = new Writer().header(2).str(KEY).u32(T.STRING).u64(MAX_STRING_BYTES + 1).bytes(zeros(MAX_STRING_BYTES + 1));
+  const r = read(w.kv(`${KEY}.tool_use`, str("{{ tools }}")).finish());
+  expect(r.findings.map((f) => [f.ruleId, f.severity, f.templateName])).toEqual([["parse_error", "HIGH", "default"]]);
+  expect(r.extractionComplete).toBe(false);
+  expect(r.templates.map((t) => t.source.name)).toEqual(["tool_use"]);
+});
+
+test("a skip that runs past the KV section cap still stops, and the stop is HIGH whatever key it is on", () => {
+  // The size check comes before the skip, so this reads none of the 300 MiB it declares.
+  const r = read(new Writer().header(2).str("pad").u32(T.ARRAY).u32(T.U8).u64(300 * 2 ** 20).finish());
+  expectStopped(r, "HIGH");
+  expect(r.findings[0]!.templateName).toBeUndefined();
+  expect(r.findings[0]!.message).toContain(String(MAX_KV_SECTION_BYTES));
 });
 
 test("ISC-10: the 2^60-byte string error names the key and the declared size", () => {
@@ -80,23 +130,21 @@ test("ISC-10: the 2^60-byte string error names the key and the declared size", (
   expect(r.findings[0]!.templateName).toBe("default");
 });
 
-test("ISC-9: every truncation of a valid file stops with parse_error, HIGH exactly when it cuts a template value", () => {
+test("ISC-9: every truncation of a valid file stops with parse_error, HIGH once the magic and version are read", () => {
   const { bytes, kvEnd } = buildGguf(typicalKvs());
   const full = read(bytes);
   expect(full.findings).toEqual([]);
   expect(full.extractionComplete).toBe(true);
-  const seen = new Set<Severity>();
+  let named = 0;
   for (let n = 0; n < kvEnd; n++) {
     const r = read(bytes.subarray(0, n));
-    const last = r.findings.at(-1)!;
-    expectStopped(r, last.severity);
-    expect(last.severity === "HIGH").toBe(last.templateName !== undefined);
-    seen.add(last.severity);
+    expectStopped(r, n < 8 ? "MEDIUM" : "HIGH");
+    if (r.findings.at(-1)!.templateName !== undefined) named++;
   }
-  expect([...seen].sort()).toEqual(["HIGH", "MEDIUM"]);
+  expect(named).toBeGreaterThan(0);
 });
 
-test("a cut inside a template value is HIGH; a cut inside any other value is MEDIUM", () => {
+test("a cut inside a value is HIGH, and names the template when it cuts one", () => {
   const cut = (kvs: Parameters<typeof buildGguf>[0], key: string) => {
     const { bytes } = buildGguf(kvs);
     const at = Buffer.from(bytes).indexOf(Buffer.from(key)) + key.length + 4 + 8 + 3;
@@ -105,7 +153,9 @@ test("a cut inside a template value is HIGH; a cut inside any other value is MED
   const template = cut([["general.name", str("x")], [KEY, str("{{ messages }}")]], KEY);
   expectStopped(template, "HIGH");
   expect(template.findings.at(-1)!.templateName).toBe("default");
-  expectStopped(cut([["general.name", str("a long enough name")]], "general.name"), "MEDIUM");
+  const other = cut([["general.name", str("a long enough name")]], "general.name");
+  expectStopped(other, "HIGH");
+  expect(other.findings.at(-1)!.templateName).toBeUndefined();
 });
 
 test("ISC-9: a truncated file on disk returns normally and the next file still reads", async () => {
@@ -114,7 +164,7 @@ test("ISC-9: a truncated file on disk returns normally and the next file still r
   writeFileSync(join(dir, "a.incomplete"), bytes.subarray(0, 200));
   writeFileSync(join(dir, "b.gguf"), bytes);
   const [a, b] = [await readGgufModel(join(dir, "a.incomplete")), await readGgufModel(join(dir, "b.gguf"))];
-  expect(a.findings.map((f) => [f.ruleId, f.severity])).toEqual([["parse_error", "MEDIUM"]]);
+  expect(a.findings.map((f) => [f.ruleId, f.severity])).toEqual([["parse_error", "HIGH"]]);
   expect(a.extractionComplete).toBe(false);
   expect(b.findings).toEqual([]);
   expect(b.extractionComplete).toBe(true);

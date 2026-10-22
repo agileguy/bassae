@@ -1,7 +1,7 @@
 import { closeSync, fstatSync, openSync, readSync } from "node:fs";
 import type { Severity } from "../types.ts";
 import { MAX_ARRAY_LENGTH, MAX_KEY_BYTES, MAX_KV_COUNT, MAX_KV_SECTION_BYTES, MAX_STRING_BYTES } from "./limits.ts";
-import { CHAT_TEMPLATE_KEY, cKey, isTemplateKey, TEMPLATE_LIST_KEY } from "./templates.ts";
+import { CHAT_TEMPLATE_KEY, cKey, TEMPLATE_LIST_KEY } from "./templates.ts";
 
 /** Random-access bytes. Every read the parser makes goes through one, so tests can watch the offsets (ISC-38). */
 export interface ByteSource {
@@ -80,6 +80,7 @@ export function openFileSource(path: string): ByteSource & { close(): void } {
 
 const MAGIC = [0x47, 0x47, 0x55, 0x46]; // "GGUF"
 const U32 = 4;
+const I32 = 5;
 const STRING = 8;
 const ARRAY = 9;
 const U64 = 10;
@@ -135,6 +136,30 @@ class Cursor {
     throw new GgufError(`truncated: ${n} bytes needed at offset ${this.pos}, but the file ends at ${this.src.size}`);
   }
 
+  /** A declared byte count as a number, once the file and the KV section cap both hold that many bytes from here. */
+  fits(n: bigint, what: () => string): number {
+    if (n <= BigInt(this.end - this.pos)) return Number(n);
+    const where = BigInt(this.pos) + n > BigInt(MAX_KV_SECTION_BYTES) ? `past the KV section cap of ${MAX_KV_SECTION_BYTES}` : `but the file ends at ${this.src.size}`;
+    throw new GgufError(`${what()} at offset ${this.pos} declares ${n} bytes, ${where}`);
+  }
+
+  /** The u64 at buf[at] as a number: exact below 2^53, and larger than any file above it. Byte reads run several times faster than DataView here. */
+  private lengthAt(at: number): number {
+    const b = this.buf;
+    const lo = (b[at]! | (b[at + 1]! << 8) | (b[at + 2]! << 16) | (b[at + 3]! << 24)) >>> 0;
+    const hi = (b[at + 4]! | (b[at + 5]! << 8) | (b[at + 6]! << 16) | (b[at + 7]! << 24)) >>> 0;
+    return hi * 2 ** 32 + lo;
+  }
+
+  /** Reads a u64 byte count the file must hold, so skipping by it can't overflow or overrun. */
+  sized(what: () => string): number {
+    const at = this.fill(8);
+    const n = this.lengthAt(at);
+    this.pos += 8;
+    if (this.pos + n <= this.end) return n;
+    return this.fits(this.view.getBigUint64(at, true), what);
+  }
+
   /** Index into buf of the n bytes at pos, reading them if they aren't buffered. */
   private fill(n: number): number {
     const at = this.pos - this.bufStart;
@@ -152,6 +177,23 @@ class Cursor {
   skip(n: number) {
     this.need(n);
     this.pos += n;
+  }
+
+  /** Skips `count` length-prefixed strings. A hostile array can hold 32 Mi of them, so this loop stays on the buffer. */
+  skipStrings(count: number, what: (i: number) => string) {
+    const base = this.floor;
+    for (let i = 0; i < count; i++) {
+      let at = this.pos - this.bufStart;
+      if (at < 0 || at + 8 > this.buf.length) {
+        this.floor = base + (count - i - 1) * 8;
+        at = this.fill(8);
+      }
+      const n = this.lengthAt(at);
+      this.pos += 8;
+      if (this.pos + n > this.end) this.fits(this.view.getBigUint64(at, true), () => what(i));
+      this.pos += n;
+    }
+    this.floor = base;
   }
 
   /** A copy of the next n bytes. */
@@ -187,37 +229,42 @@ function length(cur: Cursor, cap: number, what: string, key?: string): number {
   return Number(n);
 }
 
+/** No length cap here: only arrays the reader keeps are capped, and their readers check MAX_ARRAY_LENGTH. */
 function arrayHeader(cur: Cursor, key: string): { elemType: number; count: number } {
   const elemType = cur.u32();
   const declared = cur.u64();
   if (elemType === ARRAY) throw new GgufError(`${q(key)} is an array of arrays, which GGUF readers reject`, key);
   const size = elemType === STRING ? 8 : SCALAR_SIZE[elemType];
   if (size === undefined) throw new GgufError(`${q(key)} has unknown array element type ${elemType}`, key);
-  if (declared > BigInt(MAX_ARRAY_LENGTH)) throw new GgufError(`${q(key)} declares ${declared} elements; the cap is ${MAX_ARRAY_LENGTH}`, key);
-  const count = Number(declared);
   // The smallest the array can be. A count the file can't hold fails here, before any loop.
-  cur.need(count * size);
-  return { elemType, count };
+  cur.fits(declared * BigInt(size), () => `array ${q(key)} of ${declared} elements`);
+  return { elemType, count: Number(declared) };
 }
 
-/** Steps through a string array. `visit` sees each element at its start; the bytes are then skipped. */
+/** Steps through a string array without keeping it. `visit` sees each element at its start; the bytes are then skipped. */
 function walkStrings(cur: Cursor, count: number, key: string, visit?: (i: number, n: number) => void) {
+  if (!visit) return cur.skipStrings(count, (i) => `element ${i} of ${q(key)}`);
   const base = cur.floor;
   for (let i = 0; i < count; i++) {
     cur.floor = base + (count - i - 1) * 8;
-    const n = length(cur, MAX_STRING_BYTES, `element ${i} of ${q(key)}`, key);
+    const n = cur.sized(() => `element ${i} of ${q(key)}`);
     visit?.(i, n);
     cur.skip(n);
   }
   cur.floor = base;
 }
 
+function skipArray(cur: Cursor, elemType: number, count: number, key: string) {
+  if (elemType === STRING) walkStrings(cur, count, key);
+  else cur.skip(count * SCALAR_SIZE[elemType]!);
+}
+
+/** Skips a value by its checked size, however large, so an oversized value can't hide the KVs after it. */
 function skipValue(cur: Cursor, type: number, key: string) {
-  if (type === STRING) return cur.skip(length(cur, MAX_STRING_BYTES, `value of ${q(key)}`, key));
+  if (type === STRING) return cur.skip(cur.sized(() => `value of ${q(key)}`));
   if (type === ARRAY) {
     const { elemType, count } = arrayHeader(cur, key);
-    if (elemType === STRING) return walkStrings(cur, count, key);
-    return cur.skip(count * SCALAR_SIZE[elemType]!);
+    return skipArray(cur, elemType, count, key);
   }
   const size = SCALAR_SIZE[type];
   if (size === undefined) throw new GgufError(`${q(key)} has unknown value type ${type}`, key);
@@ -243,6 +290,9 @@ export function parseGguf(src: ByteSource): GgufParse {
   // The key whose value is being read, so a stop inside it can be pinned on it.
   let current: string | undefined;
   let unread = false;
+  const problem = (severity: Severity, message: string, key?: string) => {
+    out.problems.push({ ruleId: "parse_error", severity, message, key });
+  };
 
   const readKv = (seen: Set<string>) => {
     // `key` is the stored key, used in messages. `name` is what llama.cpp looks up, used for matching.
@@ -253,64 +303,81 @@ export function parseGguf(src: ByteSource): GgufParse {
     const isTemplate = CHAT_TEMPLATE_KEY.test(name);
     if (name !== key) {
       // No real file has one. On a template key it hides the template from gguf-py and HF tooling while llama.cpp still renders it.
-      out.problems.push({ ruleId: "parse_error", severity: isTemplate ? "HIGH" : "MEDIUM", message: `key ${q(key)} contains a NUL byte; llama.cpp reads it as ${q(name)}`, key });
+      problem(isTemplate ? "HIGH" : "MEDIUM", `key ${q(key)} contains a NUL byte; llama.cpp reads it as ${q(name)}`, key);
     }
     if (seen.has(name)) {
       // Readers disagree on which copy wins. llama.cpp refuses exact duplicates but takes the first NUL alias.
-      out.problems.push({ ruleId: "parse_error", severity: isTemplate ? "HIGH" : "MEDIUM", message: `key ${q(name)} appears more than once`, key });
+      problem(isTemplate ? "HIGH" : "MEDIUM", `key ${q(name)} appears more than once`, key);
     }
     seen.add(name);
 
     if (isTemplate) {
       if (type === STRING) {
-        const n = length(cur, MAX_STRING_BYTES, `value of ${q(key)}`, key);
-        out.templates.push({ key, offset: cur.pos, bytes: cur.bytes(n) });
-        return;
-      }
-      // llama.cpp keeps every metadata value as text, so it may still render this one. The record can't call itself complete.
-      unread = true;
-      out.problems.push({ ruleId: "parse_error", severity: "MEDIUM", message: `${q(key)} has value type ${type}, not string, so it was not extracted`, key });
-    } else if (name === TEMPLATE_LIST_KEY) {
-      if (type === ARRAY) {
-        const { elemType, count } = arrayHeader(cur, key);
-        if (elemType === STRING) {
-          const names: string[] = [];
-          walkStrings(cur, count, key, (_, n) => names.push(utf8.decode(cur.peek(n))));
-          out.templateList = names;
+        const n = cur.sized(() => `value of ${q(key)}`);
+        if (n <= MAX_STRING_BYTES) {
+          out.templates.push({ key, offset: cur.pos, bytes: cur.bytes(n) });
           return;
         }
-        cur.skip(count * SCALAR_SIZE[elemType]!);
-      } else {
-        skipValue(cur, type, key);
+        // Skipped rather than stopped on, so the templates after it still get read.
+        unread = true;
+        problem("HIGH", `${q(key)} holds ${n} bytes; the cap is ${MAX_STRING_BYTES}, so it was not extracted`, key);
+        return cur.skip(n);
       }
-      out.problems.push({ ruleId: "parse_error", severity: "MEDIUM", message: `${q(key)} is not a string array`, key });
-      return;
+      // llama.cpp renders a scalar as its text and has no template when it finds an array. Either way the record is incomplete.
+      if (type === ARRAY) {
+        unread = true;
+        problem("MEDIUM", `${q(key)} holds an array, so llama.cpp has no template here and none was extracted`, key);
+      } else if (type in SCALAR_SIZE) {
+        unread = true;
+        problem("MEDIUM", `${q(key)} holds a value of type ${type}, which llama.cpp renders as its text; it was not extracted`, key);
+      }
+    } else if (name === TEMPLATE_LIST_KEY) {
+      const names = type === ARRAY ? readNames(key) : undefined;
+      if (names) {
+        out.templateList = names;
+        return;
+      }
+      problem("MEDIUM", `${q(key)} is not a string array of names within the caps, so it was not checked`, key);
+      if (type === ARRAY) return;
     } else if (name === "tokenizer.ggml.tokens" && type === ARRAY) {
       const { elemType, count } = arrayHeader(cur, key);
-      if (elemType !== STRING) return cur.skip(count * SCALAR_SIZE[elemType]!);
+      if (elemType !== STRING || count > MAX_ARRAY_LENGTH) {
+        if (elemType === STRING) problem("MEDIUM", `${q(key)} has ${count} entries; the cap is ${MAX_ARRAY_LENGTH}, so special tokens were not read`, key);
+        return skipArray(cur, elemType, count, key);
+      }
       // Only offsets are kept; the few special tokens are decoded once token_type is known.
       const spans = { starts: new Float64Array(count), lengths: new Uint32Array(count) };
+      let long = -1;
       walkStrings(cur, count, key, (i, n) => {
+        if (n > MAX_STRING_BYTES && long < 0) long = i;
         spans.starts[i] = cur.pos;
         spans.lengths[i] = n;
       });
-      tokens = spans;
+      if (long < 0) tokens = spans;
+      else problem("MEDIUM", `entry ${long} of ${q(key)} is over ${MAX_STRING_BYTES} bytes, the cap, so special tokens were not read`, key);
       return;
-    } else if (name === "tokenizer.ggml.token_type" && type === ARRAY) {
-      const { elemType, count } = arrayHeader(cur, key);
-      if (elemType === STRING) return walkStrings(cur, count, key);
-      const size = SCALAR_SIZE[elemType]!;
-      const raw = cur.bytes(count * size);
-      const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
-      special = new Uint8Array(count);
-      for (let i = 0; i < count; i++) {
-        const t = Number(scalarAt(view, i * size, elemType));
-        special[i] = t === CONTROL || t === USER_DEFINED ? 1 : 0;
+    } else if (name === "tokenizer.ggml.token_type") {
+      // llama.cpp reads this as int32 whatever type it declares, so under any other type its special tokens aren't ours to guess.
+      const array = type === ARRAY ? arrayHeader(cur, key) : undefined;
+      if (array?.elemType === I32 && array.count <= MAX_ARRAY_LENGTH) {
+        const raw = cur.bytes(array.count * 4);
+        const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
+        special = new Uint8Array(array.count);
+        for (let i = 0; i < array.count; i++) {
+          const t = view.getInt32(i * 4, true);
+          special[i] = t === CONTROL || t === USER_DEFINED ? 1 : 0;
+        }
+        return;
       }
-      return;
+      const why = !array ? "is not an array" : array.elemType !== I32 ? `has element type ${array.elemType}, not int32` : `has ${array.count} entries; the cap is ${MAX_ARRAY_LENGTH}`;
+      problem("MEDIUM", `${q(key)} ${why}, so special tokens were not read`, key);
+      if (array) return skipArray(cur, array.elemType, array.count, key);
     } else if (name.startsWith("general.") && (type === STRING || type in SCALAR_SIZE)) {
       if (type === STRING) {
-        out.general[name] = utf8.decode(cur.bytes(length(cur, MAX_STRING_BYTES, `value of ${q(key)}`, key)));
+        const n = cur.sized(() => `value of ${q(key)}`);
+        // Provenance hints only. One past the cap is skipped, not kept.
+        if (n <= MAX_STRING_BYTES) out.general[name] = utf8.decode(cur.bytes(n));
+        else cur.skip(n);
         return;
       }
       const v = cur.scalar(type);
@@ -318,6 +385,23 @@ export function parseGguf(src: ByteSource): GgufParse {
       return;
     }
     skipValue(cur, type, key);
+  };
+
+  /** tokenizer.chat_templates as names, or undefined once it is skipped for not being a string array within the caps. */
+  const readNames = (key: string): string[] | undefined => {
+    const { elemType, count } = arrayHeader(cur, key);
+    if (elemType !== STRING || count > MAX_ARRAY_LENGTH) {
+      skipArray(cur, elemType, count, key);
+      return undefined;
+    }
+    const names: string[] = [];
+    let fits = true;
+    walkStrings(cur, count, key, (_, n) => {
+      // A name longer than any key the reader accepts can't name a template.
+      if (n > MAX_KEY_BYTES) fits = false;
+      else names.push(utf8.decode(cur.peek(n)));
+    });
+    return fits ? names : undefined;
   };
 
   try {
@@ -343,10 +427,9 @@ export function parseGguf(src: ByteSource): GgufParse {
   } catch (e) {
     if (!(e instanceof GgufError)) throw e;
     const key = e.key ?? current;
-    // A stop inside a template's value leaves that template unread, so it weighs like a hidden one.
-    const severity = key !== undefined && isTemplateKey(key) ? "HIGH" : "MEDIUM";
     const message = e.key === undefined && key !== undefined ? `${e.message}, reading ${q(key)}` : e.message;
-    out.problems.push({ ruleId: "parse_error", severity, message, key });
+    // Past a good magic and version, any KV after the stop could be a template nobody checked. Before them, no engine loads the file.
+    problem(out.version === undefined ? "MEDIUM" : "HIGH", message, key);
   }
 
   if (tokens && special) out.specialTokens = specialTokens(src, tokens, special, out.problems);
@@ -379,7 +462,9 @@ function specialTokens(src: ByteSource, tokens: TokenSpans, special: Uint8Array,
   for (let i = first; i <= last; i++) {
     if (!special[i]) continue;
     const at = tokens.starts[i]! - from;
-    found.add(utf8.decode(region.subarray(at, at + tokens.lengths[i]!)));
+    const token = utf8.decode(region.subarray(at, at + tokens.lengths[i]!));
+    // An empty token would make every gap in a template look like scaffolding.
+    if (token !== "") found.add(token);
   }
   return [...found];
 }
