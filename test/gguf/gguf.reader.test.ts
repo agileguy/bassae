@@ -136,6 +136,26 @@ test("readGgufModel labels templates with the path reached and the real path", a
   expect(r.templates[0]!.source.realPath).toBe(real);
 });
 
+test("a GGUF reached through an HF cache snapshot carries its cache location, as an HF record does", async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "bassae-gguf-hf-")));
+  const repo = join(root, "models--org--name-GGUF");
+  const blob = join(repo, "blobs", "abc123");
+  const snapshot = join(repo, "snapshots", "rev1");
+  mkdirSync(join(repo, "blobs"), { recursive: true });
+  mkdirSync(snapshot, { recursive: true });
+  writeFileSync(blob, buildGguf(typicalKvs()).bytes);
+  symlinkSync(blob, join(snapshot, "model.gguf"));
+
+  const r = await readGgufModel(join(snapshot, "model.gguf"));
+  expect(r.id).toBe(blob);
+  expect(r.findings).toEqual([]);
+  expect(r.hfCache).toEqual({ repo: "org/name-GGUF", revision: "rev1", pathInRepo: "model.gguf" });
+  // A file that fails to open keeps its provenance too.
+  const missing = await readGgufModel(join(snapshot, "gone.gguf"));
+  expect(missing.findings.map((f) => f.ruleId)).toEqual(["scanner_error"]);
+  expect(missing.hfCache).toEqual({ repo: "org/name-GGUF", revision: "rev1", pathInRepo: "gone.gguf" });
+});
+
 test("readGgufModel turns a missing file or a directory into a scanner_error instead of throwing", async () => {
   const dir = mkdtempSync(join(tmpdir(), "bassae-gguf-reader-"));
   for (const p of [join(dir, "missing.gguf"), dir]) {
