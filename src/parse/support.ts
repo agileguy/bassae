@@ -50,11 +50,13 @@ export const IMPLEMENTED_FILTERS = new Set([
   "selectattr", "rejectattr", "map", "default", "replace", "dictsort", "keys", "values", "get",
 ]);
 
-// Jinja2 builtin filters the library lacks, each MEDIUM unanalyzable rather
-// than a code-exec HIGH (team-lead, 2026-10-22). Moving one to HIGH is a
-// one-line change. One more MEDIUM filter path lives in parse.ts: `map` with a
-// positional filter name (map('upper') throws at render, only `attribute=` is
-// implemented).
+// Jinja2 builtin filters the library lacks. Per ISC-12.1 and ISA Decision
+// "2026-10-22 17:50": jinja2 3.1 builtin filters and tests that the library
+// doesn't implement and that can't reach attributes are MEDIUM unanalyzable;
+// `attr`, `format` and `random` stay HIGH, and so does any name that isn't a
+// jinja2 builtin. Moving one here to HIGH is a one-line change. One more MEDIUM
+// filter path lives in parse.ts: `map` with a positional filter name
+// (map('upper') throws at render, only `attribute=` is implemented).
 export const BENIGN_UNIMPLEMENTED_FILTERS = new Set([
   "reject", //         calls a named test on each item; tests cannot reach attributes
   "select", //         same as reject, inverted
