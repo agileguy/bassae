@@ -11,7 +11,7 @@
 
 import type { AnalysisContext, Finding, RuleId, RuleResult } from "../types.ts";
 import { parseTemplate } from "../parse/parse.ts";
-import { collectBoundNames, hasDunderName, type Node } from "../parse/support.ts";
+import { hasDunderName, resolveBindings, type Node } from "../parse/support.ts";
 import { runCodeExec, type RuleCtx } from "./codeexec.ts";
 import { runFold } from "./fold.ts";
 import { runRawText } from "./rawtext.ts";
@@ -59,7 +59,7 @@ function analyze(ctx: AnalysisContext, base: Base): RuleResult {
     const ruleCtx: RuleCtx = {
       outcome,
       text: t.text,
-      bound: collectBoundNames(outcome.program as Node),
+      env: resolveBindings(outcome.program as Node),
       scaffolding: ctx.scaffolding,
       ...base,
     };

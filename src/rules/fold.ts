@@ -7,7 +7,7 @@
 // position; that is handled position-aware in codeexec.ts — ISC-16, item 9).
 
 import type { Finding, Span } from "../types.ts";
-import { foldLiteral, hasDunder, type Node } from "../parse/support.ts";
+import { firstLeafSpan, foldLiteral, hasDunder, type Node } from "../parse/support.ts";
 import type { RuleCtx } from "./codeexec.ts";
 
 // Node kinds worth folding: a bare StringLiteral is not obfuscation, so we only
@@ -49,23 +49,4 @@ export function runFold(ctx: RuleCtx): Finding[] {
     for (const v of Object.values(n)) stack.push(v);
   }
   return findings;
-}
-
-// A composite node has no span of its own; point at its first leaf.
-function firstLeafSpan(node: Node, spans: Map<Node, Span>): Span | undefined {
-  const stack: unknown[] = [node];
-  while (stack.length) {
-    const x = stack.pop();
-    if (!x || typeof x !== "object") continue;
-    if (Array.isArray(x)) {
-      for (let i = x.length - 1; i >= 0; i--) stack.push(x[i]);
-      continue;
-    }
-    const n = x as Node;
-    const s = spans.get(n);
-    if (s) return s;
-    const vals = Object.values(n);
-    for (let i = vals.length - 1; i >= 0; i--) stack.push(vals[i]);
-  }
-  return undefined;
 }

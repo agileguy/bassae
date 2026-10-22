@@ -170,3 +170,23 @@ test("keyword-only dict(...) is still no finding", () => {
   expect(r.findings).toHaveLength(0);
   expect(r.complete).toBe(true);
 });
+
+// N3 — constructs that parse but throw at render in @huggingface/jinja are
+// MEDIUM unanalyzable (not HIGH, and never silently complete:true).
+test("N3: unique(...) with arguments is MEDIUM unanalyzable and incomplete", () => {
+  const r = scan("{{ (messages | unique(attribute='role')) | list }}");
+  const u = r.findings.find((f) => f.ruleId === "unanalyzable" && f.message.includes("unique"));
+  expect(u?.severity).toBe("MEDIUM");
+  expect(r.complete).toBe(false);
+  // Plain |unique renders fine and stays complete.
+  expect(scan("{{ (messages | unique) | list }}").complete).toBe(true);
+});
+
+test("N3: a .join(...) method call is MEDIUM unanalyzable and incomplete", () => {
+  const r = scan("{{ '-'.join(parts) }}");
+  const u = r.findings.find((f) => f.ruleId === "unanalyzable" && f.message.includes("join"));
+  expect(u?.severity).toBe("MEDIUM");
+  expect(r.complete).toBe(false);
+  // The |join filter is implemented and stays complete.
+  expect(scan("{{ parts | join('-') }}").complete).toBe(true);
+});
