@@ -58,11 +58,36 @@ test("ggufGeneral holds every general.* scalar and nothing else", () => {
   ]);
   expect(r.ggufGeneral).toEqual({
     "general.architecture": "qwen3",
-    "general.parameter_count": 596049920n,
+    "general.parameter_count": 596049920,
     "general.quantization_version": 2,
     "general.finetuned": true,
     "general.score": 0.5,
   });
+});
+
+test("64-bit general.* values are numbers in the safe range and decimal strings outside it, so the record serializes", () => {
+  const r = read([
+    ["general.parameter_count", u64(596049920n)],
+    ["general.safe_max", u64(2n ** 53n - 1n)],
+    ["general.past_safe", u64(2n ** 53n)],
+    ["general.u64_max", u64(2n ** 64n - 1n)],
+    ["general.small_negative", { type: T.I64, value: -5n }],
+    ["general.i64_min", { type: T.I64, value: -(2n ** 63n) }],
+  ]);
+  expect(r.ggufGeneral).toEqual({
+    "general.parameter_count": 596049920,
+    "general.safe_max": 9007199254740991,
+    "general.past_safe": "9007199254740992",
+    "general.u64_max": "18446744073709551615",
+    "general.small_negative": -5,
+    "general.i64_min": "-9223372036854775808",
+  });
+  expect(JSON.parse(JSON.stringify(r)).ggufGeneral).toEqual(r.ggufGeneral);
+});
+
+test("a complete parse sets extractionComplete", () => {
+  expect(read(typicalKvs()).extractionComplete).toBe(true);
+  expect(read([]).extractionComplete).toBe(true);
 });
 
 test("version 2 files read the same as version 3", () => {
@@ -94,6 +119,7 @@ test("readGgufModel turns a missing file or a directory into a scanner_error ins
   for (const p of [join(dir, "missing.gguf"), dir]) {
     const r = await readGgufModel(p);
     expect(r.findings.map((f) => [f.ruleId, f.severity])).toEqual([["scanner_error", "MEDIUM"]]);
+    expect(r.extractionComplete).toBe(false);
     expect(r.templates).toEqual([]);
   }
 });

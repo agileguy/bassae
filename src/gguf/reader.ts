@@ -1,7 +1,7 @@
 import { closeSync, fstatSync, openSync, readSync } from "node:fs";
 import type { Severity } from "../types.ts";
 import { MAX_ARRAY_LENGTH, MAX_KEY_BYTES, MAX_KV_COUNT, MAX_KV_SECTION_BYTES, MAX_STRING_BYTES } from "./limits.ts";
-import { CHAT_TEMPLATE_KEY, cKey, TEMPLATE_LIST_KEY } from "./templates.ts";
+import { CHAT_TEMPLATE_KEY, cKey, isTemplateKey, TEMPLATE_LIST_KEY } from "./templates.ts";
 
 /** Random-access bytes. Every read the parser makes goes through one, so tests can watch the offsets (ISC-38). */
 export interface ByteSource {
@@ -20,6 +20,8 @@ export class GgufError extends Error {
 export interface RawTemplate {
   key: string;
   bytes: Uint8Array;
+  /** File offset of the value's first byte. */
+  offset: number;
 }
 
 export interface Problem {
@@ -35,10 +37,13 @@ export interface GgufParse {
   kvCount?: bigint;
   /** Exclusive end offset of the KV section. Set only when every KV parsed. */
   kvEnd?: number;
+  /** Every KV parsed and every template key held a string, so no template went unread. */
+  complete: boolean;
   templates: RawTemplate[];
   /** tokenizer.chat_templates, when it is a string array. */
   templateList?: string[];
-  general: Record<string, string | number | boolean | bigint>;
+  /** 64-bit integers outside the safe range are decimal strings, so the record survives JSON.stringify. */
+  general: Record<string, string | number | boolean>;
   specialTokens: string[];
   problems: Problem[];
 }
@@ -88,6 +93,10 @@ const READ_AHEAD = 1 << 20;
 
 const utf8 = new TextDecoder("utf-8", { fatal: false, ignoreBOM: true });
 const q = (key: string) => JSON.stringify(key);
+const SAFE = BigInt(Number.MAX_SAFE_INTEGER);
+
+/** A number when it converts exactly, else its decimal string. JSON.stringify throws on a bigint. */
+const jsonSafe = (v: bigint): number | string => (v >= -SAFE && v <= SAFE ? Number(v) : String(v));
 
 function scalarAt(v: DataView, at: number, type: number): number | bigint | boolean {
   switch (type) {
@@ -227,14 +236,18 @@ interface TokenSpans {
 
 /** Parses the header and KV section, stopping before tensor info. Throws only on I/O failure, never on content. */
 export function parseGguf(src: ByteSource): GgufParse {
-  const out: GgufParse = { templates: [], general: {}, specialTokens: [], problems: [] };
+  const out: GgufParse = { complete: false, templates: [], general: {}, specialTokens: [], problems: [] };
   const cur = new Cursor(src);
   let tokens: TokenSpans | undefined;
   let special: Uint8Array | undefined;
+  // The key whose value is being read, so a stop inside it can be pinned on it.
+  let current: string | undefined;
+  let unread = false;
 
   const readKv = (seen: Set<string>) => {
     // `key` is the stored key, used in messages. `name` is what llama.cpp looks up, used for matching.
     const key = utf8.decode(cur.bytes(length(cur, MAX_KEY_BYTES, "key")));
+    current = key;
     const name = cKey(key);
     const type = cur.u32();
     const isTemplate = CHAT_TEMPLATE_KEY.test(name);
@@ -250,9 +263,12 @@ export function parseGguf(src: ByteSource): GgufParse {
 
     if (isTemplate) {
       if (type === STRING) {
-        out.templates.push({ key, bytes: cur.bytes(length(cur, MAX_STRING_BYTES, `value of ${q(key)}`, key)) });
+        const n = length(cur, MAX_STRING_BYTES, `value of ${q(key)}`, key);
+        out.templates.push({ key, offset: cur.pos, bytes: cur.bytes(n) });
         return;
       }
+      // llama.cpp keeps every metadata value as text, so it may still render this one. The record can't call itself complete.
+      unread = true;
       out.problems.push({ ruleId: "parse_error", severity: "MEDIUM", message: `${q(key)} has value type ${type}, not string, so it was not extracted`, key });
     } else if (name === TEMPLATE_LIST_KEY) {
       if (type === ARRAY) {
@@ -293,8 +309,12 @@ export function parseGguf(src: ByteSource): GgufParse {
       }
       return;
     } else if (name.startsWith("general.") && (type === STRING || type in SCALAR_SIZE)) {
-      out.general[name] =
-        type === STRING ? utf8.decode(cur.bytes(length(cur, MAX_STRING_BYTES, `value of ${q(key)}`, key))) : cur.scalar(type);
+      if (type === STRING) {
+        out.general[name] = utf8.decode(cur.bytes(length(cur, MAX_STRING_BYTES, `value of ${q(key)}`, key)));
+        return;
+      }
+      const v = cur.scalar(type);
+      out.general[name] = typeof v === "bigint" ? jsonSafe(v) : v;
       return;
     }
     skipValue(cur, type, key);
@@ -315,12 +335,18 @@ export function parseGguf(src: ByteSource): GgufParse {
     const seen = new Set<string>();
     for (let i = 0; i < kvCount; i++) {
       cur.floor = (kvCount - i - 1) * MIN_KV_BYTES;
+      current = undefined;
       readKv(seen);
     }
     out.kvEnd = cur.pos;
+    out.complete = !unread;
   } catch (e) {
     if (!(e instanceof GgufError)) throw e;
-    out.problems.push({ ruleId: "parse_error", severity: "MEDIUM", message: e.message, key: e.key });
+    const key = e.key ?? current;
+    // A stop inside a template's value leaves that template unread, so it weighs like a hidden one.
+    const severity = key !== undefined && isTemplateKey(key) ? "HIGH" : "MEDIUM";
+    const message = e.key === undefined && key !== undefined ? `${e.message}, reading ${q(key)}` : e.message;
+    out.problems.push({ ruleId: "parse_error", severity, message, key });
   }
 
   if (tokens && special) out.specialTokens = specialTokens(src, tokens, special, out.problems);

@@ -91,7 +91,10 @@ test("ISC-4.1: no list check when the parse stopped early, since later keys were
   w.kv("tokenizer.chat_template", str("A"));
   w.str("tokenizer.chat_template.tool_use").u32(T.STRING).u64(1000).bytes(new Uint8Array(10));
   const r = readGgufSource(bytesSource(w.finish()), "/m.gguf");
-  expect(rules(r)).toEqual([["parse_error", "MEDIUM"]]);
+  // The cut lands inside a template value, so the stop is HIGH and the record is incomplete.
+  expect(rules(r)).toEqual([["parse_error", "HIGH"]]);
+  expect(r.findings[0]!.templateName).toBe("tool_use");
+  expect(r.extractionComplete).toBe(false);
   expect(r.templates.map((t) => t.source.name)).toEqual(["default"]);
 });
 
@@ -155,11 +158,13 @@ test("a duplicated key that is not a template is a MEDIUM parse_error", () => {
   expect(rules(r)).toEqual([["parse_error", "MEDIUM"]]);
 });
 
-test("a chat template key holding a non-string is a MEDIUM parse_error and is not extracted", () => {
+test("a chat template key holding a non-string is a MEDIUM parse_error, is not extracted, and leaves extraction incomplete", () => {
   const r = read([
     ["tokenizer.chat_template", arr(T.STRING, ["{{ x }}"])],
     ["tokenizer.chat_template.n", u32(5)],
   ]);
   expect(rules(r)).toEqual([["parse_error", "MEDIUM"], ["parse_error", "MEDIUM"]]);
   expect(r.templates).toEqual([]);
+  expect(r.extractionComplete).toBe(false);
 });
+

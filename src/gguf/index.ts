@@ -7,7 +7,7 @@ import { checkTemplateList, extractTemplates, isTemplateKey, templateName } from
 export { bytesSource, openFileSource, parseGguf, type ByteSource } from "./reader.ts";
 
 function emptyRecord(path: string, realPath: string): ModelRecord {
-  return { format: "gguf", id: realPath, paths: [path], templates: [], hints: {}, specialTokens: [], findings: [] };
+  return { format: "gguf", id: realPath, paths: [path], templates: [], hints: {}, specialTokens: [], extractionComplete: false, findings: [] };
 }
 
 function scannerError(path: string, e: unknown): Finding {
@@ -48,6 +48,7 @@ export function readGgufSource(src: ByteSource, path: string, realPath = path): 
   record.templates = extractTemplates(parse.templates, path, realPath);
   record.specialTokens = parse.specialTokens;
   record.ggufGeneral = parse.general;
+  record.extractionComplete = parse.complete;
   for (const p of parse.problems) {
     const f: Finding = { ruleId: p.ruleId, severity: p.severity, message: p.message, file: path };
     if (p.key !== undefined) {
