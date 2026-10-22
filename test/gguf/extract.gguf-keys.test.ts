@@ -1,10 +1,10 @@
 // ISC-4, ISC-4.1, ISC-4.2, ISC-4.3: listed, unlisted, duplicate and NUL-bearing chat template keys.
 import { expect, test } from "bun:test";
 import { readGgufSource } from "../../src/gguf/index.ts";
-import { bytesSource } from "../../src/gguf/reader.ts";
+import { bytesSource, decodeKey } from "../../src/gguf/reader.ts";
 import { arr, buildGguf, str, T, u32, Writer, type Value } from "./builder.ts";
 
-const read = (kvs: [string, Value][]) => readGgufSource(bytesSource(buildGguf(kvs).bytes), "/m.gguf");
+const read = (kvs: [string | Uint8Array, Value][]) => readGgufSource(bytesSource(buildGguf(kvs).bytes), "/m.gguf");
 const rules = (r: ReturnType<typeof read>) => r.findings.map((f) => [f.ruleId, f.severity]);
 
 test("ISC-4: every key matching the pattern is extracted, listed or not", () => {
@@ -249,17 +249,99 @@ test("a NUL inside a template value is HIGH with its offsets, and the part llama
   expect(r.templates.map((t) => [t.source.name, t.source.key, t.text])).toEqual([
     ["default", "tokenizer.chat_template", "é{{ a }}\n\u0000{{ evil }}\u0000tail"],
     ["tool_use", "tokenizer.chat_template.tool_use", "ok"],
-    ["default", "tokenizer.chat_template[:10]", "é{{ a }}\n"],
+    ["default[:10]", "tokenizer.chat_template[:10]", "é{{ a }}\n"],
   ]);
   expect(f.detail).toMatchObject({ viewSha256: r.templates[2]!.sha256 });
   expect(r.extractionComplete).toBe(true);
 });
 
-test("a NUL at byte 0 of a named template gives an empty llama.cpp view", () => {
-  const r = read([["tokenizer.chat_template.tool_use", str("\u0000{{ evil }}")]]);
+test("ISC-4.1: a NUL at byte 0 of a listed template gives an empty llama.cpp view with its own name, and the view needs no list entry", () => {
+  const r = read([
+    ["tokenizer.chat_template.tool_use", str("\u0000{{ evil }}")],
+    ["tokenizer.chat_templates", arr(T.STRING, ["tool_use"])],
+  ]);
+  // Only the NUL finding: the view is not reported as an unlisted template.
   expect(rules(r)).toEqual([["parse_error", "HIGH"]]);
   expect(r.templates.map((t) => [t.source.name, t.source.key, t.text])).toEqual([
     ["tool_use", "tokenizer.chat_template.tool_use", "\u0000{{ evil }}"],
-    ["tool_use", "tokenizer.chat_template.tool_use[:0]", ""],
+    ["tool_use[:0]", "tokenizer.chat_template.tool_use[:0]", ""],
   ]);
+});
+
+test("a stored key that a llama.cpp view would be recorded under is HIGH", () => {
+  // The bare key's view clashes by name only, a named key's view by key and name.
+  for (const [key, clash] of [
+    ["tokenizer.chat_template", "tokenizer.chat_template.default[:1]"],
+    ["tokenizer.chat_template.tool_use", "tokenizer.chat_template.tool_use[:1]"],
+  ]) {
+    const r = read([
+      [clash!, str("{{ evil }}")],
+      [key!, str("a\u0000b")],
+    ]);
+    expect(rules(r)).toEqual([["parse_error", "HIGH"], ["parse_error", "HIGH"]]);
+    const f = r.findings[1]!;
+    expect(f.message).toContain(JSON.stringify(clash));
+    expect(f.templateSha256).toBe(r.templates[0]!.sha256);
+  }
+});
+
+// llama.cpp compares keys as bytes. Decoding invalid UTF-8 to U+FFFD before comparing would merge keys it keeps apart.
+const enc = new TextEncoder();
+const rawKey = (prefix: string, ...tail: number[]) => new Uint8Array([...enc.encode(prefix), ...tail]);
+
+test("ISC-4.2: keys that differ only in invalid UTF-8 bytes are both kept and are not duplicates", () => {
+  const r = read([
+    [rawKey("tokenizer.chat_template.x", 0x80), str("A")],
+    [rawKey("tokenizer.chat_template.x", 0xff), str("B")],
+    // A valid U+FFFD is a third, distinct key.
+    [rawKey("tokenizer.chat_template.x", 0xef, 0xbf, 0xbd), str("C")],
+    [rawKey("general.name", 0x80), str("a")],
+    [rawKey("general.name", 0xff), str("b")],
+  ]);
+  expect(r.findings).toEqual([]);
+  // Each invalid byte decodes to its own lone surrogate, so names and keys stay distinct too.
+  expect(r.templates.map((t) => [t.source.name, t.source.key, t.text])).toEqual([
+    ["x\udc80", "tokenizer.chat_template.x\udc80", "A"],
+    ["x\udcff", "tokenizer.chat_template.x\udcff", "B"],
+    ["x�", "tokenizer.chat_template.x�", "C"],
+  ]);
+});
+
+test("decodeKey round-trips 20,000 random keys, so two keys decode alike only when their bytes match", () => {
+  // The inverse: a lone U+DC80 to U+DCFF is the byte it escapes, anything else is UTF-8.
+  const encodeKey = (s: string) => {
+    const out: number[] = [];
+    for (const ch of s) {
+      const c = ch.codePointAt(0)!;
+      if (c >= 0xdc80 && c <= 0xdcff) out.push(c & 0xff);
+      else out.push(...enc.encode(ch));
+    }
+    return out;
+  };
+  // Boundary bytes from Unicode table 3-7, so near-miss sequences come up often.
+  const edges = [0x00, 0x41, 0x7f, 0x80, 0x8f, 0x90, 0x9f, 0xa0, 0xbf, 0xc0, 0xc1, 0xc2, 0xdf, 0xe0, 0xed, 0xee, 0xef, 0xf0, 0xf4, 0xf5, 0xff];
+  let seed = 0x5eed;
+  const rand = () => {
+    seed = (seed * 1103515245 + 12345) >>> 0;
+    return seed / 2 ** 32;
+  };
+  for (let i = 0; i < 20_000; i++) {
+    const bytes = Array.from({ length: Math.floor(rand() * 12) }, () => (rand() < 0.7 ? edges[Math.floor(rand() * edges.length)]! : Math.floor(rand() * 256)));
+    expect(encodeKey(decodeKey(new Uint8Array(bytes)))).toEqual(bytes);
+  }
+});
+
+test("ISC-4.2, ISC-4.1: the same invalid bytes twice are a duplicate, and list names match keys byte for byte", () => {
+  const r = read([
+    [rawKey("tokenizer.chat_template.x", 0x80), str("A")],
+    [rawKey("tokenizer.chat_template.x", 0x80), str("B")],
+    [rawKey("tokenizer.chat_template.y", 0xc3), str("C")],
+    ["tokenizer.chat_templates", arr(T.STRING, [rawKey("x", 0x80), rawKey("y", 0xff)])],
+  ]);
+  expect(r.findings.map((f) => [f.ruleId, f.severity, f.templateName])).toEqual([
+    ["parse_error", "HIGH", "x\udc80"],
+    ["template_list_mismatch", "MEDIUM", "y\udcff"],
+    ["template_list_mismatch", "MEDIUM", "y\udcc3"],
+  ]);
+  expect(r.findings[0]!.message).toBe('key "tokenizer.chat_template.x\\udc80" appears more than once');
 });

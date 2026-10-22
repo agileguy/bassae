@@ -98,11 +98,67 @@ const USER_DEFINED = 4;
 const READ_AHEAD = 1 << 20;
 
 const utf8 = new TextDecoder("utf-8", { fatal: false, ignoreBOM: true });
+const strictUtf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 const q = (key: string) => JSON.stringify(key);
 const SAFE = BigInt(Number.MAX_SAFE_INTEGER);
 
 /** A number when it converts exactly, else its decimal string. JSON.stringify throws on a bigint. */
 const jsonSafe = (v: bigint): number | string => (v >= -SAFE && v <= SAFE ? Number(v) : String(v));
+
+/** Length of the valid UTF-8 sequence that starts at i, or 0 if none does. Ranges are from Unicode table 3-7. */
+function sequenceAt(b: Uint8Array, i: number): number {
+  const c = b[i]!;
+  if (c < 0x80) return 1;
+  let n: number;
+  let lo = 0x80;
+  let hi = 0xbf;
+  if (c >= 0xc2 && c <= 0xdf) n = 2;
+  else if (c >= 0xe0 && c <= 0xef) {
+    n = 3;
+    if (c === 0xe0) lo = 0xa0;
+    else if (c === 0xed) hi = 0x9f;
+  } else if (c >= 0xf0 && c <= 0xf4) {
+    n = 4;
+    if (c === 0xf0) lo = 0x90;
+    else if (c === 0xf4) hi = 0x8f;
+  } else return 0;
+  if (i + n > b.length || b[i + 1]! < lo || b[i + 1]! > hi) return 0;
+  for (let k = 2; k < n; k++) if ((b[i + k]! & 0xc0) !== 0x80) return 0;
+  return n;
+}
+
+/**
+ * A key or template-list name. llama.cpp compares keys as bytes, so the decode must not merge any two: valid UTF-8
+ * decodes as usual, and each other byte becomes a lone surrogate U+DC80 to U+DCFF, as Python's surrogateescape does.
+ * Valid UTF-8 never decodes to one, so two keys decode to the same string only when their bytes are equal.
+ */
+export function decodeKey(bytes: Uint8Array): string {
+  try {
+    return strictUtf8.decode(bytes);
+  } catch {
+    // Not valid UTF-8, so decode it by hand. The output never has more UTF-16 units than the input has bytes.
+  }
+  const units = new Uint16Array(bytes.length);
+  let u = 0;
+  for (let i = 0; i < bytes.length; ) {
+    const c = bytes[i]!;
+    const n = sequenceAt(bytes, i);
+    if (n === 0) {
+      units[u++] = 0xdc00 | c;
+      i++;
+      continue;
+    }
+    let cp = n === 1 ? c : c & (0xff >> (n + 1));
+    for (let k = 1; k < n; k++) cp = (cp << 6) | (bytes[i + k]! & 0x3f);
+    if (cp > 0xffff) {
+      units[u++] = 0xd800 | ((cp - 0x10000) >> 10);
+      units[u++] = 0xdc00 | (cp & 0x3ff);
+    } else units[u++] = cp;
+    i += n;
+  }
+  // Unlike TextDecoder, Buffer's utf16le keeps lone surrogates. Bun only runs on little-endian hosts.
+  return Buffer.from(units.buffer, 0, u * 2).toString("utf16le");
+}
 
 function scalarAt(v: DataView, at: number, type: number): number | bigint | boolean {
   switch (type) {
@@ -301,7 +357,7 @@ export function parseGguf(src: ByteSource): GgufParse {
 
   const readKv = (seen: Set<string>) => {
     // `key` is the stored key, used in messages. `name` is what llama.cpp looks up, used for matching.
-    const key = utf8.decode(cur.bytes(length(cur, MAX_KEY_BYTES, "key")));
+    const key = decodeKey(cur.bytes(length(cur, MAX_KEY_BYTES, "key")));
     current = key;
     const name = cKey(key);
     const type = cur.u32();
@@ -404,7 +460,7 @@ export function parseGguf(src: ByteSource): GgufParse {
     walkStrings(cur, count, key, (_, n) => {
       // A name longer than any key the reader accepts can't name a template.
       if (n > MAX_KEY_BYTES) fits = false;
-      else names.push(utf8.decode(cur.peek(n)));
+      else names.push(decodeKey(cur.peek(n)));
     });
     return fits ? names : undefined;
   };
