@@ -32,11 +32,10 @@ export function runUnanalyzable(outcome: ParseOutcome, knownGood: boolean, base:
   if (outcome.parseError || outcome.tooLarge) {
     if (!knownGood) {
       const named = outcome.parseError ? namedConstruct(outcome.parseError) : undefined;
-      // Point at the named construct in the raw text when we can find it.
-      // A shape cap points at the code unit or token that went past it (M5).
+      // Point at the named construct in the raw text when we can find it, and
+      // at where a size or shape cap tripped (M5, ISC-26.1).
       const tok = named && outcome.pre ? outcome.pre.tokens.find((t) => t.type === "identifier" && t.value === named) : undefined;
-      const at = tok ?? outcome.capAt;
-      const span = at && outcome.lines ? outcome.lines.span(at.start, at.end) : undefined;
+      const span = tok && outcome.lines ? outcome.lines.span(tok.start, tok.end) : outcome.capAt;
       // Carry the real reason for a size/shape cap, not a generic blurb (item D):
       // parseError holds e.g. "whitespace run of 5000 exceeds the parse limit".
       const detail = outcome.tooLarge
@@ -45,7 +44,7 @@ export function runUnanalyzable(outcome: ParseOutcome, knownGood: boolean, base:
           ? `@huggingface/jinja cannot parse this template (construct: ${named})`
           : `@huggingface/jinja cannot parse this template: ${outcome.parseError}`;
       const f = mk("HIGH", detail, span);
-      if (outcome.capAt && span) f.excerpt = text.slice(span.start, span.end);
+      if (span && span.end > span.start && span === outcome.capAt) f.excerpt = text.slice(span.start, span.end);
       findings.push(f);
     }
     return findings;

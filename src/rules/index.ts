@@ -113,8 +113,10 @@ function clip(s: string): string {
   return s.length > MAX_EXCERPT ? `${s.slice(0, MAX_EXCERPT)}…` : s;
 }
 
+// Every finding passes through here, so no rule can copy a long span (a cap's
+// whitespace run, a whole tag) into the output as its excerpt.
 function pushAll(into: Finding[], from: Finding[]): void {
-  for (const f of from) into.push(f);
+  for (const f of from) into.push(f.excerpt && f.excerpt.length > MAX_EXCERPT ? { ...f, excerpt: clip(f.excerpt) } : f);
 }
 
 // Two rules can legitimately name the same span (e.g. an unparseable template

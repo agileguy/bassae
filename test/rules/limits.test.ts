@@ -229,39 +229,66 @@ test("M8: an inline `set x = ...` is NOT a block and does not deepen nesting", (
   expect(r.findings.some((f) => f.ruleId === "unanalyzable")).toBe(false);
 });
 
-// M5 — a shape-cap finding points at the offset where the cap tripped: the first
-// whitespace code unit past the run cap, the keyword that opens one block level
-// too many, the bracket one level too deep, the token one past the tag cap. Each
-// template starts on line 2 so the line and column are checked as well.
-test("M5: a shape-cap unanalyzable finding is spanned at the offset where the cap tripped", () => {
-  const NL = "x\n";
+// M5 / ISC-26.1 — a shape-cap finding is spanned where the cap tripped: the
+// whitespace run itself, the token that took block or bracket depth over its
+// limit, or the whole tag that passed the token limit. Each span's line:col is
+// checked against an offset computed without LineMap, and the excerpt is the
+// spanned text, clipped. The over-size finding is the whole-template case, at
+// offset 0 with length 0.
+test("M5: every shape-cap unanalyzable finding is spanned on the offending text", () => {
   const nth = (src: string, needle: string, n: number): number => {
     let i = -1;
     for (let k = 0; k < n; k++) i = src.indexOf(needle, i + 1);
     return i;
   };
-  const check = (src: string, start: number, text: string): void => {
-    const f = scan(src).findings.find((x) => x.ruleId === "unanalyzable" && x.severity === "HIGH");
-    const end = start + text.length;
-    expect({ span: f?.span, excerpt: f?.excerpt }).toEqual({ span: { start, end, line: 2, col: start - NL.length + 1 }, excerpt: text });
+  // Offset of a 1-based line and column, breaking lines as jinja2 does (BMP text, so a column is a code unit).
+  const offsetOf = (src: string, line: number, col: number): number => {
+    const re = /\r\n|\r|\n/g;
+    let start = 0;
+    for (let l = 1; l < line; l++) {
+      const m = re.exec(src);
+      if (!m) return -1;
+      start = m.index + m[0].length;
+    }
+    return start + col - 1;
   };
-  // Whitespace run: the 513th unit of the run, ASCII or not (M6).
-  for (const ch of [" ", " ", " "]) {
-    const head = NL + "{{ x";
-    check(head + ch.repeat(600) + "}}", head.length + 512, ch);
+  const clipped = (s: string): string => (s.length > 200 ? `${s.slice(0, 200)}…` : s);
+  const NL = "x\r\n"; // the variants start on line 2
+  const cases: { label: string; src: string; start: number; end: number }[] = [];
+  const add = (label: string, src: string, start: number, end: number): void => void cases.push({ label, src, start, end });
+
+  // Whitespace runs: the run itself, ASCII or not (M6).
+  for (const [name, ch] of [["U+2003", " "], ["U+00A0", " "], ["space", " "]] as const) {
+    add(`100k ${name} in a tag`, "{{ x" + ch.repeat(100_000) + "}}", 4, 100_004);
+    add(`600 ${name}, line 2`, NL + "{{ x" + ch.repeat(600) + "}}", NL.length + 4, NL.length + 604);
   }
-  // Block depth: the 128th elif nests the 129th level under its `if`.
-  const elifs = NL + "{% if a0 %}x" + Array.from({ length: 140 }, (_, i) => `{% elif a${i + 1} %}x`).join("") + "{% endif %}";
-  check(elifs, nth(elifs, "elif", 128), "elif");
-  // The 129th nested block set, and the 129th nested if.
-  const sets = NL + "{% set v %}".repeat(140) + "x" + "{% endset %}".repeat(140);
-  check(sets, nth(sets, "set v", 129), "set");
+  // Block depth: the keyword that opens level 129.
+  const elifs = "{% if a %}" + "{% elif b %}".repeat(300) + "{% endif %}";
+  add("300 elifs", elifs, nth(elifs, "elif", 128), nth(elifs, "elif", 128) + 4);
+  const sets = "{% set a %}".repeat(200) + "x" + "{% endset %}".repeat(200);
+  add("200 nested set blocks", sets, nth(sets, "set a", 129), nth(sets, "set a", 129) + 3);
   const ifs = NL + "{% if x %}".repeat(140) + "y" + "{% endif %}".repeat(140);
-  check(ifs, nth(ifs, "if x", 129), "if");
-  // Bracket depth: the 101st open paren.
-  check(NL + "{{ " + "(".repeat(150) + "x" + ")".repeat(150) + " }}", NL.length + 3 + 100, "(");
-  // Tag tokens: the 2049th token of one tag.
-  check(NL + "{{ " + "a+".repeat(1100) + "a }}", NL.length + 3 + 2048, "a");
+  add("140 nested ifs, line 2", ifs, nth(ifs, "if x", 129), nth(ifs, "if x", 129) + 2);
+  // Bracket depth: the 101st open bracket.
+  add("150 parens, line 2", NL + "{{ " + "(".repeat(150) + "x" + ")".repeat(150) + " }}", NL.length + 103, NL.length + 104);
+  // Tag tokens: the whole tag, opener to closer, closed or not.
+  const tag = NL + "{{ " + "a+".repeat(1100) + "a }}";
+  add("2201-token tag, line 2", tag, NL.length, tag.length);
+  const open = NL + "{% set y = 1 %}{{ " + "a+".repeat(1100) + "a";
+  add("2201-token unclosed tag, line 2", open, open.indexOf("{{"), open.length);
+
+  for (const c of cases) {
+    const caps = scan(c.src).findings.filter((f) => f.ruleId === "unanalyzable" && f.severity === "HIGH");
+    expect({ label: c.label, count: caps.length }).toEqual({ label: c.label, count: 1 });
+    const f = caps[0]!;
+    expect({ label: c.label, start: f.span?.start, end: f.span?.end }).toEqual({ label: c.label, start: c.start, end: c.end });
+    expect({ label: c.label, at: offsetOf(c.src, f.span!.line, f.span!.col) }).toEqual({ label: c.label, at: c.start });
+    expect({ label: c.label, excerpt: f.excerpt }).toEqual({ label: c.label, excerpt: clipped(c.src.slice(c.start, c.end)) });
+  }
+
+  // Over the size cap: the whole template, at offset 0 with length 0.
+  const big = scan("{{ x }}" + "a".repeat(512 * 1024)).findings.filter((f) => f.ruleId === "unanalyzable" && f.severity === "HIGH");
+  expect(big.map((f) => ({ span: f.span, excerpt: f.excerpt }))).toEqual([{ span: { start: 0, end: 0, line: 1, col: 1 }, excerpt: undefined }]);
 });
 
 test("findings are capped at 100 per rule, plus one finding carrying the remaining count", () => {
