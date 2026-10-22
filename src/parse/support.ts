@@ -365,13 +365,16 @@ export function correlateSpans(leaves: Leaf[], tokens: PreToken[], lines: LineMa
 // anywhere along it. Everything else is folded and checked, or it is a dynamic
 // attribute reach. To decide that per use site we first resolve what every local
 // name is bound to, carrying taint through `set`, two-step `set`, namespace-
-// attribute assignment (`set ns.k = ...`) and loop variables (macro parameters
-// are opaque, not runtime), including values built inside containers or conditionals.
+// attribute assignment (`set ns.k = ...`), loop variables (runtime only when the
+// loop walks runtime data) and macro parameters (runtime only when every call
+// site passes runtime data), including values built inside containers or
+// conditionals. A name written more than once holds the join of every write.
 
 /** What a local name resolves to, for the carve-out. */
 export type Binding =
   | { t: "const"; value: FoldValue } // folds to a compile-time constant
   | { t: "runtime" } //                a loop var or a `set`/`for` target rooted in runtime input data
+  | { t: "number" } //                 a number whose value varies (a counter, a range() index); never names an attribute
   | { t: "built" } //                  assembled by a string op, filter, method or call — never exempt
   | { t: "gadget" } //                 an engine-gadget handle (cycler/joiner/lipsum/namespace/dict/self)
   | { t: "opaque" }; //                a local of unknown nature (a call result, a filtered value)
@@ -382,6 +385,28 @@ const BINDING_RUNTIME: Binding = { t: "runtime" };
 const BINDING_BUILT: Binding = { t: "built" };
 const BINDING_GADGET: Binding = { t: "gadget" };
 const BINDING_OPAQUE: Binding = { t: "opaque" };
+const BINDING_NUMBER: Binding = { t: "number" };
+
+// Arithmetic operators: numeric operands give a number.
+const ARITHMETIC_OPS = new Set(["+", "-", "*", "/", "//", "%", "**"]);
+
+// Binary operators that build a string when either side is one: concatenation,
+// repetition, and Python %-formatting (`'__%s__' % 'class'`).
+const STRING_BUILDING_OPS = new Set(["+", "*", "%"]);
+
+// Filters whose result holds only values drawn from the operand (selected,
+// reordered or case-mapped), never a value the template supplies, so a runtime
+// operand stays runtime data through them. `default`, `replace`, `join`, `map`,
+// `batch`, `groupby`, `tojson` and the rest can inject a template-chosen value,
+// so they end the chain.
+const DATA_FILTERS = new Set([
+  "items", "dictsort", "list", "first", "last", "reverse", "sort", "unique", "select", "reject",
+  "selectattr", "rejectattr", "trim", "lower", "upper", "string", "length", "count",
+]);
+
+// Methods with the same property, on a runtime receiver. `get` qualifies only
+// with one argument; a second is a default the template chooses.
+const DATA_METHODS = new Set(["items", "keys", "values", "split", "rsplit", "strip", "lstrip", "rstrip", "lower", "upper"]);
 
 /** The base identifier a member/subscript/call/filter chain hangs off, if any. */
 export function rootIdentifier(node: Node): string | undefined {
@@ -415,8 +440,9 @@ function classifyValue(node: unknown, env: BindingEnv, depth = 0): Binding {
     case "Identifier": {
       const v = String(n.value);
       if (GADGETS.has(v)) return BINDING_GADGET;
-      if (RUNTIME_INPUTS.has(v)) return BINDING_RUNTIME;
-      return env.get(v) ?? BINDING_OPAQUE;
+      // A local binding shadows the runtime input of the same name: a macro
+      // parameter or loop variable called `message` is whatever was bound to it.
+      return env.get(v) ?? (RUNTIME_INPUTS.has(v) ? BINDING_RUNTIME : BINDING_OPAQUE);
     }
     case "MemberExpression": {
       const key = attrKey(n);
@@ -433,8 +459,12 @@ function classifyValue(node: unknown, env: BindingEnv, depth = 0): Binding {
     case "BinaryExpression": {
       const op = (n.operator as { value: string }).value;
       if (op === "~") return BINDING_BUILT;
-      if ((op === "+" || op === "*") && (foldsToString(n.left, env) || foldsToString(n.right, env))) return BINDING_BUILT;
-      return BINDING_RUNTIME; // numeric arithmetic never names an attribute
+      if (STRING_BUILDING_OPS.has(op) && (foldsToString(n.left, env) || foldsToString(n.right, env))) return BINDING_BUILT;
+      // `a or b` / `a and b` evaluate to one of their operands, so a literal
+      // operand can be the result (`m.missing or 'upper'`).
+      if (op === "or" || op === "and") return joinBindings(classifyValue(n.left, env, depth + 1), classifyValue(n.right, env, depth + 1));
+      if (ARITHMETIC_OPS.has(op) && isNumeric(classifyValue(n.left, env, depth + 1)) && isNumeric(classifyValue(n.right, env, depth + 1))) return BINDING_NUMBER;
+      return BINDING_RUNTIME; // numeric arithmetic and comparisons never name an attribute
     }
     case "FilterExpression":
       return BINDING_BUILT;
@@ -461,25 +491,267 @@ function classifyValue(node: unknown, env: BindingEnv, depth = 0): Binding {
 }
 
 function joinBindings(a: Binding, b: Binding): Binding {
+  // An empty list holds no value to bind, index or call, so it adds nothing:
+  // `{% if tools is not defined %}{% set tools = [] %}` and `x or []` stay x.
+  if (isEmptyList(a)) return b;
+  if (isEmptyList(b)) return a;
   if (a.t === "gadget" || b.t === "gadget") return BINDING_GADGET;
   if (a.t === "built" || b.t === "built") return BINDING_BUILT;
   if (a.t === "runtime" && b.t === "runtime") return BINDING_RUNTIME;
+  if (a.t === "const" && b.t === "const" && sameFold(a.value, b.value)) return a;
+  if (isNumeric(a) && isNumeric(b)) return BINDING_NUMBER;
   return BINDING_OPAQUE;
 }
 
+function isEmptyList(b: Binding): boolean {
+  return b.t === "const" && Array.isArray(b.value) && b.value.length === 0;
+}
+
+function isNumeric(b: Binding): boolean {
+  return b.t === "number" || (b.t === "const" && typeof b.value === "number");
+}
+
+/** True when a key is a number however it is derived: it folds to one, or is bound to a counter or range() index. */
+export function keyIsNumeric(node: Node, env: BindingEnv): boolean {
+  return isNumeric(classifyValue(node, env));
+}
+
+function sameBinding(a: Binding | undefined, b: Binding | undefined): boolean {
+  if (!a || !b) return a === b;
+  return a.t === b.t && (a.t !== "const" || sameFold(a.value, (b as { value: FoldValue }).value));
+}
+
+function sameFold(a: FoldValue, b: FoldValue): boolean {
+  if (Array.isArray(a) || Array.isArray(b)) {
+    return Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((x, i) => sameFold(x, b[i]!));
+  }
+  return Object.is(a, b);
+}
+
 /**
- * Resolve what every local name (and `ns.attr` slot) is bound to. A straight
- * recursive descent over STATEMENTS, whose nesting parse.ts caps at 128 before
- * the parser runs, so it cannot overflow; value expressions are classified
- * non-recursively with a depth cap (ISC-31). Straight-line, last-write-wins: a
- * `set` inside a branch is treated as having happened, which can only add taint.
+ * True when a value is drawn only from runtime input data: a runtime-bound name,
+ * a field or element of one, or such a value passed through a filter or method
+ * that only selects, reorders or case-maps it (DATA_FILTERS, DATA_METHODS). A
+ * literal, a container the template writes, or a chain that can inject a
+ * template-chosen value is not. This decides the OBJECT of a subscript, a loop
+ * variable and a macro argument; a subscript KEY is held to the stricter
+ * keyIsRuntime, where any filter or call counts as built.
+ */
+export function runtimeRooted(node: unknown, env: BindingEnv, depth = 0): boolean {
+  if (depth > 40 || !node || typeof node !== "object") return false;
+  const n = node as Node;
+  const b = classifyValue(n, env);
+  if (b.t === "runtime" || isEmptyList(b)) return true; // an empty list carries no value, as in joinBindings
+  switch (n.type) {
+    case "MemberExpression": {
+      // A bound `ns.k` slot is decided by its own binding, already read above.
+      const key = attrKey(n);
+      if (key && env.has(key)) return false;
+      return runtimeRooted(n.object, env, depth + 1);
+    }
+    case "FilterExpression": {
+      const f = n.filter as Node;
+      const name = String((f.type === "CallExpression" ? (f.callee as Node) : f).value);
+      return DATA_FILTERS.has(name) && runtimeRooted(n.operand, env, depth + 1);
+    }
+    case "CallExpression": {
+      const callee = n.callee as Node;
+      if (callee.type !== "MemberExpression" || callee.computed) return false;
+      const method = String((callee.property as Node).value);
+      const argc = ((n.args as Node[] | undefined) ?? []).length;
+      if (!DATA_METHODS.has(method) && !(method === "get" && argc <= 1)) return false;
+      return runtimeRooted(callee.object, env, depth + 1);
+    }
+    case "SelectExpression": // `x if cond` is x or undefined
+      return runtimeRooted(n.lhs, env, depth + 1);
+    case "Ternary":
+      return runtimeRooted(n.trueExpr, env, depth + 1) && runtimeRooted(n.falseExpr, env, depth + 1);
+    default:
+      return false;
+  }
+}
+
+/** What a loop variable is bound to: runtime when the loop counts with range() or walks runtime data. */
+function loopBinding(iterable: Node | undefined, env: BindingEnv): Binding {
+  if (!iterable) return BINDING_OPAQUE;
+  const callee = iterable.type === "CallExpression" ? (iterable.callee as Node) : undefined;
+  if (callee?.type === "Identifier" && String(callee.value) === "range") return BINDING_NUMBER;
+  if (iterable.type === "ArrayLiteral" || iterable.type === "TupleLiteral") {
+    // A list the template writes yields its own elements.
+    const items = (iterable.value as Node[] | undefined) ?? [];
+    if (items.every((c) => runtimeRooted(c, env))) return BINDING_RUNTIME;
+    return items.map((c) => classifyValue(c, env)).reduce(joinBindings);
+  }
+  if (runtimeRooted(iterable, env)) return BINDING_RUNTIME;
+  return classifyValue(iterable, env).t === "gadget" ? BINDING_GADGET : BINDING_OPAQUE;
+}
+
+// Rounds of the binding fixpoint before giving up. Every corpus template settles
+// within four, counting the round that confirms nothing changed; a template that
+// has not settled by here gets no exemptions.
+const MAX_BINDING_ROUNDS = 16;
+
+/** One call's arguments, split once so each parameter lookup is O(1). */
+interface CallArgs {
+  positional: Node[];
+  keyword: Map<string, Node>;
+}
+
+/** A macro's parameters and every direct call to it, for the parameter fixpoint. */
+interface MacroInfo {
+  params: { name: string; index: number; fallback?: Node }[];
+  calls: CallArgs[]; // each `f(...)` and `{% call f(...) %}`
+  /** Defined twice, referenced other than as a direct callee, or called with a spread: its params are opaque. */
+  opaque: boolean;
+}
+
+/**
+ * Collect every macro, its direct call sites, and whether its name escapes. A
+ * name that appears anywhere except as its own definition or a direct callee
+ * (bound by `set`, passed as an argument, output) may be called where we cannot
+ * see the arguments, so that macro's parameters are opaque. Explicit stack (ISC-31).
+ */
+function collectMacros(program: Node): Map<string, MacroInfo> {
+  const macros = new Map<string, MacroInfo>();
+  const calls = new Map<string, CallArgs[]>();
+  const refs = new Set<string>(); // identifiers used other than as a direct callee or a definition name
+  const spread = new Set<string>(); // callees called with *args or **kwargs
+  const excused = new Set<Node>();
+  const stack: unknown[] = [program];
+  while (stack.length) {
+    const node = stack.pop();
+    if (!node || typeof node !== "object") continue;
+    if (Array.isArray(node)) {
+      for (const c of node) stack.push(c);
+      continue;
+    }
+    const n = node as Node;
+    switch (n.type) {
+      case "Macro": {
+        const name = String((n.name as Node).value);
+        excused.add(n.name as Node);
+        const prior = macros.get(name);
+        const params: MacroInfo["params"] = [];
+        ((n.args as Node[] | undefined) ?? []).forEach((a, index) => {
+          if (a.type === "Identifier") params.push({ name: String(a.value), index });
+          else if (a.type === "KeywordArgumentExpression") params.push({ name: String((a.key as Node).value), index, fallback: a.value as Node });
+        });
+        macros.set(name, { params, calls: [], opaque: prior !== undefined });
+        break;
+      }
+      case "CallExpression": {
+        const callee = n.callee as Node;
+        if (callee?.type === "Identifier") {
+          excused.add(callee);
+          const name = String(callee.value);
+          const args = (n.args as Node[] | undefined) ?? [];
+          if (args.some((a) => a.type === "SpreadExpression" || a.type === "KeywordSpreadExpression")) spread.add(name);
+          const list = calls.get(name) ?? [];
+          const keyword = new Map<string, Node>();
+          for (const a of args) if (a.type === "KeywordArgumentExpression") keyword.set(String((a.key as Node).value), a.value as Node);
+          list.push({ positional: args.filter((a) => a.type !== "KeywordArgumentExpression"), keyword });
+          calls.set(name, list);
+        }
+        break;
+      }
+      case "MemberExpression":
+        if (!n.computed) excused.add(n.property as Node);
+        break;
+      case "KeywordArgumentExpression":
+        excused.add(n.key as Node);
+        break;
+      case "Identifier":
+        if (!excused.has(n)) refs.add(String(n.value));
+        break;
+    }
+    for (const v of Object.values(n)) stack.push(v);
+  }
+  for (const [name, m] of macros) {
+    m.calls = calls.get(name) ?? [];
+    if (refs.has(name) || spread.has(name)) m.opaque = true;
+  }
+  return macros;
+}
+
+/** The values that can reach one parameter: its default, and what each call site passes. */
+function paramSources(m: MacroInfo, p: MacroInfo["params"][number]): Node[] {
+  const out: Node[] = p.fallback ? [p.fallback] : [];
+  for (const call of m.calls) {
+    const v = call.positional[p.index] ?? call.keyword.get(p.name);
+    if (v) out.push(v);
+  }
+  return out;
+}
+
+/**
+ * Resolve what every local name (and `ns.attr` slot) is bound to. One pass is a
+ * straight recursive descent over STATEMENTS, whose nesting parse.ts caps at 128
+ * before the parser runs, so it cannot overflow; value expressions are
+ * classified with a depth cap (ISC-31).
+ *
+ * The env is flat and order-free: a name written more than once holds the join
+ * of every write, so a later clean write cannot launder an earlier template-made
+ * one, and a `set` inside a branch counts as having happened. Passes repeat,
+ * each starting from the last, until nothing changes, so a value read before a
+ * later write (in a loop, or a macro body called after it) sees that write too.
+ *
+ * A macro parameter is runtime only when every direct call site, and its default
+ * if it has one, passes a runtime-rooted value (round-2 macro-parameter review).
+ * That is a greatest fixpoint: every parameter starts runtime and is demoted when
+ * a source is not, which handles recursive macros. A parameter that is demoted
+ * holds the join of its sources. Everything moves one way (toward less
+ * exemption), so the rounds terminate; past MAX_BINDING_ROUNDS no local is exempt.
  */
 export function resolveBindings(program: Node): BindingEnv {
-  const env: BindingEnv = new Map();
+  const macros = collectMacros(program);
+  const paramKey = (macro: string, param: string): string => `${macro}\u0000${param}`;
+  const params = new Map<string, Binding>();
+  for (const [name, m] of macros) for (const p of m.params) params.set(paramKey(name, p.name), m.opaque ? BINDING_OPAQUE : BINDING_RUNTIME);
+
+  // A runtime input holds runtime data until the template writes it, and a write
+  // joins with that: `set message = 'abc'` leaves `message` no longer exempt.
+  let env: BindingEnv = new Map([...RUNTIME_INPUTS].map((name) => [name, BINDING_RUNTIME]));
+  for (let round = 0; round < MAX_BINDING_ROUNDS; round++) {
+    const next = bindingPass(program, env, params, paramKey);
+    let changed = next.size !== env.size || [...next].some(([k, b]) => !sameBinding(env.get(k), b));
+    for (const [name, m] of macros) {
+      for (const p of m.params) {
+        const k = paramKey(name, p.name);
+        const prev = params.get(k)!;
+        const sources = paramSources(m, p);
+        let b: Binding;
+        if (prev.t === "runtime" && sources.every((v) => runtimeRooted(v, next))) b = BINDING_RUNTIME;
+        else {
+          const joined = sources.map((v) => classifyValue(v, next)).reduce<Binding | undefined>((acc, x) => (acc ? joinBindings(acc, x) : x), undefined) ?? BINDING_OPAQUE;
+          // A runtime join here means a source was not rooted after all; never keep it exempt.
+          b = prev.t === "runtime" ? (joined.t === "runtime" ? BINDING_OPAQUE : joined) : joinBindings(prev, joined);
+        }
+        if (!sameBinding(prev, b)) {
+          params.set(k, b);
+          changed = true;
+        }
+      }
+    }
+    env = next;
+    if (!changed) return env;
+  }
+  // Did not settle: nothing local is exempt.
+  const out: BindingEnv = new Map();
+  for (const [k, b] of env) out.set(k, joinBindings(b, BINDING_OPAQUE));
+  return out;
+}
+
+/** One pass of resolveBindings, joining every write into a copy of `prior`. */
+function bindingPass(program: Node, prior: BindingEnv, params: Map<string, Binding>, paramKey: (m: string, p: string) => string): BindingEnv {
+  const env: BindingEnv = new Map(prior);
+  const write = (name: string, b: Binding): void => {
+    const prev = env.get(name);
+    env.set(name, prev ? joinBindings(prev, b) : b);
+  };
   const bindTarget = (target: Node | undefined, b: Binding): void => {
     if (!target) return;
-    if (target.type === "Identifier") env.set(String(target.value), b);
-    else if (target.type === "TupleLiteral" || target.type === "ArrayLiteral") for (const c of (target.value as Node[]) ?? []) bindTarget(c, BINDING_RUNTIME);
+    if (target.type === "Identifier") write(String(target.value), b);
+    else if (target.type === "TupleLiteral" || target.type === "ArrayLiteral") for (const c of (target.value as Node[]) ?? []) bindTarget(c, b);
   };
   const walk = (stmts: unknown): void => {
     if (!Array.isArray(stmts)) return;
@@ -491,32 +763,33 @@ export function resolveBindings(program: Node): BindingEnv {
           const value = s.value as Node | undefined;
           const b = value ? classifyValue(value, env) : BINDING_OPAQUE;
           if (assignee?.type === "Identifier") {
-            env.set(String(assignee.value), b);
-            recordNamespaceInit(String(assignee.value), value, env);
+            write(String(assignee.value), b);
+            recordNamespaceInit(String(assignee.value), value, env, write);
           } else {
             const key = attrKey(assignee);
-            if (key) env.set(key, b);
+            if (key) write(key, b);
           }
           walk(s.body); // {% set x %}...{% endset %} block body
           continue;
         }
         case "For":
-          bindTarget(s.loopvar as Node, BINDING_RUNTIME);
+          bindTarget(s.loopvar as Node, loopBinding(s.iterable as Node, env));
           walk(s.body);
           walk(s.defaultBlock);
           continue;
-        case "Macro":
-          // A macro parameter is NOT runtime data: the caller controls it and can
-          // pass a literal, a template-built value, or a gadget. It is opaque, so a
-          // param used as a subscript key or attribute path is not exempt (M1/M2).
+        case "Macro": {
+          const name = String((s.name as Node).value);
           for (const a of (s.args as Node[] | undefined) ?? []) {
-            if (a.type === "Identifier") env.set(String(a.value), BINDING_OPAQUE);
-            else if (a.type === "KeywordArgumentExpression") env.set(String((a.key as Node).value), classifyValue(a.value, env));
+            const p = a.type === "Identifier" ? String(a.value) : a.type === "KeywordArgumentExpression" ? String((a.key as Node).value) : undefined;
+            if (p !== undefined) write(p, params.get(paramKey(name, p)) ?? BINDING_OPAQUE);
           }
           walk(s.body);
           continue;
+        }
         case "CallStatement":
-          for (const a of (s.callerArgs as Node[] | undefined) ?? []) if (a.type === "Identifier") env.set(String(a.value), BINDING_RUNTIME);
+          // `{% call(x) f() %}`: x is whatever the macro passes to caller(), which
+          // we do not trace. No stock template uses a call block.
+          for (const a of (s.callerArgs as Node[] | undefined) ?? []) if (a.type === "Identifier") write(String(a.value), BINDING_OPAQUE);
           walk(s.body);
           continue;
         case "If":
@@ -536,21 +809,27 @@ export function resolveBindings(program: Node): BindingEnv {
 }
 
 /** `set ns = namespace(k=V, ...)` seeds `ns.k` bindings (same for dict()). */
-function recordNamespaceInit(target: string, value: Node | undefined, env: BindingEnv): void {
+function recordNamespaceInit(target: string, value: Node | undefined, env: BindingEnv, write: (k: string, b: Binding) => void): void {
   if (!value || value.type !== "CallExpression") return;
   const callee = value.callee as Node;
   if (callee.type !== "Identifier" || (String(callee.value) !== "namespace" && String(callee.value) !== "dict")) return;
   for (const a of (value.args as Node[] | undefined) ?? []) {
-    if (a.type === "KeywordArgumentExpression") env.set(`${target}.${String((a.key as Node).value)}`, classifyValue(a.value, env));
+    if (a.type === "KeywordArgumentExpression") write(`${target}.${String((a.key as Node).value)}`, classifyValue(a.value, env));
   }
+}
+
+/** True when an identifier key is bound by nothing: no local binding, runtime input or engine gadget. */
+export function isUnboundName(name: string, env: BindingEnv): boolean {
+  return !env.has(name) && !RUNTIME_INPUTS.has(name) && !GADGETS.has(name);
 }
 
 /**
  * True when a key/attribute/callee node is PROVABLY runtime data: a plain
  * reference whose binding chain is rooted in a runtime input, with no string
  * operation, method call or gadget anywhere along it (ISC-14.1). This is the
- * only exemption — a literal, a template-built value, or a macro parameter is
- * not runtime (Gemini M1/M2). A direct literal index is handled separately.
+ * only exemption — a literal, a template-built value, or a macro parameter some
+ * caller fills with one is not runtime (Gemini M1/M2). A direct literal index is
+ * handled separately.
  */
 export function keyIsRuntime(node: Node, env: BindingEnv): boolean {
   return classifyValue(node, env).t === "runtime";
@@ -579,7 +858,8 @@ function keyStringOp(node: Node, env?: BindingEnv): boolean {
     case "BinaryExpression": {
       const op = (node.operator as { value: string }).value;
       if (op === "~") return true; // `~` always stringifies
-      if (op === "+" || op === "*") return foldsToString(node.left, env) || foldsToString(node.right, env);
+      if (STRING_BUILDING_OPS.has(op)) return foldsToString(node.left, env) || foldsToString(node.right, env);
+      if (op === "or" || op === "and") return keyStringOp(node.left as Node, env) || keyStringOp(node.right as Node, env);
       return false;
     }
     case "FilterExpression":
@@ -712,11 +992,19 @@ export function foldLiteral(node: unknown, depth = 0, env?: BindingEnv): FoldVal
       return undefined;
     }
     case "BinaryExpression": {
+      const op = (n.operator as { value: string }).value;
       const l = foldLiteral(n.left, depth + 1, env);
+      // `a or b` / `a and b` evaluate to an operand; the left alone can decide.
+      if (op === "or" && l !== undefined) return truthy(l) ? l : foldLiteral(n.right, depth + 1, env);
+      if (op === "and" && l !== undefined) return truthy(l) ? foldLiteral(n.right, depth + 1, env) : l;
       const r = foldLiteral(n.right, depth + 1, env);
       if (l === undefined || r === undefined) return undefined;
-      const op = (n.operator as { value: string }).value;
       if (op === "~") return `${stringify(l)}${stringify(r)}`;
+      if (op === "%") {
+        if (typeof l === "string") return pyPercent(l, r, (n.right as Node).type === "TupleLiteral");
+        if (typeof l === "number" && typeof r === "number" && r !== 0) return l - r * Math.floor(l / r); // Python modulo
+        return undefined;
+      }
       if (op === "+") {
         if (typeof l === "number" && typeof r === "number") return l + r;
         if (typeof l === "string" && typeof r === "string") return l + r;
@@ -776,6 +1064,41 @@ export function foldLiteral(node: unknown, depth = 0, env?: BindingEnv): FoldVal
     default:
       return undefined;
   }
+}
+
+/**
+ * Python `fmt % args` for the plain `%s`, `%d`, `%i` and `%%` specifiers; any
+ * other specifier, flag or width does not fold (the key is still flagged as
+ * built). Only a tuple spreads into several arguments, as in Python.
+ */
+function pyPercent(fmt: string, arg: FoldValue, isTuple: boolean): string | undefined {
+  const args = isTuple && Array.isArray(arg) ? arg : [arg];
+  let used = 0;
+  let out = "";
+  for (let i = 0; i < fmt.length; i++) {
+    if (fmt[i] !== "%") {
+      out += fmt[i];
+      continue;
+    }
+    const spec = fmt[++i];
+    if (spec === "%") {
+      out += "%";
+      continue;
+    }
+    if (used >= args.length) return undefined;
+    const a = args[used++]!;
+    if (spec === "s" && !Array.isArray(a)) out += pyStr(a);
+    else if ((spec === "d" || spec === "i") && typeof a === "number") out += String(Math.trunc(a));
+    else return undefined;
+  }
+  return used === args.length ? out : undefined;
+}
+
+/** Python str() of a scalar. */
+function pyStr(v: string | number | boolean | null): string {
+  if (v === null) return "None";
+  if (typeof v === "boolean") return v ? "True" : "False";
+  return String(v);
 }
 
 /** Fold a string method the library renders, or undefined for anything else (M4). */
