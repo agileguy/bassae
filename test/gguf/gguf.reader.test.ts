@@ -46,6 +46,28 @@ test("a token_type array whose length differs from tokens is a MEDIUM parse_erro
   expect(r.specialTokens).toEqual(["<eos>"]);
 });
 
+// llama.cpp reads token_type as int32 whatever type it declares, so any other type gives no special tokens.
+test("a token_type that is not an int32 array is a MEDIUM parse_error, and the walk carries on", () => {
+  for (const types of [arr(T.U8, [1, 3, 4]), arr(T.U32, [1, 3, 4]), arr(T.STRING, ["1", "3", "4"]), u32(3)]) {
+    const r = read([
+      ["tokenizer.ggml.tokens", arr(T.STRING, ["a", "<eos>", "<x>"])],
+      ["tokenizer.ggml.token_type", types],
+      ["tokenizer.chat_template", str("{{ x }}")],
+    ]);
+    expect(r.findings.map((f) => [f.ruleId, f.severity, f.detail?.key])).toEqual([["parse_error", "MEDIUM", "tokenizer.ggml.token_type"]]);
+    expect(r.specialTokens).toEqual([]);
+    expect(r.templates).toHaveLength(1);
+  }
+});
+
+test("an empty CONTROL or USER_DEFINED token is not a special token", () => {
+  const r = read([
+    ["tokenizer.ggml.tokens", arr(T.STRING, ["", "<eos>", "", "a"])],
+    ["tokenizer.ggml.token_type", arr(T.I32, [TOKEN.CONTROL, TOKEN.CONTROL, TOKEN.USER_DEFINED, TOKEN.NORMAL])],
+  ]);
+  expect(r.specialTokens).toEqual(["<eos>"]);
+});
+
 test("ggufGeneral holds every general.* scalar and nothing else", () => {
   const r = read([
     ["general.architecture", str("qwen3")],
@@ -58,11 +80,36 @@ test("ggufGeneral holds every general.* scalar and nothing else", () => {
   ]);
   expect(r.ggufGeneral).toEqual({
     "general.architecture": "qwen3",
-    "general.parameter_count": 596049920n,
+    "general.parameter_count": 596049920,
     "general.quantization_version": 2,
     "general.finetuned": true,
     "general.score": 0.5,
   });
+});
+
+test("64-bit general.* values are numbers in the safe range and decimal strings outside it, so the record serializes", () => {
+  const r = read([
+    ["general.parameter_count", u64(596049920n)],
+    ["general.safe_max", u64(2n ** 53n - 1n)],
+    ["general.past_safe", u64(2n ** 53n)],
+    ["general.u64_max", u64(2n ** 64n - 1n)],
+    ["general.small_negative", { type: T.I64, value: -5n }],
+    ["general.i64_min", { type: T.I64, value: -(2n ** 63n) }],
+  ]);
+  expect(r.ggufGeneral).toEqual({
+    "general.parameter_count": 596049920,
+    "general.safe_max": 9007199254740991,
+    "general.past_safe": "9007199254740992",
+    "general.u64_max": "18446744073709551615",
+    "general.small_negative": -5,
+    "general.i64_min": "-9223372036854775808",
+  });
+  expect(JSON.parse(JSON.stringify(r)).ggufGeneral).toEqual(r.ggufGeneral);
+});
+
+test("a complete parse sets extractionComplete", () => {
+  expect(read(typicalKvs()).extractionComplete).toBe(true);
+  expect(read([]).extractionComplete).toBe(true);
 });
 
 test("version 2 files read the same as version 3", () => {
@@ -89,11 +136,32 @@ test("readGgufModel labels templates with the path reached and the real path", a
   expect(r.templates[0]!.source.realPath).toBe(real);
 });
 
+test("a GGUF reached through an HF cache snapshot carries its cache location, as an HF record does", async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "bassae-gguf-hf-")));
+  const repo = join(root, "models--org--name-GGUF");
+  const blob = join(repo, "blobs", "abc123");
+  const snapshot = join(repo, "snapshots", "rev1");
+  mkdirSync(join(repo, "blobs"), { recursive: true });
+  mkdirSync(snapshot, { recursive: true });
+  writeFileSync(blob, buildGguf(typicalKvs()).bytes);
+  symlinkSync(blob, join(snapshot, "model.gguf"));
+
+  const r = await readGgufModel(join(snapshot, "model.gguf"));
+  expect(r.id).toBe(blob);
+  expect(r.findings).toEqual([]);
+  expect(r.hfCache).toEqual({ repo: "org/name-GGUF", revision: "rev1", pathInRepo: "model.gguf" });
+  // A file that fails to open keeps its provenance too.
+  const missing = await readGgufModel(join(snapshot, "gone.gguf"));
+  expect(missing.findings.map((f) => f.ruleId)).toEqual(["scanner_error"]);
+  expect(missing.hfCache).toEqual({ repo: "org/name-GGUF", revision: "rev1", pathInRepo: "gone.gguf" });
+});
+
 test("readGgufModel turns a missing file or a directory into a scanner_error instead of throwing", async () => {
   const dir = mkdtempSync(join(tmpdir(), "bassae-gguf-reader-"));
   for (const p of [join(dir, "missing.gguf"), dir]) {
     const r = await readGgufModel(p);
     expect(r.findings.map((f) => [f.ruleId, f.severity])).toEqual([["scanner_error", "MEDIUM"]]);
+    expect(r.extractionComplete).toBe(false);
     expect(r.templates).toEqual([]);
   }
 });
