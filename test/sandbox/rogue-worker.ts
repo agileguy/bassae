@@ -1,6 +1,6 @@
 // Test-only stand-in for the render worker that misbehaves on purpose, so the tests can check
 // that the parent enforces the caps itself instead of trusting the worker.
-// Usage: bun rogue-worker.ts <stall|wrong-id|claim-timeout|huge|exit|noisy|skip-ready|fat-error|wide-error|fat-parsed>
+// Usage: bun rogue-worker.ts <stall|wrong-id|claim-timeout|huge|exit|noisy|skip-ready|fat-error|wide-error|fat-parsed|xcpu>
 
 import { encode, type RequestMessage } from "../../src/sandbox/protocol.ts";
 
@@ -49,6 +49,11 @@ switch (mode) {
     for (const id of ids) await say(fails(id, "€".repeat(30_000)));
     break;
   case "fat-parsed":
+    setInterval(() => {}, 1000);
+    break;
+  case "xcpu":
+    // What the kernel does once a step has used its CPU allowance.
+    process.kill(process.pid, "SIGXCPU");
     setInterval(() => {}, 1000);
     break;
 }

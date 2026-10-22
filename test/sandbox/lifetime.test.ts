@@ -2,11 +2,15 @@
 // Each test runs a real renderer in its own process, kills that process mid-render, and watches the worker.
 
 import { expect, test } from "bun:test";
+import { constants } from "node:os";
 import { join } from "node:path";
 import { sandboxAvailable } from "../../src/sandbox/index.ts";
+import { spawnSandboxed } from "../../src/sandbox/launcher.ts";
+import { encode } from "../../src/sandbox/protocol.ts";
 
 const status = await sandboxAvailable();
 const PARENT = join(import.meta.dir, "orphan-parent.ts");
+const WORKER = join(import.meta.dir, "../../src/sandbox/worker.ts");
 
 /** Every process under root, found by walking ps's parent links. */
 function descendants(root: number): number[] {
@@ -49,6 +53,33 @@ async function killMidRender(mode: "wait" | "block", signal: NodeJS.Signals, pat
     for (const pid of workers) if (running(pid)) process.kill(pid, "SIGKILL");
   }
 }
+
+test.skipIf(!status.available)(
+  "with no parent watching at all, the worker's own CPU limit ends a render that never finishes",
+  async () => {
+    const spin = "{% for i in range(1000) %}{% for j in range(1000) %}{% for k in range(1000) %}{% endfor %}{% endfor %}{% endfor %}";
+    const worker = spawnSandboxed([process.execPath, "--no-install", WORKER])!;
+    const start = performance.now();
+    try {
+      worker.stdin.write(encode({ t: "init", template: spin, maxOutputBytes: 1000, cpuMs: 500 }));
+      worker.stdin.write(encode({ t: "req", request: { id: "a", context: {}, profile: "hf-default" } }));
+      worker.stdin.end();
+      const [out, code] = await Promise.race([
+        Promise.all([new Response(worker.stdout).text(), worker.exited]),
+        Bun.sleep(10_000).then(() => ["", -1] as const),
+      ]);
+      const ms = performance.now() - start;
+      console.log(`[sandbox] worker ended by ${worker.signalCode ?? `exit ${code}`} after ${ms.toFixed(0)}ms at cpuMs 500`);
+      expect(out).toBe('{"t":"ready"}\n{"t":"parsed"}\n');
+      // bwrap reports a child killed by a signal as exit 128 + the signal.
+      expect(worker.signalCode === "SIGXCPU" || code === 128 + constants.signals.SIGXCPU).toBe(true);
+      expect(ms).toBeLessThan(3000);
+    } finally {
+      worker.kill("SIGKILL");
+    }
+  },
+  30_000,
+);
 
 test.skipIf(!status.available)(
   "SIGTERM to the renderer takes its worker down with it at once",

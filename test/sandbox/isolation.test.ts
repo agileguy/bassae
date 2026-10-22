@@ -17,8 +17,12 @@ interface CanaryReport {
   home: string;
   checkout: string;
   spawn: string;
+  userns: string;
   connect: string;
 }
+
+// The launcher passes --disable-userns only to a bwrap that has it (0.8 and later).
+const disablesUserns = status.available && status.kind === "bwrap" && Bun.spawnSync(["bwrap", "--help"]).stdout.toString().includes("--disable-userns");
 
 /** Runs the canary against fresh temp dirs, one of them in $HOME, a file in this checkout, and a live local TCP listener. */
 async function runCanary(start: (argv: string[]) => { stdout: ReadableStream<Uint8Array>; exited: Promise<number> } | undefined) {
@@ -63,7 +67,8 @@ test("sandbox availability is reported, and required where CI says so", () => {
 
 test("control: outside the sandbox the canary can write, read and connect", async () => {
   const { report, wrote, accepted } = await runCanary((argv) => Bun.spawn(argv, { stdout: "pipe" }));
-  expect(report).toEqual({ write: "ok", read: "ok", stat: "ok", home: "ok", checkout: "ok", spawn: "ok", connect: "ok" });
+  const userns = process.platform === "linux" ? "ok" : "n/a";
+  expect(report).toEqual({ write: "ok", read: "ok", stat: "ok", home: "ok", checkout: "ok", spawn: "ok", userns, connect: "ok" });
   expect(wrote).toBe(true);
   expect(accepted).toBe(1);
 });
@@ -82,6 +87,8 @@ test.skipIf(!status.available)("under the worker's sandbox wrapper the canary ca
   expect(accepted).toBe(0);
   // bwrap has no exec filter; the macOS profile denies fork outright.
   if (status.available && status.kind === "sandbox-exec") expect(report.spawn).toStartWith("denied");
+  // Not even a helper the worker could reach may make a user namespace of its own.
+  if (disablesUserns) expect(report.userns).toStartWith("denied");
 });
 
 test("with no sandbox, nothing is started at all", () => {

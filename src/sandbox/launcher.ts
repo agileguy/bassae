@@ -3,6 +3,7 @@
 import type { Subprocess } from "bun";
 import { dlopen, FFIType, ptr } from "bun:ffi";
 import { existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
+import { constants } from "node:os";
 import { dirname, join } from "node:path";
 import type { RenderFailure, RenderLimits, RenderRequest, RenderResult } from "../types.ts";
 import { clip, decodeChild, encode } from "./protocol.ts";
@@ -391,8 +392,11 @@ export async function runWorker(
       const code = await proc.exited;
       const detail = await stderr;
       if (settled) return;
-      // SIGXCPU is the worker's own CPU limit, set because its render or parse ran far too long.
-      if (proc.signalCode === "SIGXCPU") return fail("timeout", `worker exceeded its ${cpuMs}ms CPU limit`);
+      // SIGXCPU is the worker's own CPU limit, so its parse or render ran far too long. bwrap reports
+      // a child killed by a signal as exit 128 + the signal.
+      if (proc.signalCode === "SIGXCPU" || (kind === "bwrap" && code === 128 + constants.signals.SIGXCPU)) {
+        return fail("timeout", `worker exceeded its ${cpuMs}ms CPU limit`);
+      }
       fail("render_error", `worker exited (${proc.signalCode ?? `code ${code}`})${detail ? `: ${detail}` : ""}`);
     });
 

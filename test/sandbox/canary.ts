@@ -45,6 +45,14 @@ const report = {
     const p = Bun.spawnSync(["/bin/echo", "canary"]);
     if (!p.success) throw new Error(`exit ${p.exitCode}`);
   }),
+  // A threaded process cannot unshare a user namespace itself, so ask a single-threaded helper to. Linux only.
+  userns:
+    process.platform !== "linux"
+      ? "n/a"
+      : attempt(() => {
+          const p = Bun.spawnSync(["/usr/bin/unshare", "--user", "/usr/bin/true"], { stderr: "pipe" });
+          if (!p.success) throw new Error(p.stderr.toString().trim() || `exit ${p.exitCode}`);
+        }),
   connect: await tryConnect(Number(portArg)),
 };
 process.stdout.write(JSON.stringify(report) + "\n");

@@ -348,6 +348,10 @@ describe.skipIf(!live)("the parent does not trust the worker", () => {
     expect(results).toEqual([failed("a", "output_limit"), failed("b", "output_limit")]);
   });
 
+  test("a worker killed by its own CPU limit timed out, however the sandbox reports the death", async () => {
+    expect(await rogue("xcpu").renderBatch("", two)).toEqual([failed("a", "timeout"), failed("b", "timeout")]);
+  });
+
   test("a worker that exits mid-batch fails the in-flight request", async () => {
     expect(await rogue("exit").renderBatch("", two)).toEqual([failed("a", "render_error"), failed("b", "render_error")]);
   });
