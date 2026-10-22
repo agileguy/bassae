@@ -217,6 +217,26 @@ export interface Node {
   [k: string]: unknown;
 }
 
+/**
+ * Every child of an AST value, for the explicit-stack walkers: an array's
+ * elements, or a node's field values with any Map field expanded to its keys and
+ * values. The library keeps a dict literal's entries in a Map, which
+ * Object.values never enters, so a walker that enumerated fields itself would
+ * never see inside `{'a': ...}` (round-3 D1). Every generic walk goes through
+ * here. `skip` leaves out one name-bearing field.
+ */
+export function children(node: unknown, skip?: string): unknown[] {
+  if (!node || typeof node !== "object") return [];
+  if (Array.isArray(node)) return node;
+  const out: unknown[] = [];
+  for (const [k, v] of Object.entries(node)) {
+    if (k === skip) continue;
+    if (v instanceof Map) for (const [mk, mv] of v) out.push(mk, mv);
+    else out.push(v);
+  }
+  return out;
+}
+
 /** The salient leaves we locate: identifier and string nodes, in source order. */
 export interface Leaf {
   node: Node;
@@ -312,7 +332,7 @@ export function sourceOrderLeaves(program: Node): Leaf[] {
       case "KeywordSpreadExpression": pushSeq([E(n.argument)]); continue;
       default:
         if (STATEMENT_TYPES.has(n.type)) stack.push(S(n));
-        else pushSeq(Object.values(n).map(E));
+        else pushSeq(children(n).map(E));
         continue;
     }
   }
@@ -394,6 +414,11 @@ const ARITHMETIC_OPS = new Set(["+", "-", "*", "/", "//", "%", "**"]);
 // repetition, and Python %-formatting (`'__%s__' % 'class'`).
 const STRING_BUILDING_OPS = new Set(["+", "*", "%"]);
 
+// Binary operators whose result is a bool or a number whatever the operands:
+// comparisons and membership give a bool, and `-`, `/`, `//` and `**` are
+// defined only on numbers. Neither can name an attribute.
+const NUMERIC_RESULT_OPS = new Set(["==", "!=", "<", ">", "<=", ">=", "in", "not in", "-", "/", "//", "**"]);
+
 // Filters whose result holds only values drawn from the operand (selected,
 // reordered or case-mapped), never a value the template supplies, so a runtime
 // operand stays runtime data through them. `default`, `replace`, `join`, `map`,
@@ -462,9 +487,17 @@ function classifyValue(node: unknown, env: BindingEnv, depth = 0): Binding {
       if (STRING_BUILDING_OPS.has(op) && (foldsToString(n.left, env) || foldsToString(n.right, env))) return BINDING_BUILT;
       // `a or b` / `a and b` evaluate to one of their operands, so a literal
       // operand can be the result (`m.missing or 'upper'`).
-      if (op === "or" || op === "and") return joinBindings(classifyValue(n.left, env, depth + 1), classifyValue(n.right, env, depth + 1));
-      if (ARITHMETIC_OPS.has(op) && isNumeric(classifyValue(n.left, env, depth + 1)) && isNumeric(classifyValue(n.right, env, depth + 1))) return BINDING_NUMBER;
-      return BINDING_RUNTIME; // numeric arithmetic and comparisons never name an attribute
+      if (NUMERIC_RESULT_OPS.has(op)) return BINDING_NUMBER;
+      const l = classifyValue(n.left, env, depth + 1);
+      const r = classifyValue(n.right, env, depth + 1);
+      if (op === "or" || op === "and") return joinBindings(l, r);
+      // A string or a list plus a number is an error, so `x + 1` is a number.
+      if (op === "+" && (isNumeric(l) || isNumeric(r))) return BINDING_NUMBER;
+      if (ARITHMETIC_OPS.has(op) && isNumeric(l) && isNumeric(r)) return BINDING_NUMBER;
+      // `+`, `*` and `%` that do not fold hold whatever their operands do: runtime
+      // data with runtime data stays runtime, and a template-made operand makes
+      // the result template-made (round-3 D2: `p + q` from two literal arguments).
+      return joinBindings(l, r);
     }
     case "FilterExpression":
       return BINDING_BUILT;
@@ -664,7 +697,7 @@ function collectMacros(program: Node): Map<string, MacroInfo> {
         if (!excused.has(n)) refs.add(String(n.value));
         break;
     }
-    for (const v of Object.values(n)) stack.push(v);
+    for (const c of children(n)) stack.push(c);
   }
   for (const [name, m] of macros) {
     m.calls = calls.get(name) ?? [];
@@ -699,8 +732,11 @@ function paramSources(m: MacroInfo, p: MacroInfo["params"][number]): Node[] {
  * if it has one, passes a runtime-rooted value (round-2 macro-parameter review).
  * That is a greatest fixpoint: every parameter starts runtime and is demoted when
  * a source is not, which handles recursive macros. A parameter that is demoted
- * holds the join of its sources. Everything moves one way (toward less
- * exemption), so the rounds terminate; past MAX_BINDING_ROUNDS no local is exempt.
+ * holds the join of its sources: when any parameter changes, the next pass starts
+ * again from the runtime inputs, so the runtime binding a parameter started with
+ * does not linger in it or in the names that read it (round-3 D2). Parameters
+ * only move one way (toward less exemption) and between those moves the env only
+ * grows, so the rounds terminate; past MAX_BINDING_ROUNDS no local is exempt.
  */
 export function resolveBindings(program: Node): BindingEnv {
   const macros = collectMacros(program);
@@ -710,10 +746,13 @@ export function resolveBindings(program: Node): BindingEnv {
 
   // A runtime input holds runtime data until the template writes it, and a write
   // joins with that: `set message = 'abc'` leaves `message` no longer exempt.
-  let env: BindingEnv = new Map([...RUNTIME_INPUTS].map((name) => [name, BINDING_RUNTIME]));
+  const seed = (): BindingEnv => new Map([...RUNTIME_INPUTS].map((name) => [name, BINDING_RUNTIME]));
+  let env = seed();
+  let restart = false;
   for (let round = 0; round < MAX_BINDING_ROUNDS; round++) {
-    const next = bindingPass(program, env, params, paramKey);
+    const next = bindingPass(program, restart ? seed() : env, params, paramKey);
     let changed = next.size !== env.size || [...next].some(([k, b]) => !sameBinding(env.get(k), b));
+    restart = false;
     for (const [name, m] of macros) {
       for (const p of m.params) {
         const k = paramKey(name, p.name);
@@ -729,6 +768,7 @@ export function resolveBindings(program: Node): BindingEnv {
         if (!sameBinding(prev, b)) {
           params.set(k, b);
           changed = true;
+          restart = true;
         }
       }
     }
@@ -891,7 +931,7 @@ export function firstLeafSpan(node: Node, spans: Map<Node, Span>): Span | undefi
     const nn = x as Node;
     const s = spans.get(nn);
     if (s) return s;
-    const vals = Object.values(nn);
+    const vals = children(nn);
     for (let i = vals.length - 1; i >= 0; i--) stack.push(vals[i]);
   }
   return undefined;
@@ -928,7 +968,7 @@ export function gadgetAliases(program: Node): Set<string> {
         }
       }
     }
-    for (const v of Object.values(n)) stack.push(v);
+    for (const c of children(n)) stack.push(c);
   }
   // Propagate to a fixpoint.
   let changed = true;

@@ -215,3 +215,23 @@ test("item D: a size/shape cap reports its specific reason", () => {
   const deep = scan("{% if a0 %}x" + Array.from({ length: 140 }, (_, i) => `{% elif a${i + 1} %}x`).join("") + "{% endif %}");
   expect(deep.findings.find((f) => f.ruleId === "unanalyzable")!.message).toContain("block nesting deeper than 128");
 });
+
+// Round-3 D1 — the library keeps a dict literal's entries in a Map, which a
+// field walk never enters. Unsupported constructs in a dict's values, keys or a
+// nested dict are reported exactly as they are at top level.
+test("D1: unsupported constructs inside a dict literal are reported", () => {
+  const cases: [string, "HIGH" | "MEDIUM", string][] = [
+    ["{{ {'a': x|nosuchfilter} }}", "HIGH", "nosuchfilter"],
+    ["{{ {x|nosuchfilter: 1} }}", "HIGH", "nosuchfilter"],
+    ["{{ {'a': {'b': x|nosuchfilter}} }}", "HIGH", "nosuchfilter"],
+    ["{{ {'a': self} }}", "HIGH", "self"],
+    ["{{ {'a': cycler('a')} }}", "HIGH", "cycler"],
+    ["{{ {'a': x is nosuchtest} }}", "HIGH", "nosuchtest"],
+    ["{{ {'a': x|wordwrap} }}", "MEDIUM", "wordwrap"],
+  ];
+  for (const [src, severity, name] of cases) {
+    const r = scan(src);
+    const hit = r.findings.some((f) => f.ruleId === "unanalyzable" && f.severity === severity && f.message.includes(`'${name}'`));
+    expect({ src, complete: r.complete, hit }).toEqual({ src, complete: false, hit: true });
+  }
+});

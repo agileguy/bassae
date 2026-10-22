@@ -8,6 +8,7 @@ import type { Finding, Span } from "../types.ts";
 import type { ParseOutcome } from "../parse/parse.ts";
 import {
   type BindingEnv,
+  children,
   ENGINE_GLOBALS,
   ENGINE_PROBE_TESTS,
   EXEC_SURFACES,
@@ -108,7 +109,7 @@ export function runCodeExec(ctx: RuleCtx): Finding[] {
         if (!nn.computed) mark(nn.property as Node);
       }
       if (nn.type === "KeywordArgumentExpression") mark(nn.key as Node);
-      for (const v of Object.values(nn)) s.push(v);
+      for (const c of children(nn)) s.push(c);
     }
   }
 
@@ -290,7 +291,7 @@ export function runCodeExec(ctx: RuleCtx): Finding[] {
       }
     }
 
-    for (const v of Object.values(n)) stack.push(v);
+    for (const c of children(n)) stack.push(c);
   }
   return findings;
 }

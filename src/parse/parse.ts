@@ -8,6 +8,7 @@ import { preLex, type PreLexResult, type PreToken } from "./prelexer.ts";
 import {
   BARE_ENGINE_GLOBALS,
   BENIGN_UNIMPLEMENTED_FILTERS,
+  children,
   correlateSpans,
   DANGEROUS_FILTERS,
   foldLiteral,
@@ -337,7 +338,7 @@ function findUnsupported(program: Node, spans: Map<Node, Span>): UnsupportedCons
       // attribute on its own; the code-exec rules flag it HIGH if it folds to one).
       add({ kind: "operator", name: "*", severity: "MEDIUM", form: "string repetition", reason: "throws at render in @huggingface/jinja", span: spans.get(n.left as Node) ?? spans.get(n.right as Node) });
     }
-    for (const [k, v] of Object.entries(n)) if (k !== skip) stack.push(v);
+    for (const c of children(n, skip)) stack.push(c);
   }
   return out;
 }
