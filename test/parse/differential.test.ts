@@ -62,12 +62,13 @@ test("pre-lexer agrees on nested and adjacent brace forms", () => {
 });
 
 test("pre-lexer text runs match the library on every fixture", () => {
-  const roots = ["fixtures/jinja2-only", "fixtures/malicious/codeexec"];
-  for (const root of roots) {
+  const fixtures = join(import.meta.dir, "../../fixtures");
+  for (const rel of ["jinja2-only", "malicious/codeexec"]) {
+    const root = join(fixtures, rel);
     for (const name of readdirSync(root)) {
       if (!name.endsWith(".jinja")) continue;
       const src = readFileSync(join(root, name), "utf8");
-      if (comparable(src)) assertAgrees(src, `${root}/${name}`);
+      if (comparable(src)) assertAgrees(src, `${rel}/${name}`);
     }
   }
 });
