@@ -10,7 +10,8 @@ import { clip, decodeChild, encode } from "./protocol.ts";
 
 export type SandboxKind = "sandbox-exec" | "bwrap";
 
-export type SandboxStatus = { available: true; kind: SandboxKind } | { available: false; reason: string };
+/** `degraded` names each protection this machine's sandbox lacks; it is empty at full strength. */
+export type SandboxStatus = { available: true; kind: SandboxKind; degraded: string[] } | { available: false; reason: string };
 
 export interface SpawnOptions {
   /** Which sandbox to use. "none" means no sandbox is available, so nothing starts. Defaults to the platform's own. */
@@ -86,11 +87,15 @@ const sbpl = (readable: string[]) => {
 };
 
 // bwrap 0.8 added --disable-userns, which stops the worker making user namespaces of its own. Asking
-// the binary itself what it supports runs nothing untrusted.
-let disablesUserns: boolean | undefined;
-function supportsDisableUserns(bwrap: string): boolean {
-  disablesUserns ??= Bun.spawnSync([bwrap, "--help"], { stdout: "pipe", stderr: "pipe" }).stdout.toString().includes("--disable-userns");
-  return disablesUserns;
+// the binary itself what it supports runs nothing untrusted. An older bwrap still sandboxes, so it is
+// used without the flag, and the status says so.
+let bwrapHelp: string | undefined;
+const helpOf = (bwrap: string) => (bwrapHelp ??= Bun.spawnSync([bwrap, "--help"], { stdout: "pipe", stderr: "pipe" }).stdout.toString());
+const supportsDisableUserns = (bwrap: string) => helpOf(bwrap).includes("--disable-userns");
+
+/** What a bwrap with this --help text cannot do that the sandbox would have it do. */
+export function bwrapDegraded(help: string): string[] {
+  return help.includes("--disable-userns") ? [] : ["bwrap has no --disable-userns (added in 0.8), so the worker can make user namespaces of its own"];
 }
 
 // New user, network, pid, ipc, uts and cgroup namespaces; a read-only root with only the system
@@ -190,7 +195,7 @@ export function sandboxAvailable(): Promise<SandboxStatus> {
     const timer = setTimeout(() => proc.kill("SIGKILL"), STARTUP_MS);
     const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
     clearTimeout(timer);
-    if (code === 0 && out === "ok") return { available: true, kind };
+    if (code === 0 && out === "ok") return { available: true, kind, degraded: kind === "bwrap" ? bwrapDegraded(helpOf(findBwrap()!)) : [] };
     return { available: false, reason: `${kind} could not start a process (exit ${proc.signalCode ?? code}): ${err.trim().slice(0, 500)}` };
   })();
   return availability;
