@@ -121,8 +121,10 @@ test("a KV section running past MAX_KV_SECTION_BYTES stops with parse_error, wit
 const rssProbe = `
 const { readGgufModel } = await import(${JSON.stringify(join(import.meta.dir, "../../src/gguf/index.ts"))});
 const r = await readGgufModel(process.env.GGUF_PATH);
-const raw = process.resourceUsage().maxRSS;
-console.log(JSON.stringify({ rss: process.platform === "darwin" ? raw : raw * 1024, rules: r.findings.map((f) => f.ruleId) }));
+// Bun reports maxRSS raw: bytes on macOS. Linux states its peak in kB in /proc, which leaves no doubt about units.
+const hwm = process.platform === "linux" && /VmHWM:\\s+(\\d+) kB/.exec(await Bun.file("/proc/self/status").text());
+const rss = hwm ? Number(hwm[1]) * 1024 : process.resourceUsage().maxRSS;
+console.log(JSON.stringify({ rss, rules: r.findings.map((f) => f.ruleId) }));
 `;
 
 /** Reads one file in a fresh process and returns its peak RSS in bytes. */

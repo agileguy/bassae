@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readGgufModel, readGgufSource } from "../../src/gguf/index.ts";
-import { MAX_ARRAY_LENGTH, MAX_KV_COUNT } from "../../src/gguf/limits.ts";
+import { MAX_ARRAY_LENGTH, MAX_KEY_BYTES, MAX_KV_COUNT, MAX_STRING_BYTES } from "../../src/gguf/limits.ts";
 import { bytesSource } from "../../src/gguf/reader.ts";
 import type { ModelRecord, RuleId } from "../../src/types.ts";
 import { buildGguf, str, T, typicalKvs, Writer } from "./builder.ts";
@@ -58,6 +58,16 @@ for (const [name, make] of Object.entries(hostile)) {
     expect(r.templates).toEqual([]);
   });
 }
+
+test("each length cap fires on its own, even when the file holds every declared byte", () => {
+  const overString = one().str(KEY).u32(T.STRING).u64(MAX_STRING_BYTES + 1).bytes(new Uint8Array(MAX_STRING_BYTES + 1)).finish();
+  const overKey = one().u64(MAX_KEY_BYTES + 1).bytes(new Uint8Array(MAX_KEY_BYTES + 64)).finish();
+  for (const [bytes, cap] of [[overString, MAX_STRING_BYTES], [overKey, MAX_KEY_BYTES]] as const) {
+    const r = read(bytes);
+    expectParseError(r);
+    expect(r.findings[0]!.message).toContain(`the cap is ${cap}`);
+  }
+});
 
 test("ISC-10: the 2^60-byte string error names the key and the declared size", () => {
   const r = read(hostile["2^60-byte template string"]!());
