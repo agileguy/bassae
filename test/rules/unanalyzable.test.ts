@@ -1,10 +1,15 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { analyzeCodeExec } from "../../src/rules/index.ts";
 import { makeTemplate } from "../../src/template.ts";
 import type { Finding } from "../../src/types.ts";
 
-function scanFile(path: string, knownGood = false): { findings: Finding[]; complete: boolean } {
+// Fixtures are resolved against this file's location, not the process cwd.
+const FIXTURES = join(import.meta.dir, "../../fixtures");
+
+function scanFile(rel: string, knownGood = false): { findings: Finding[]; complete: boolean } {
+  const path = join(FIXTURES, rel);
   const t = makeTemplate({ kind: "bare", path, realPath: path, name: "default" }, new Uint8Array(readFileSync(path)));
   return analyzeCodeExec({ template: t, scaffolding: new Set(), knownGood });
 }
@@ -15,7 +20,7 @@ function scan(src: string, knownGood = false): { findings: Finding[]; complete: 
 
 // ISC-12 — unparseable template is HIGH unanalyzable and incomplete.
 test("ISC-12: a template the library cannot parse is HIGH unanalyzable and incomplete", () => {
-  const r = scanFile("fixtures/jinja2-only/with.jinja");
+  const r = scanFile("jinja2-only/with.jinja");
   const u = r.findings.find((f) => f.ruleId === "unanalyzable" && f.severity === "HIGH");
   expect(u).toBeDefined();
   expect(r.complete).toBe(false);
@@ -32,17 +37,17 @@ test("ISC-12: raw-text rules still fire on an unparseable template", () => {
 
 // ISC-12 — known-good exempts the unanalyzable finding only.
 test("ISC-12: a known-good unparseable template raises no unanalyzable finding", () => {
-  const r = scanFile("fixtures/jinja2-only/with.jinja", true);
+  const r = scanFile("jinja2-only/with.jinja", true);
   expect(r.findings.some((f) => f.ruleId === "unanalyzable")).toBe(false);
 });
 
 // ISC-12.1 — unimplemented constructs are HIGH and name the construct.
 test("ISC-12.1: |attr, |format, |random and {% with %} are HIGH naming the construct", () => {
   for (const [path, name] of [
-    ["fixtures/jinja2-only/attr.jinja", "attr"],
-    ["fixtures/jinja2-only/format.jinja", "format"],
-    ["fixtures/jinja2-only/random.jinja", "random"],
-    ["fixtures/jinja2-only/with.jinja", "with"],
+    ["jinja2-only/attr.jinja", "attr"],
+    ["jinja2-only/format.jinja", "format"],
+    ["jinja2-only/random.jinja", "random"],
+    ["jinja2-only/with.jinja", "with"],
   ] as const) {
     const r = scanFile(path);
     const u = r.findings.find((f) => f.ruleId === "unanalyzable" && f.severity === "HIGH" && f.message.includes(name));
@@ -52,7 +57,7 @@ test("ISC-12.1: |attr, |format, |random and {% with %} are HIGH naming the const
 
 // ISC-12.2 — constructs Python jinja2 accepts but the library rejects report HIGH.
 test("ISC-12.2: jinja2-valid constructs the library rejects all report HIGH", () => {
-  for (const path of ["fixtures/jinja2-only/with.jinja", "fixtures/jinja2-only/do.jinja", "fixtures/jinja2-only/include.jinja"]) {
+  for (const path of ["jinja2-only/with.jinja", "jinja2-only/do.jinja", "jinja2-only/include.jinja"]) {
     const r = scanFile(path);
     expect({ path, high: r.findings.some((f) => f.severity === "HIGH") }).toEqual({ path, high: true });
   }
@@ -146,6 +151,18 @@ test("ISC-12.1: any bare use of self is HIGH", () => {
   // `self` as an attribute name or a keyword-argument name is not the global.
   expect(unanalyzable("{{ x.self }}")).toHaveLength(0);
   expect(unanalyzable("{{ f(self=1) }}")).toHaveLength(0);
+});
+
+// Item 6 — `'x' * 3` parses but the library throws on it at render, so a
+// template using string repetition is unanalyzable: MEDIUM, and incomplete.
+test("item 6: string repetition is MEDIUM unanalyzable and marks the template incomplete", () => {
+  const r = scan("{{ 'x' * 3 }}");
+  const u = r.findings.filter((f) => f.ruleId === "unanalyzable");
+  expect(u.some((f) => f.severity === "MEDIUM" && f.message.includes("string repetition"))).toBe(true);
+  expect(r.findings.some((f) => f.severity === "HIGH")).toBe(false);
+  expect(r.complete).toBe(false);
+  // Numeric `*` is untouched.
+  expect(scan("{{ 3 * 4 }}").complete).toBe(true);
 });
 
 test("keyword-only dict(...) is still no finding", () => {

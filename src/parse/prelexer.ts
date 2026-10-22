@@ -1,7 +1,8 @@
 // Offset-tracking pre-lexer. @huggingface/jinja tokens and AST nodes carry no
 // source positions (Decisions, 2026-10-22 16:20), so every finding span starts
-// here. We re-tokenize the raw template, tracking byte-for-byte offsets, and
-// correlate leaves back to the library's AST by walking both in source order.
+// here. We re-tokenize the raw template, recording each token's UTF-16 code-unit
+// offsets, and correlate leaves back to the library's AST by walking both in
+// source order.
 //
 // Phase 2 (hidden-instruction rules, ISC-17..21) reuses this: `stringLiterals`
 // and `textSegments` expose every literal and every text run with its span.

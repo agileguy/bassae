@@ -4,7 +4,7 @@
 // deliberately coarse: a parse failure already made the template HIGH, and
 // these add the specific offending spans.
 
-import type { Finding, RuleId, Span } from "../types.ts";
+import type { Finding, RuleId } from "../types.ts";
 import { ENGINE_GLOBALS, ENGINE_PROBE_TESTS, EXEC_SURFACES, GADGETS, LineMap } from "../parse/support.ts";
 import type { TextRun } from "../parse/prelexer.ts";
 
@@ -45,6 +45,11 @@ const PATTERNS: RawPattern[] = [
   },
 ];
 
+// Stop building findings for a pattern after this many; a parse failure already
+// made the whole template HIGH, so the raw-text spans are illustrative. Without
+// a cap a 16 MiB string of dunders would allocate millions of findings.
+const RAW_CAP = 100;
+
 export function runRawText(
   regions: TextRun[],
   lines: LineMap,
@@ -52,14 +57,15 @@ export function runRawText(
   base: { file: string; templateName: string; sha256: string },
 ): Finding[] {
   const findings: Finding[] = [];
-  for (const region of regions) {
-    for (const p of PATTERNS) {
+  for (const p of PATTERNS) {
+    let hits = 0;
+    for (const region of regions) {
+      if (hits >= RAW_CAP) break;
       p.re.lastIndex = 0;
       let m: RegExpExecArray | null;
       while ((m = p.re.exec(region.value)) !== null) {
         const start = region.start + m.index;
         const end = start + m[0].length;
-        const span: Span = lines.span(start, end);
         findings.push({
           ruleId: p.ruleId,
           severity: "HIGH",
@@ -67,9 +73,10 @@ export function runRawText(
           file: base.file,
           templateName: base.templateName,
           templateSha256: base.sha256,
-          span,
+          span: lines.span(start, end),
           excerpt: text.slice(start, end),
         });
+        if (++hits >= RAW_CAP) break;
       }
     }
   }

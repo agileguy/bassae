@@ -126,3 +126,49 @@ test("ISC-15.1: `is filter` and `is test` are HIGH engine_fingerprint, span on t
   // A {% filter %} block is not the test.
   expect(highs("{% filter upper %}hi{% endfilter %}")).not.toContain("engine_fingerprint");
 });
+
+// ISC-13/14 (item 5) — every dunder-closure route is HIGH. Each of these parsed
+// cleanly and produced zero findings before the round-1 fix.
+test("item 5: dunder reached by any route (attribute=, selectattr, string-op key, fold) is HIGH", () => {
+  const routes = [
+    "{{ messages | map(attribute='__class__') | list }}",
+    "{% set s = (messages | map(attribute='__class__.__base__.__subclasses__') | first)() %}{{ s }}",
+    "{{ messages | selectattr('__class__') | list }}",
+    "{{ messages | sort(attribute='__class__') | list }}",
+    "{{ messages[0][messages[0].role[:0] ~ '__class__'] }}",
+    "{{ messages[0]['_' * 2 ~ 'class' ~ '_' * 2] }}",
+    "{{ messages[0]['__ssalc__' | reverse | join] }}",
+    "{% set m = messages[0] %}{{ m['_' * 2 ~ 'class' ~ '_' * 2] }}",
+  ];
+  const DUNDER_RULES = new Set(["dunder_access", "dynamic_attribute", "folded_dunder"]);
+  for (const src of routes) {
+    expect({ src, hit: highs(src).some((r) => DUNDER_RULES.has(r)) }).toEqual({ src, hit: true });
+  }
+  // A literal subscript naming an exec surface in callee position is ISC-16.
+  expect(highs("{{ messages[0]['popen']('id') }}")).toContain("exec_surface");
+});
+
+// Item 5 — a name bound to a gadget is itself a gadget (ISC-15), by set, set-chain
+// or macro-parameter default. A call result is NOT the gadget, so stock
+// `set ns = namespace(...)` stays benign.
+test("item 5: gadget aliases traverse HIGH; namespace() call result stays benign", () => {
+  expect(highs("{% set c = cycler %}{{ c.next }}")).toContain("gadget_traversal");
+  expect(highs("{% set c = cycler %}{% set d = c %}{{ d.next }}")).toContain("gadget_traversal");
+  expect(highs("{% macro m(c=cycler) %}{{ c.next }}{% endmacro %}")).toContain("gadget_traversal");
+  expect(highs("{% set ns = namespace(found=false) %}{{ ns.found }}")).toHaveLength(0);
+});
+
+// Item 9 — a folded/literal string that merely looks like an exec surface is a
+// finding ONLY in a callable or attribute position, never in text/role position.
+test("item 9: exec-surface strings fire only in callable/attribute positions", () => {
+  for (const src of [
+    "{{ 'system' }}",
+    "{{ 'open a ticket' }}",
+    "{{ ['system', 'user'] | join }}",
+    "{% if message.role == 'system' %}x{% endif %}",
+  ]) {
+    expect({ src, highs: highs(src) }).toEqual({ src, highs: [] });
+  }
+  expect(highs("{{ x['system']('id') }}")).toContain("exec_surface");
+  expect(highs("{{ messages | map(attribute='os.system') | list }}")).toContain("exec_surface");
+});

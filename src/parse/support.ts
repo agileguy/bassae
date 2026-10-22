@@ -10,15 +10,10 @@ import type { Span } from "../types.ts";
 import type { PreToken } from "./prelexer.ts";
 
 // ---- what the library implements (anything else is unanalyzable, ISC-12.1) ----
-
-// Statements parsed by @huggingface/jinja 0.5.10. A `{% ... %}` using any other
-// keyword (with, include, import, from, block, extends, raw, do, ...) throws at
-// parse, which ISC-12 turns into a HIGH unanalyzable with the name recovered
-// from the error.
-export const IMPLEMENTED_STATEMENTS = new Set([
-  "set", "endset", "if", "elif", "else", "endif", "macro", "endmacro",
-  "for", "endfor", "call", "endcall", "break", "continue", "filter", "endfilter", "generation", "endgeneration",
-]);
+//
+// Statements the library does not parse (with, include, import, block, raw,
+// do, ...) need no list: they throw at parse, and ISC-12 turns that into a HIGH
+// unanalyzable with the name recovered from the error.
 
 // Every filter and test Python jinja2 3.1 ships (jinja2/filters.py FILTERS,
 // jinja2/tests.py TESTS); transformers adds no filter beyond overriding tojson.
@@ -114,14 +109,6 @@ export const BENIGN_UNIMPLEMENTED_TESTS = new Set([
 // unanalyzable (ISC-12.1); keyword-only `dict(...)` is not a finding.
 export const UNIMPLEMENTED_CALLABLE_GLOBALS = new Set(["cycler", "joiner", "lipsum"]);
 
-// Globals the library defines. Everything else a template names as a global is
-// silently UndefinedValue at render time, which is both how fingerprinting works
-// and why our renderer disagrees with real jinja2 (ISC-15.1, ISC-22.2).
-export const IMPLEMENTED_GLOBALS = new Set([
-  "namespace", "range", "strftime_now", "raise_exception",
-  "true", "false", "none", "True", "False", "None",
-]);
-
 // ---- code-execution surfaces ----
 
 // Attribute/subscript on any of these is a HIGH gadget traversal (ISC-15).
@@ -151,27 +138,53 @@ export const RUNTIME_INPUTS = new Set([
 ]);
 
 const DUNDER = /__[A-Za-z0-9]+__|^__|__$/;
+const DUNDER_NAME = /__[A-Za-z0-9]+__/;
 
-/** True when a name or folded string reaches a Python dunder attribute. */
+/** True when a name or folded string reaches a Python dunder attribute, including a half-written one (`__cl`, `o__`). */
 export function hasDunder(s: string): boolean {
   return DUNDER.test(s) || /\b(__class__|__mro__|__subclasses__|__globals__|__builtins__|__init__|__import__|__base__|__bases__)\b/.test(s);
 }
 
-/** True when a folded string names an OS/exec surface as a word. */
-export function hasExecSurface(s: string): boolean {
-  for (const name of EXEC_SURFACES) {
-    if (new RegExp(`\\b${name}\\b`).test(s)) return true;
-  }
-  return false;
+/** True when a string contains a complete `__name__` dunder. Used by the string-literal catch-all so a split fragment like `__cl` does not trip it (that is the folder's job). */
+export function hasDunderName(s: string): boolean {
+  return DUNDER_NAME.test(s);
+}
+
+/** True when an attribute name is exactly an OS/exec surface. */
+export function isExecName(s: string): boolean {
+  return EXEC_SURFACES.has(s);
 }
 
 // ---- spans ----
 
-/** Line-start offsets, for turning a UTF-16 offset into 1-based line:col (col in code points). */
+/**
+ * Line-start offsets, for turning a UTF-16 offset into 1-based line:col (col in
+ * code points). Both lookups are O(log n): one pass at construction records the
+ * line starts and the position of every high-surrogate code unit, and `at`
+ * binary-searches both. Counting code points by slicing would make a scan of n
+ * findings O(n^2) on one long line (40k tags on a line was the probe).
+ */
 export class LineMap {
   private starts: number[] = [0];
-  constructor(private text: string) {
-    for (let i = 0; i < text.length; i++) if (text[i] === "\n") this.starts.push(i + 1);
+  private surrogates: number[] = []; // offsets of high-surrogate code units, ascending
+  constructor(text: string) {
+    // Lines break on \r\n, \r or \n, as jinja2 splits them; \r\n is one break.
+    for (let i = 0; i < text.length; i++) {
+      const c = text.charCodeAt(i);
+      if (c === 10 || (c === 13 && text.charCodeAt(i + 1) !== 10)) this.starts.push(i + 1);
+      else if (c >= 0xd800 && c <= 0xdbff) this.surrogates.push(i);
+    }
+  }
+  // Number of ascending entries in `arr` strictly less than `offset`.
+  private countBelow(arr: number[], offset: number): number {
+    let lo = 0;
+    let hi = arr.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (arr[mid]! < offset) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
   }
   at(offset: number): { line: number; col: number } {
     // Binary search for the last line start at or before `offset`.
@@ -183,7 +196,9 @@ export class LineMap {
       else hi = mid - 1;
     }
     const lineStart = this.starts[lo]!;
-    const col = [...this.text.slice(lineStart, offset)].length + 1;
+    // Code points = code units minus the surrogate pairs (one high surrogate each) between.
+    const pairs = this.countBelow(this.surrogates, offset) - this.countBelow(this.surrogates, lineStart);
+    const col = offset - lineStart - pairs + 1;
     return { line: lo + 1, col };
   }
   span(start: number, end: number): Span {
@@ -218,140 +233,86 @@ const STATEMENT_TYPES = new Set(["If", "For", "Set", "Macro", "CallStatement", "
  */
 export function sourceOrderLeaves(program: Node): Leaf[] {
   const out: Leaf[] = [];
+  // Explicit stack so a deep chain (`a.b.b.b...`, `a|f|f|f...`, `'a' ~ 'a' ~ ...`)
+  // cannot overflow (ISC-31). Items carry a mode: E = expression, S = statement,
+  // L = statement body (an array). Children are pushed reversed so they pop in
+  // source order, reproducing the former recursion exactly.
+  type Mode = "E" | "S" | "L";
+  const stack: { node: unknown; mode: Mode }[] = [{ node: program, mode: "S" }];
+  const E = (node: unknown) => ({ node, mode: "E" as Mode });
+  const S = (node: unknown) => ({ node, mode: "S" as Mode });
+  const L = (node: unknown) => ({ node, mode: "L" as Mode });
+  const pushSeq = (items: { node: unknown; mode: Mode }[]): void => {
+    for (let i = items.length - 1; i >= 0; i--) stack.push(items[i]!);
+  };
 
-  const expr = (node: unknown): void => {
-    if (!node || typeof node !== "object") return;
-    if (Array.isArray(node)) {
-      for (const c of node) expr(c);
-      return;
+  while (stack.length) {
+    const { node, mode } = stack.pop()!;
+    if (!node || typeof node !== "object") continue;
+
+    if (mode === "L") {
+      const seq: { node: unknown; mode: Mode }[] = [];
+      for (const el of node as Node[]) {
+        if (!el || el.type === "StringLiteral" || el.type === "Comment") continue;
+        seq.push(STATEMENT_TYPES.has(el.type) ? S(el) : E(el));
+      }
+      pushSeq(seq);
+      continue;
     }
+
+    if (Array.isArray(node)) {
+      pushSeq((node as unknown[]).map(E));
+      continue;
+    }
+
     const n = node as Node;
+
+    if (mode === "S") {
+      switch (n.type) {
+        case "Program": pushSeq([L(n.body)]); continue;
+        case "If": pushSeq([E(n.test), L(n.body), L(n.alternate)]); continue;
+        case "For": pushSeq([E(n.loopvar), E(n.iterable), L(n.body), L(n.defaultBlock)]); continue;
+        case "Set": pushSeq([E(n.assignee), E(n.value), L(n.body)]); continue;
+        case "Macro": pushSeq([E(n.name), E(n.args), L(n.body)]); continue;
+        case "CallStatement": pushSeq([E(n.call), E(n.callerArgs), L(n.body)]); continue;
+        case "FilterStatement": pushSeq([L(n.body), E(n.filter)]); continue;
+        default: continue; // Break, Continue, Comment
+      }
+    }
+
+    // mode === "E"
     switch (n.type) {
-      case "Identifier":
-        out.push({ node: n, kind: "identifier", value: String(n.value) });
-        return;
-      case "StringLiteral":
-        out.push({ node: n, kind: "string", value: String(n.value) });
-        return;
+      case "Identifier": out.push({ node: n, kind: "identifier", value: String(n.value) }); continue;
+      case "StringLiteral": out.push({ node: n, kind: "string", value: String(n.value) }); continue;
       case "IntegerLiteral":
-      case "FloatLiteral":
-        return;
-      case "MemberExpression":
-        expr(n.object);
-        expr(n.property);
-        return;
-      case "CallExpression":
-        expr(n.callee);
-        expr(n.args);
-        return;
-      case "FilterExpression":
-        expr(n.operand);
-        expr(n.filter);
-        return;
-      case "TestExpression":
-        expr(n.operand);
-        expr(n.test);
-        return;
-      case "SelectExpression":
-        expr(n.lhs);
-        expr(n.test);
-        return;
-      case "BinaryExpression":
-        expr(n.left);
-        expr(n.right);
-        return;
-      case "Ternary":
-        // Source order: trueExpr `if` condition `else` falseExpr.
-        expr(n.trueExpr);
-        expr(n.condition);
-        expr(n.falseExpr);
-        return;
-      case "KeywordArgumentExpression":
-        expr(n.key);
-        expr(n.value);
-        return;
+      case "FloatLiteral": continue;
+      case "MemberExpression": pushSeq([E(n.object), E(n.property)]); continue;
+      case "CallExpression": pushSeq([E(n.callee), E(n.args)]); continue;
+      case "FilterExpression": pushSeq([E(n.operand), E(n.filter)]); continue;
+      case "TestExpression": pushSeq([E(n.operand), E(n.test)]); continue;
+      case "SelectExpression": pushSeq([E(n.lhs), E(n.test)]); continue;
+      case "BinaryExpression": pushSeq([E(n.left), E(n.right)]); continue;
+      case "Ternary": pushSeq([E(n.trueExpr), E(n.condition), E(n.falseExpr)]); continue; // trueExpr if condition else falseExpr
+      case "KeywordArgumentExpression": pushSeq([E(n.key), E(n.value)]); continue;
       case "ObjectLiteral": {
         const map = n.value as Map<unknown, unknown>;
-        if (map instanceof Map) for (const [k, v] of map) {
-          expr(k);
-          expr(v);
-        }
-        return;
+        const seq: { node: unknown; mode: Mode }[] = [];
+        if (map instanceof Map) for (const [k, v] of map) { seq.push(E(k)); seq.push(E(v)); }
+        pushSeq(seq);
+        continue;
       }
       case "ArrayLiteral":
-      case "TupleLiteral":
-        expr(n.value);
-        return;
-      case "SliceExpression":
-        expr(n.start);
-        expr(n.stop);
-        expr(n.step);
-        return;
-      case "UnaryExpression":
-        expr(n.argument);
-        return;
+      case "TupleLiteral": pushSeq([E(n.value)]); continue;
+      case "SliceExpression": pushSeq([E(n.start), E(n.stop), E(n.step)]); continue;
+      case "UnaryExpression": pushSeq([E(n.argument)]); continue;
       case "SpreadExpression":
-      case "KeywordSpreadExpression":
-        expr(n.argument);
-        return;
+      case "KeywordSpreadExpression": pushSeq([E(n.argument)]); continue;
       default:
-        if (STATEMENT_TYPES.has(n.type)) stmt(n);
-        else for (const v of Object.values(n)) expr(v);
+        if (STATEMENT_TYPES.has(n.type)) stack.push(S(n));
+        else pushSeq(Object.values(n).map(E));
+        continue;
     }
-  };
-
-  // A statement body: statements, nested blocks, bare output expressions, and
-  // text/comment nodes (which we skip).
-  const list = (arr: unknown): void => {
-    for (const el of (arr as Node[] | undefined) ?? []) {
-      if (!el) continue;
-      if (el.type === "StringLiteral" || el.type === "Comment") continue;
-      if (STATEMENT_TYPES.has(el.type)) stmt(el);
-      else expr(el);
-    }
-  };
-
-  const stmt = (n: Node): void => {
-    switch (n.type) {
-      case "Program":
-        list(n.body);
-        return;
-      case "If":
-        expr(n.test);
-        list(n.body);
-        list(n.alternate);
-        return;
-      case "For":
-        expr(n.loopvar);
-        expr(n.iterable);
-        list(n.body);
-        list(n.defaultBlock);
-        return;
-      case "Set":
-        expr(n.assignee);
-        expr(n.value);
-        list(n.body);
-        return;
-      case "Macro":
-        expr(n.name);
-        expr(n.args);
-        list(n.body);
-        return;
-      case "CallStatement":
-        expr(n.call);
-        expr(n.callerArgs);
-        list(n.body);
-        return;
-      case "FilterStatement":
-        list(n.body);
-        expr(n.filter);
-        return;
-      default:
-        return; // Break, Continue, Comment
-    }
-  };
-
-  stmt(program);
+  }
   return out;
 }
 
@@ -411,20 +372,22 @@ export function collectBoundNames(program: Node): Set<string> {
       else if (a.type === "KeywordArgumentExpression") names.add(String((a.key as Node).value));
     }
   };
-  const visit = (node: unknown): void => {
-    if (!node || typeof node !== "object") return;
+  // Explicit stack so a deeply nested AST cannot overflow (ISC-31).
+  const stack: unknown[] = [program];
+  while (stack.length) {
+    const node = stack.pop();
+    if (!node || typeof node !== "object") continue;
     if (Array.isArray(node)) {
-      for (const c of node) visit(c);
-      return;
+      for (const c of node) stack.push(c);
+      continue;
     }
     const n = node as Node;
     if (n.type === "For") addTarget(n.loopvar);
     else if (n.type === "Set") addTarget(n.assignee);
     else if (n.type === "Macro") addParams(n.args);
     else if (n.type === "CallStatement") addParams(n.callerArgs);
-    for (const v of Object.values(n)) visit(v);
-  };
-  visit(program);
+    for (const v of Object.values(n)) stack.push(v);
+  }
   return names;
 }
 
@@ -446,6 +409,89 @@ export function isDataObject(node: Node, bound: Set<string>): boolean {
   const root = rootIdentifier(node);
   if (root === undefined) return false;
   return bound.has(root) || RUNTIME_INPUTS.has(root);
+}
+
+/** How a key/attribute/callee position resolves (ISC-14, ISC-14.1, ISC-16). */
+export interface ResolvedKey {
+  /** The string the position resolves to, when it is literal or folds from literals. */
+  value?: string;
+  /** True when the position is assembled by a string operation (`~`, string `+`/`*`, a filter, a string slice). The carve-out never covers this. */
+  built: boolean;
+}
+
+/** True when `node` folds to a string, or is a string literal. */
+function foldsToString(node: unknown): boolean {
+  return typeof foldLiteral(node) === "string";
+}
+
+/** True when a key node is built by a string-producing operation. */
+function keyStringOp(node: Node): boolean {
+  switch (node.type) {
+    case "BinaryExpression": {
+      const op = (node.operator as { value: string }).value;
+      if (op === "~") return true; // `~` always stringifies
+      if (op === "+" || op === "*") return foldsToString(node.left) || foldsToString(node.right);
+      return false;
+    }
+    case "FilterExpression":
+      // A filter applied to build the key itself (|reverse, |join, |replace, |upper, ...).
+      return true;
+    default:
+      return false;
+  }
+}
+
+/** Resolve a key/attribute/callee node for the dunder, exec and dynamic-attribute checks. */
+export function resolveKey(node: Node): ResolvedKey {
+  const folded = foldLiteral(node);
+  return { value: typeof folded === "string" ? folded : undefined, built: keyStringOp(node) };
+}
+
+/**
+ * Names that are aliases for an engine gadget (ISC-15): the gadgets themselves
+ * plus any name a `set`, a `for` target, or a macro-parameter default binds
+ * directly to one. Computed as a fixpoint so `set a = cycler; set b = a` chains.
+ * A call like `namespace(found=false)` binds the call *result*, not the gadget,
+ * so stock `set ns = namespace(...)` never makes `ns` an alias.
+ */
+export function gadgetAliases(program: Node): Set<string> {
+  const aliases = new Set(GADGETS);
+  // Collect candidate (target, sourceName) bindings once.
+  const bindings: { target: string; source: string }[] = [];
+  const stack: unknown[] = [program];
+  while (stack.length) {
+    const node = stack.pop();
+    if (!node || typeof node !== "object") continue;
+    if (Array.isArray(node)) {
+      for (const c of node) stack.push(c);
+      continue;
+    }
+    const n = node as Node;
+    if (n.type === "Set" && (n.assignee as Node)?.type === "Identifier" && (n.value as Node)?.type === "Identifier") {
+      bindings.push({ target: String((n.assignee as Node).value), source: String((n.value as Node).value) });
+    } else if (n.type === "For" && (n.loopvar as Node)?.type === "Identifier" && (n.iterable as Node)?.type === "Identifier") {
+      bindings.push({ target: String((n.loopvar as Node).value), source: String((n.iterable as Node).value) });
+    } else if (n.type === "Macro") {
+      for (const a of (n.args as Node[] | undefined) ?? []) {
+        if (a.type === "KeywordArgumentExpression" && (a.value as Node)?.type === "Identifier") {
+          bindings.push({ target: String((a.key as Node).value), source: String((a.value as Node).value) });
+        }
+      }
+    }
+    for (const v of Object.values(n)) stack.push(v);
+  }
+  // Propagate to a fixpoint.
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const b of bindings) {
+      if (aliases.has(b.source) && !aliases.has(b.target)) {
+        aliases.add(b.target);
+        changed = true;
+      }
+    }
+  }
+  return aliases;
 }
 
 // ---- constant folding (ISC-14) ----
@@ -496,6 +542,13 @@ export function foldLiteral(node: unknown, depth = 0): FoldValue | undefined {
         if (typeof l === "number" && typeof r === "number") return l + r;
         if (typeof l === "string" && typeof r === "string") return l + r;
       }
+      if (op === "*") {
+        // Python string repetition (which the library rejects at render, but
+        // which still assembles a key: '_' * 2 -> '__'). Negative/zero -> "".
+        if (typeof l === "string" && typeof r === "number") return l.repeat(Math.max(0, r | 0));
+        if (typeof l === "number" && typeof r === "string") return r.repeat(Math.max(0, l | 0));
+        if (typeof l === "number" && typeof r === "number") return l * r;
+      }
       return undefined;
     }
     case "FilterExpression":
@@ -503,16 +556,50 @@ export function foldLiteral(node: unknown, depth = 0): FoldValue | undefined {
     case "MemberExpression": {
       if (!n.computed) return undefined;
       const obj = foldLiteral(n.object, depth + 1);
-      const key = foldLiteral(n.property, depth + 1);
-      if (typeof obj === "string" && typeof key === "number") return obj[key] ?? undefined;
-      if (Array.isArray(obj) && typeof key === "number") return obj[key];
+      const prop = n.property as Node;
+      if (prop.type === "SliceExpression") {
+        const items = typeof obj === "string" ? obj.split("") : Array.isArray(obj) ? obj : undefined;
+        if (!items) return undefined;
+        const start = prop.start === undefined ? undefined : foldLiteral(prop.start, depth + 1);
+        const stop = prop.stop === undefined ? undefined : foldLiteral(prop.stop, depth + 1);
+        const step = prop.step === undefined ? undefined : foldLiteral(prop.step, depth + 1);
+        if ([start, stop, step].some((v) => v !== undefined && typeof v !== "number")) return undefined;
+        const sliced = pySlice(items, start as number | undefined, stop as number | undefined, step as number | undefined);
+        return typeof obj === "string" ? sliced.join("") : sliced;
+      }
+      const key = foldLiteral(prop, depth + 1);
+      if (typeof obj === "string" && typeof key === "number") return obj[pyIndex(key, obj.length)] ?? undefined;
+      if (Array.isArray(obj) && typeof key === "number") return obj[pyIndex(key, obj.length)];
       return undefined;
     }
     case "SliceExpression":
-      return undefined; // handled by the caller via the sliced operand when needed
+      return undefined; // folded through its enclosing computed MemberExpression
     default:
       return undefined;
   }
+}
+
+/** Normalize a Python index (negative counts from the end). */
+function pyIndex(i: number, len: number): number {
+  return i < 0 ? i + len : i;
+}
+
+/** Python slice semantics, including negative steps, on an array of items. */
+function pySlice<T>(items: T[], start: number | undefined, stop: number | undefined, step: number | undefined): T[] {
+  const n = items.length;
+  const st = step ?? 1;
+  const out: T[] = [];
+  if (st === 0) return out;
+  if (st > 0) {
+    const lo = start === undefined ? 0 : start < 0 ? Math.max(0, start + n) : Math.min(start, n);
+    const hi = stop === undefined ? n : stop < 0 ? Math.max(0, stop + n) : Math.min(stop, n);
+    for (let i = lo; i < hi; i += st) out.push(items[i]!);
+  } else {
+    const lo = start === undefined ? n - 1 : start < 0 ? Math.max(-1, start + n) : Math.min(start, n - 1);
+    const hi = stop === undefined ? -1 : stop < 0 ? Math.max(-1, stop + n) : Math.min(stop, n - 1);
+    for (let i = lo; i > hi; i += st) out.push(items[i]!);
+  }
+  return out;
 }
 
 function foldFilter(n: Node, depth: number): FoldValue | undefined {
@@ -540,9 +627,14 @@ function foldFilter(n: Node, depth: number): FoldValue | undefined {
       if (typeof operand !== "string" || typeof args[0] !== "string" || typeof args[1] !== "string") return undefined;
       return operand.split(args[0]).join(args[1]);
     }
+    case "reverse":
+      if (typeof operand === "string") return operand.split("").reverse().join("");
+      if (Array.isArray(operand)) return [...operand].reverse();
+      return undefined;
     case "list":
     case "first":
     case "last":
+      if (typeof operand === "string") return name === "first" ? operand[0] : name === "last" ? operand[operand.length - 1] : operand.split("");
       if (Array.isArray(operand)) return name === "first" ? operand[0] : name === "last" ? operand[operand.length - 1] : operand;
       return undefined;
     default:
