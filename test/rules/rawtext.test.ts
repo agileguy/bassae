@@ -21,6 +21,14 @@ function regioned(src: string): string[] {
   return runRawText(preLex(src).regions, new LineMap(src), src, base).map(key).sort();
 }
 
+// jinja2 matches `\s*raw\s*` and `\s*endraw\s*` with Python's `\s`, which also
+// covers U+001C to U+001F and U+0085 (Codex, round 4).
+const PY_SPACE_RAW = [
+  "{%\x1craw\x1c%}{#{% endraw %}{{ x.__class__ }}{# #}",
+  "{%\x85raw%}{#{% endraw %}{{ x.__class__ }}{# #}",
+  "{% raw %}{#{%\x1fendraw%}{{ x.__class__ }}{# #}",
+];
+
 const TRICKY = [
   // Codex's round-3 reproductions.
   "{{ {'a': {'b': 1}}['a'].__class__ }}",
@@ -50,6 +58,7 @@ const TRICKY = [
   "text.__class__ {{ y }} more.__init__",
   // A raw block's body is text: what it holds opens nothing, and what follows endraw is live (round 4).
   "{% raw %}{#{% endraw %}{{ x.__class__ }}{# #}",
+  ...PY_SPACE_RAW,
   "{% raw %}hi{% endraw %}{{ x.__class__ }}",
   "{% raw %}{{ x.__class__ }}{% endraw %}",
   "{%- raw -%}{{ x.__class__ }}{%+ endraw +%}{{ y.__init__ }}{%raw%}{{ z.__mro__ }}{%endraw%}",
@@ -105,6 +114,14 @@ test("a raw block is literal text, under and over the size cap", () => {
   for (const src of ["{% raw %}{#{% endraw %}{{ x.__class__ }}{# #}", "{% raw %}hi{% endraw %}{{ x.__class__ }}"]) {
     expect(at(underCap(src)), src).toEqual(["unanalyzable@1:4", "dunder_access@1:29"]);
     expect(at(overCap(src)), src).toEqual(["unanalyzable@1:1", "dunder_access@2:29"]);
+  }
+  // Python whitespace around raw and endraw. Under the cap, the library rejects a
+  // control character in the opener with no locatable construct (the whole
+  // template, 1:1), and names `raw` (1:4) when only the endraw has one.
+  for (const [src, parseErrorAt] of PY_SPACE_RAW.map((s, k) => [s, k < 2 ? "1:1" : "1:4"] as const)) {
+    const col = src.indexOf("__class__") + 1;
+    expect(at(underCap(src)), src).toEqual([`unanalyzable@${parseErrorAt}`, `dunder_access@1:${col}`]);
+    expect(at(overCap(src)), src).toEqual(["unanalyzable@1:1", `dunder_access@2:${col}`]);
   }
   const inside = "{% raw %}{{ x.__class__ }}{% endraw %}";
   expect(at(underCap(inside))).toEqual(["unanalyzable@1:4"]);

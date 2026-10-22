@@ -119,20 +119,29 @@ export function preLex(src: string): PreLexResult {
   return { tokens, regions, stringLiterals, textSegments };
 }
 
+// Python's `\s`: JavaScript's plus U+001C to U+001F and U+0085. jinja2 matches
+// the whitespace in its raw and endraw tags with it, so keywordTagEnd must too.
+// Everything else here mirrors the JS library's lexer and keeps isSpace.
+function isPySpace(c: string | undefined): boolean {
+  if (c === undefined) return false;
+  const u = c.charCodeAt(0);
+  return (u >= 0x1c && u <= 0x1f) || u === 0x85 || isSpace(c);
+}
+
 /**
  * When the `{%` at `i` opens a tag holding only the keyword `name`, as in
- * `{%[-+]?\s*raw\s*[-+]?%}`, the index just past its `%}`; otherwise -1. Used
- * for `raw` and `endraw`, which @huggingface/jinja does not know but jinja2
- * does: the body between them is output verbatim, never lexed.
+ * `{%[-+]?\s*raw\s*[-+]?%}` with Python's `\s`, the index just past its `%}`;
+ * otherwise -1. Used for `raw` and `endraw`, which @huggingface/jinja does not
+ * know but jinja2 does: the body between them is output verbatim, never lexed.
  */
 export function keywordTagEnd(src: string, i: number, name: string): number {
   if (src[i] !== "{" || src[i + 1] !== "%") return -1;
   let j = i + 2;
   if (src[j] === "-" || src[j] === "+") j++;
-  while (isSpace(src[j])) j++;
+  while (isPySpace(src[j])) j++;
   if (!src.startsWith(name, j)) return -1;
   j += name.length;
-  while (isSpace(src[j])) j++;
+  while (isPySpace(src[j])) j++;
   if (src[j] === "-" || src[j] === "+") j++;
   return src[j] === "%" && src[j + 1] === "}" ? j + 2 : -1;
 }
