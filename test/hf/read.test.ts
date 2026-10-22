@@ -150,6 +150,38 @@ describe("readHfModel sources", () => {
   });
 });
 
+describe("Python json.load parity", () => {
+  test("bare NaN, Infinity and -Infinity are accepted, as transformers accepts them", async () => {
+    const raw = '{"model_max_length": NaN, "a": [Infinity, -Infinity,NaN], "b":{"c":-Infinity}, "chat_template": "say NaN, Infinity: -Infinity"}';
+    const root = makeTree({ m: { "tokenizer_config.json": raw, "processor_config.json": '{"x": NaN, "chat_template": "P"}' } });
+    const r = await readHfModel(join(root, "m"));
+    expect(r.findings).toEqual([]);
+    expect(summary(r).map((s) => s.text)).toEqual(["say NaN, Infinity: -Infinity", "P"]);
+    expect(r.extractionComplete).toBe(true);
+  });
+
+  test("the constants are accepted only where Python accepts them", async () => {
+    for (const bad of ["-NaN", "1Infinity", "NaNx", "nan", "+Infinity"]) {
+      const root = makeTree({ m: { "tokenizer_config.json": `{"a": ${bad}, "chat_template": "T"}` } });
+      const r = await readHfModel(join(root, "m"));
+      expect(r.templates).toEqual([]);
+      expect(failures(r)).toEqual([["parse_error", "HIGH", join(root, "m/tokenizer_config.json")]]);
+    }
+  });
+
+  test("UTF-8 errors, a byte order mark and JSON syntax errors are told apart", async () => {
+    const root = makeTree({
+      utf8: { "tokenizer_config.json": new Uint8Array([0x7b, 0x22, 0xff, 0x22, 0x3a, 0x31, 0x7d]) },
+      bom: { "tokenizer_config.json": "﻿" + json({ chat_template: "T" }) },
+      syntax: { "tokenizer_config.json": '{"chat_template": "T",}' },
+    });
+    const messages = async (d: string) => (await readHfModel(join(root, d))).findings.map((f) => f.message);
+    expect(await messages("utf8")).toEqual(["not valid UTF-8"]);
+    expect(await messages("bom")).toEqual(["starts with a UTF-8 byte order mark, which Python's json.load rejects"]);
+    expect(await messages("syntax")).toEqual(["not valid JSON"]);
+  });
+});
+
 describe("a template-bearing source that fails is HIGH and leaves extraction incomplete", () => {
   test("malformed JSON in each template-bearing file; the other sources are still read", async () => {
     const root = makeTree({

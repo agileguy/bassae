@@ -116,22 +116,87 @@ export class SourceReader {
     }
   }
 
-  /** file() plus a strict JSON parse. */
+  /** file() plus a parse that accepts what Python's json.load accepts. */
   async json(path: string, role: Role): Promise<LoadedJson | undefined> {
     const file = await this.file(path, role);
     if (!file) return undefined;
-    try {
-      return { ...file, value: JSON.parse(strictUtf8.decode(file.bytes)) };
-    } catch (e) {
-      this.fail(role, path, "not valid UTF-8 JSON", e);
-      return undefined;
-    }
+    const parsed = parseJsonLikePython(file.bytes);
+    if ("value" in parsed) return { ...file, value: parsed.value };
+    this.fail(role, path, parsed.message, parsed.error);
+    return undefined;
   }
 
   fail(role: Role, path: string, message: string, error?: unknown, detail?: Record<string, unknown>): void {
     if (role === "template") this.complete = false;
     this.findings.push(problem("parse_error", role === "template" ? "HIGH" : "MEDIUM", path, message, error, detail));
   }
+}
+
+/**
+ * Parses JSON the way transformers loads it: open(encoding="utf-8") then json.load. That rejects
+ * invalid UTF-8 and a leading byte order mark, and accepts bare NaN, Infinity and -Infinity.
+ */
+export function parseJsonLikePython(bytes: Uint8Array): { value: unknown } | { message: string; error?: unknown } {
+  let text: string;
+  try {
+    text = strictUtf8.decode(bytes);
+  } catch (e) {
+    return { message: "not valid UTF-8", error: e };
+  }
+  if (text.charCodeAt(0) === 0xfeff) return { message: "starts with a UTF-8 byte order mark, which Python's json.load rejects" };
+  try {
+    return { value: JSON.parse(text) };
+  } catch (e) {
+    // Rewrite only on failure, so ordinary files pay nothing; report the original error if it still fails.
+    try {
+      return { value: JSON.parse(rewriteNonFinite(text)) };
+    } catch {
+      return { message: "not valid JSON", error: e };
+    }
+  }
+}
+
+const VALUE_START = new Set(["", ":", "[", ","]);
+const VALUE_END = new Set([undefined, " ", "\t", "\n", "\r", ",", "]", "}"]);
+
+// Replaces each NaN, Infinity or -Infinity that stands as a value outside a string with 0. Anywhere
+// else Python rejects them too, so they are left for JSON.parse to reject. Numbers are never read.
+function rewriteNonFinite(text: string): string {
+  let out = "";
+  let last = 0;
+  let prev = ""; // last non-whitespace character outside strings
+  for (let i = 0; i < text.length; ) {
+    const c = text[i]!;
+    if (c === '"') {
+      i = endOfString(text, i);
+      prev = '"';
+      continue;
+    }
+    if (c === " " || c === "\t" || c === "\n" || c === "\r") {
+      i++;
+      continue;
+    }
+    const token = ["NaN", "Infinity", "-Infinity"].find((t) => text.startsWith(t, i));
+    if (token && VALUE_START.has(prev) && VALUE_END.has(text[i + token.length])) {
+      out += text.slice(last, i) + "0";
+      i += token.length;
+      last = i;
+      prev = "0";
+      continue;
+    }
+    prev = c;
+    i++;
+  }
+  return out + text.slice(last);
+}
+
+// Index just past the closing quote of the string that opens at `start`.
+function endOfString(text: string, start: number): number {
+  for (let i = start + 1; i < text.length; i++) {
+    if (text[i] === "\\") i++;
+    else if (text[i] === '"') return i + 1;
+  }
+  return text.length;
 }
 
 // `chat_template` may be a string or a list of {name, template}; each list entry stands alone.
