@@ -23,5 +23,7 @@ export function makeTemplate(source: TemplateSource, bytes: Uint8Array): Extract
 
 /** For templates that arrive as JSON strings: the UTF-8 encoding of the decoded value. */
 export function makeTemplateFromString(source: TemplateSource, value: string): ExtractedTemplate {
-  return makeTemplate(source, new TextEncoder().encode(value));
+  const template = makeTemplate(source, new TextEncoder().encode(value));
+  // A lone surrogate (a JSON "\ud800" escape) has no UTF-8 encoding; the encoder writes U+FFFD in its place.
+  return value.isWellFormed() ? template : { ...template, validUtf8: false };
 }

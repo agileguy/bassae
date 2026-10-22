@@ -3,14 +3,15 @@ import { createHash } from "node:crypto";
 import { truncateSync } from "node:fs";
 import { join } from "node:path";
 import { readHfModel } from "../../src/hf/index.ts";
-import { MAX_SOURCE_BYTES } from "../../src/hf/sources.ts";
+import { jinjaNames, MAX_SOURCE_BYTES, readRegularFile } from "../../src/hf/sources.ts";
 import type { ExtractedTemplate, ModelRecord } from "../../src/types.ts";
-import { link, makeTree, removeTrees } from "../helpers/tree.ts";
+import { link, makeTree, RAW_NAMES, removeTrees, writeRawName } from "../helpers/tree.ts";
 
 afterAll(removeTrees);
 
 const json = (v: unknown) => JSON.stringify(v);
 const sha = (s: string | Uint8Array) => createHash("sha256").update(s).digest("hex");
+const failures = (r: ModelRecord) => r.findings.map((f) => [f.ruleId, f.severity, f.file]);
 
 const summary = (r: ModelRecord) =>
   r.templates.map((t) => ({ kind: t.source.kind, name: t.source.name, key: t.source.key, text: t.text }));
@@ -135,32 +136,88 @@ describe("readHfModel sources", () => {
     ]);
   });
 
-  test("a tokenizer_config.json without a template yields no templates and no findings", async () => {
+  test("a tokenizer_config.json without a template yields no templates, no findings, and complete extraction", async () => {
     const root = makeTree({ m: { "tokenizer_config.json": json({ model_max_length: 8192 }) } });
     const r = await readHfModel(join(root, "m"));
     expect(r.templates).toEqual([]);
     expect(r.findings).toEqual([]);
+    expect(r.extractionComplete).toBe(true);
+  });
+
+  test("a model whose sources all read is complete", async () => {
+    const root = makeTree({ m: { "chat_template.jinja": "J", "tokenizer.json": json({ added_tokens: [] }) } });
+    expect((await readHfModel(join(root, "m"))).extractionComplete).toBe(true);
   });
 });
 
-describe("readHfModel never throws on bad input", () => {
-  test("malformed JSON is a MEDIUM parse_error and the other sources are still read", async () => {
+describe("Python json.load parity", () => {
+  test("bare NaN, Infinity and -Infinity are accepted, as transformers accepts them", async () => {
+    const raw = '{"model_max_length": NaN, "a": [Infinity, -Infinity,NaN], "b":{"c":-Infinity}, "chat_template": "say NaN, Infinity: -Infinity"}';
+    const root = makeTree({ m: { "tokenizer_config.json": raw, "processor_config.json": '{"x": NaN, "chat_template": "P"}' } });
+    const r = await readHfModel(join(root, "m"));
+    expect(r.findings).toEqual([]);
+    expect(summary(r).map((s) => s.text)).toEqual(["say NaN, Infinity: -Infinity", "P"]);
+    expect(r.extractionComplete).toBe(true);
+  });
+
+  test("the constants are accepted only where Python accepts them", async () => {
+    for (const bad of ["-NaN", "1Infinity", "NaNx", "nan", "+Infinity"]) {
+      const root = makeTree({ m: { "tokenizer_config.json": `{"a": ${bad}, "chat_template": "T"}` } });
+      const r = await readHfModel(join(root, "m"));
+      expect(r.templates).toEqual([]);
+      expect(failures(r)).toEqual([["parse_error", "HIGH", join(root, "m/tokenizer_config.json")]]);
+    }
+  });
+
+  test("UTF-8 errors, a byte order mark and JSON syntax errors are told apart", async () => {
+    const root = makeTree({
+      utf8: { "tokenizer_config.json": new Uint8Array([0x7b, 0x22, 0xff, 0x22, 0x3a, 0x31, 0x7d]) },
+      bom: { "tokenizer_config.json": "﻿" + json({ chat_template: "T" }) },
+      syntax: { "tokenizer_config.json": '{"chat_template": "T",}' },
+    });
+    const messages = async (d: string) => (await readHfModel(join(root, d))).findings.map((f) => f.message);
+    expect(await messages("utf8")).toEqual(["not valid UTF-8"]);
+    expect(await messages("bom")).toEqual(["starts with a UTF-8 byte order mark, which Python's json.load rejects"]);
+    expect(await messages("syntax")).toEqual(["not valid JSON"]);
+  });
+
+  test("a lone surrogate escape is accepted, as Python accepts it, and the template is not valid UTF-8", async () => {
+    const root = makeTree({ m: { "tokenizer_config.json": '{"chat_template": "a\\ud800b"}' } });
+    const r = await readHfModel(join(root, "m"));
+    expect(r.findings).toEqual([]);
+    expect(r.templates.map((t) => [t.text, t.validUtf8])).toEqual([["a�b", false]]);
+    expect(r.extractionComplete).toBe(true);
+  });
+});
+
+describe("a template-bearing source that fails is HIGH and leaves extraction incomplete", () => {
+  test("malformed JSON in each template-bearing file; the other sources are still read", async () => {
     const root = makeTree({
       m: {
         "tokenizer_config.json": '{"chat_template": "unterminated',
+        "chat_template.json": "{",
         "processor_config.json": "[1,",
         "chat_template.jinja": "J",
       },
     });
     const r = await readHfModel(join(root, "m"));
     expect(summary(r).map((s) => s.text)).toEqual(["J"]);
-    expect(r.findings.map((f) => [f.ruleId, f.severity, f.file])).toEqual([
-      ["parse_error", "MEDIUM", join(root, "m/tokenizer_config.json")],
-      ["parse_error", "MEDIUM", join(root, "m/processor_config.json")],
+    expect(failures(r)).toEqual([
+      ["parse_error", "HIGH", join(root, "m/tokenizer_config.json")],
+      ["parse_error", "HIGH", join(root, "m/chat_template.json")],
+      ["parse_error", "HIGH", join(root, "m/processor_config.json")],
     ]);
+    expect(r.extractionComplete).toBe(false);
   });
 
-  test("a bad list entry is a finding; the good entries are still read", async () => {
+  test("a model whose only source failed is incomplete, never an empty no-template model", async () => {
+    const root = makeTree({ m: { "tokenizer_config.json": "{" } });
+    const r = await readHfModel(join(root, "m"));
+    expect(r.templates).toEqual([]);
+    expect(r.extractionComplete).toBe(false);
+  });
+
+  test("a bad list entry; the good entries are still read", async () => {
     const root = makeTree({
       m: {
         "tokenizer_config.json": json({
@@ -171,53 +228,127 @@ describe("readHfModel never throws on bad input", () => {
     const r = await readHfModel(join(root, "m"));
     expect(summary(r).map((s) => `${s.name}:${s.key}`)).toEqual(["default:chat_template[0].template", "x:chat_template[4].template"]);
     expect(r.findings.map((f) => [f.ruleId, f.severity, f.detail?.key])).toEqual([
-      ["parse_error", "MEDIUM", "chat_template[1]"],
-      ["parse_error", "MEDIUM", "chat_template[2]"],
-      ["parse_error", "MEDIUM", "chat_template[3]"],
+      ["parse_error", "HIGH", "chat_template[1]"],
+      ["parse_error", "HIGH", "chat_template[2]"],
+      ["parse_error", "HIGH", "chat_template[3]"],
     ]);
+    expect(r.extractionComplete).toBe(false);
   });
 
-  test("chat_template of the wrong type is a finding", async () => {
+  test("chat_template of the wrong type, and a file that is not a JSON object", async () => {
     const root = makeTree({ m: { "tokenizer_config.json": json({ chat_template: { template: "x" } }), "chat_template.json": json([1]) } });
     const r = await readHfModel(join(root, "m"));
     expect(r.templates).toEqual([]);
-    expect(r.findings.map((f) => [f.ruleId, f.severity])).toEqual([
-      ["parse_error", "MEDIUM"],
-      ["parse_error", "MEDIUM"],
+    expect(failures(r)).toEqual([
+      ["parse_error", "HIGH", join(root, "m/tokenizer_config.json")],
+      ["parse_error", "HIGH", join(root, "m/chat_template.json")],
     ]);
+    expect(r.extractionComplete).toBe(false);
   });
 
-  test("a missing directory or a dangling source becomes a finding, not a throw", async () => {
+  test("a dangling source link", async () => {
     const root = makeTree({ m: { "chat_template.jinja": link("gone.jinja") } });
-    const missing = await readHfModel(join(root, "nope"));
-    expect(missing.templates).toEqual([]);
-    expect(missing.findings.map((f) => f.ruleId)).toEqual(["scanner_error"]);
-    const dangling = await readHfModel(join(root, "m"));
-    expect(dangling.templates).toEqual([]);
-    expect(dangling.findings.map((f) => [f.ruleId, f.file])).toEqual([["scanner_error", join(root, "m/chat_template.jinja")]]);
+    const r = await readHfModel(join(root, "m"));
+    expect(r.templates).toEqual([]);
+    expect(failures(r)).toEqual([["parse_error", "HIGH", join(root, "m/chat_template.jinja")]]);
+    expect(r.extractionComplete).toBe(false);
   });
 
-  test("a template source over the size cap is a HIGH parse_error and is not read", async () => {
+  test("a template source over the size cap is not read", async () => {
     const root = makeTree({ m: { "chat_template.jinja": "" } });
     truncateSync(join(root, "m/chat_template.jinja"), MAX_SOURCE_BYTES + 1); // sparse, costs no disk
     const r = await readHfModel(join(root, "m"));
     expect(r.templates).toEqual([]);
-    expect(r.findings.map((f) => [f.ruleId, f.severity])).toEqual([["parse_error", "HIGH"]]);
+    expect(failures(r)).toEqual([["parse_error", "HIGH", join(root, "m/chat_template.jinja")]]);
+    expect(r.extractionComplete).toBe(false);
   });
 
-  test("a FIFO planted under a source name does not hang the read", async () => {
-    const root = makeTree({ m: { "tokenizer_config.json": json({ chat_template: "T" }) } });
-    expect(Bun.spawnSync(["mkfifo", join(root, "m/chat_template.jinja")]).exitCode).toBe(0);
-    const r = await readHfModel(join(root, "m"));
-    expect(summary(r).map((s) => s.text)).toEqual(["T"]);
-    expect(r.findings.map((f) => [f.ruleId, f.file])).toEqual([["scanner_error", join(root, "m/chat_template.jinja")]]);
-  });
-
-  test("additional_chat_templates as a file, not a directory, is a finding", async () => {
+  test("additional_chat_templates that is not a directory", async () => {
     const root = makeTree({ m: { additional_chat_templates: "oops", "chat_template.jinja": "J" } });
     const r = await readHfModel(join(root, "m"));
     expect(summary(r).map((s) => s.text)).toEqual(["J"]);
+    expect(failures(r)).toEqual([["parse_error", "HIGH", join(root, "m/additional_chat_templates")]]);
+    expect(r.extractionComplete).toBe(false);
+  });
+
+  test("tokenizer.json carries no template: its failure is MEDIUM and extraction stays complete", async () => {
+    const root = makeTree({ m: { "tokenizer.json": "{", "chat_template.jinja": "J" } });
+    const r = await readHfModel(join(root, "m"));
+    expect(r.templates).toHaveLength(1);
+    expect(failures(r)).toEqual([["parse_error", "MEDIUM", join(root, "m/tokenizer.json")]]);
+    expect(r.extractionComplete).toBe(true);
+  });
+
+  test("a missing model directory is a scanner_error and incomplete, not a throw", async () => {
+    const root = makeTree({});
+    const r = await readHfModel(join(root, "nope"));
+    expect(r.templates).toEqual([]);
     expect(r.findings.map((f) => f.ruleId)).toEqual(["scanner_error"]);
+    expect(r.extractionComplete).toBe(false);
+  });
+});
+
+describe("no hostile file can hang the read", () => {
+  test("readRegularFile opens a FIFO without blocking and refuses it", async () => {
+    const root = makeTree({});
+    const fifo = join(root, "p");
+    expect(Bun.spawnSync(["mkfifo", fifo]).exitCode).toBe(0);
+    // No stat beforehand: the open itself must not wait for a writer.
+    const outcome = await Promise.race([
+      readRegularFile(fifo, 1024).then(
+        () => "read",
+        (e: Error) => e.message,
+      ),
+      Bun.sleep(2000).then(() => "hung"),
+    ]);
+    expect(outcome).toBe("not a regular file (FIFO)");
+  });
+
+  test("a FIFO, socket or device under a source name is a HIGH parse_error", async () => {
+    const root = makeTree({ m: { "tokenizer_config.json": json({ chat_template: "T" }), "processor_config.json": link("/dev/null") } });
+    expect(Bun.spawnSync(["mkfifo", join(root, "m/chat_template.jinja")]).exitCode).toBe(0);
+    const server = Bun.listen({ unix: join(root, "m/chat_template.json"), socket: { data() {} } });
+    try {
+      const r = await readHfModel(join(root, "m"));
+      expect(summary(r).map((s) => s.text)).toEqual(["T"]);
+      expect(failures(r)).toEqual([
+        ["parse_error", "HIGH", join(root, "m/chat_template.jinja")],
+        ["parse_error", "HIGH", join(root, "m/chat_template.json")],
+        ["parse_error", "HIGH", join(root, "m/processor_config.json")],
+      ]);
+      expect(r.extractionComplete).toBe(false);
+    } finally {
+      server.stop(true);
+    }
+  });
+});
+
+describe("per-model read budget", () => {
+  test("sources past the byte budget are findings, not silently dropped", async () => {
+    const root = makeTree({
+      m: {
+        "chat_template.jinja": "x".repeat(60),
+        additional_chat_templates: { "a.jinja": "y".repeat(60) },
+        "tokenizer.json": json({ added_tokens: [], pad: "z".repeat(60) }),
+      },
+    });
+    const r = await readHfModel(join(root, "m"), { maxBytes: 100 });
+    expect(summary(r).map((s) => s.kind)).toEqual(["chat_template_jinja"]);
+    expect(failures(r)).toEqual([
+      ["parse_error", "HIGH", join(root, "m/additional_chat_templates/a.jinja")],
+      ["parse_error", "MEDIUM", join(root, "m/tokenizer.json")],
+    ]);
+    expect(r.findings[0]!.message).toContain("byte budget");
+    expect(r.extractionComplete).toBe(false);
+  });
+
+  test("additional templates past the file budget are reported by name", async () => {
+    const root = makeTree({ m: { additional_chat_templates: { "a.jinja": "A", "b.jinja": "B", "c.jinja": "C" } } });
+    const r = await readHfModel(join(root, "m"), { maxAdditional: 2 });
+    expect(summary(r).map((s) => s.name)).toEqual(["a", "b"]);
+    expect(failures(r)).toEqual([["parse_error", "HIGH", join(root, "m/additional_chat_templates")]]);
+    expect(r.findings[0]!.detail?.skipped).toEqual(["c.jinja"]);
+    expect(r.extractionComplete).toBe(false);
   });
 });
 
@@ -284,5 +415,29 @@ describe("ISC-11: HF cache snapshots resolve to blobs", () => {
     expect(r.hfCache).toEqual({ repo: "o/n", revision: "r9", pathInRepo: "" });
     expect(only(r).source.path).toBe(join(root, "omlx/n/chat_template.jinja"));
     expect(only(r).source.realPath).toBe(join(root, "hub/models--o--n/snapshots/r9/chat_template.jinja"));
+  });
+});
+
+describe("file names that are not valid UTF-8", () => {
+  const enc = (s: string) => new TextEncoder().encode(s);
+  const bad = Uint8Array.from([...enc("bad"), 0xff, ...enc(".jinja")]);
+
+  test("raw .jinja names that cannot be decoded are kept, escaped, rather than dropped", () => {
+    expect(jinjaNames([enc("b.jinja"), bad, enc("a.jinja"), enc("notes.txt"), Uint8Array.of(0xfe)])).toEqual({
+      names: ["a.jinja", "b.jinja"],
+      unnamed: ["bad\\xff.jinja"],
+    });
+  });
+
+  // APFS refuses such names, so this runs where the filesystem keeps raw bytes (Linux).
+  test.skipIf(!RAW_NAMES)("an additional template with such a name is a HIGH finding, not a silent skip", async () => {
+    const root = makeTree({ m: { additional_chat_templates: { "ok.jinja": "A" } } });
+    const dir = join(root, "m/additional_chat_templates");
+    expect(writeRawName(dir, bad, "B")).toBe(true);
+    const r = await readHfModel(join(root, "m"));
+    expect(summary(r).map((s) => s.name)).toEqual(["ok"]);
+    expect(failures(r)).toEqual([["parse_error", "HIGH", dir]]);
+    expect(r.findings[0]!.detail?.names).toEqual(["bad\\xff.jinja"]);
+    expect(r.extractionComplete).toBe(false);
   });
 });
