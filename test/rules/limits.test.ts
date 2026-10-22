@@ -18,6 +18,13 @@ function highs(src: string): string[] {
   return scan(src).findings.filter((f) => f.severity === "HIGH").map((f) => f.ruleId);
 }
 
+// Offset of the nth occurrence of needle in src (1-based n).
+function nth(src: string, needle: string, n: number): number {
+  let i = -1;
+  for (let k = 0; k < n; k++) i = src.indexOf(needle, i + 1);
+  return i;
+}
+
 const isHighUnanalyzable = (r: RuleResult) =>
   r.findings.some((f) => f.ruleId === "unanalyzable" && f.severity === "HIGH") && r.complete === false;
 
@@ -236,11 +243,6 @@ test("M8: an inline `set x = ...` is NOT a block and does not deepen nesting", (
 // spanned text, clipped. The over-size finding is the whole-template case, at
 // offset 0 with length 0.
 test("M5: every shape-cap unanalyzable finding is spanned on the offending text", () => {
-  const nth = (src: string, needle: string, n: number): number => {
-    let i = -1;
-    for (let k = 0; k < n; k++) i = src.indexOf(needle, i + 1);
-    return i;
-  };
   // Offset of a 1-based line and column, breaking lines as jinja2 does (BMP text, so a column is a code unit).
   const offsetOf = (src: string, line: number, col: number): number => {
     const re = /\r\n|\r|\n/g;
@@ -289,6 +291,91 @@ test("M5: every shape-cap unanalyzable finding is spanned on the offending text"
   // Over the size cap: the whole template, at offset 0 with length 0.
   const big = scan("{{ x }}" + "a".repeat(512 * 1024)).findings.filter((f) => f.ruleId === "unanalyzable" && f.severity === "HIGH");
   expect(big.map((f) => ({ span: f.span, excerpt: f.excerpt }))).toEqual([{ span: { start: 0, end: 0, line: 1, col: 1 }, excerpt: undefined }]);
+});
+
+// ISC-26.1 — no HIGH finding is spanless. A library parse error whose message
+// names no locatable construct (the library's messages carry no position) is
+// the whole-template case, offset 0 with length 0; a named construct is spanned
+// on its token. The per-rule overflow summary is spanned on the first finding
+// it stands for, and a finding on a node with no identifier or string leaf
+// (`messages[0][[1]]`) is spanned on the expression that holds it.
+test("ISC-26.1: no HIGH finding lacks a span, parse errors and summaries included", () => {
+  const WHOLE = { start: 0, end: 0, line: 1, col: 1 };
+  const spanless = (src: string): string[] =>
+    scan(src).findings.filter((f) => f.severity === "HIGH" && !f.span).map((f) => `${f.ruleId}: ${f.message}`);
+  const spanOf = (src: string, ruleId: string) => scan(src).findings.find((f) => f.ruleId === ruleId && f.severity === "HIGH")?.span;
+
+  // Library parse errors with no position: the whole template.
+  const positionless = [
+    "{% if x is divisibleby 3 %}y{% endif %}",
+    "{{ x |}}",
+    "{{ x",
+    "{{ x ) }}",
+    "{% for %}",
+    "{{ 'abc }}",
+    "a\nb\n{{ x | }}",
+    "{% if x %}",
+  ];
+  for (const src of positionless) {
+    expect({ src, span: spanOf(src, "unanalyzable") }).toEqual({ src, span: WHOLE });
+  }
+  // A named construct keeps its token span.
+  expect(spanOf("x\n{% with %}{% endwith %}", "unanalyzable")).toEqual({ start: 5, end: 9, line: 2, col: 4 });
+
+  // The overflow summary points at the first finding it suppresses.
+  const many = "{{ x.__a__ }}".repeat(150);
+  const dunders = scan(many).findings.filter((f) => f.ruleId === "dunder_access");
+  expect(dunders[100]?.message).toContain("50 more");
+  expect(dunders[100]?.span?.start).toBe(nth(many, "__a__", 101));
+
+  // A key with no identifier or string leaf is spanned on its expression.
+  for (const key of ["[1]", "(1, 2)", "{1: 2}", "[]", "-[1]"]) {
+    const src = `x\n{{ messages[0][${key}] }}`;
+    expect({ key, span: spanOf(src, "dynamic_attribute") }).toEqual({ key, span: { start: 5, end: 13, line: 2, col: 4 } });
+  }
+
+  // Nothing above, and none of the cap shapes, leaves a HIGH finding spanless.
+  const all = [
+    ...positionless,
+    many,
+    "{{ messages[0][[1]] }}",
+    "{{ [1][[2]] }}",
+    "{{ x" + " ".repeat(1000) + "}}",
+    "{% if a %}" + "{% elif b %}".repeat(300) + "{% endif %}",
+    "{% set a %}".repeat(200) + "x" + "{% endset %}".repeat(200),
+    "{{ " + "(".repeat(150) + "x" + ")".repeat(150) + " }}",
+    "{{ " + "a+".repeat(1100) + "a }}",
+    "{{ x }}" + "a".repeat(512 * 1024),
+  ];
+  for (const src of all) expect({ src: src.slice(0, 40), spanless: spanless(src) }).toEqual({ src: src.slice(0, 40), spanless: [] });
+});
+
+// Excerpts are clipped to 200 code units; an astral character straddling the
+// cut is dropped whole, so the excerpt never ends in a lone high surrogate.
+test("an excerpt clipped through an astral character keeps no lone surrogate", () => {
+  const roundTrips = (s: string): boolean => new TextDecoder().decode(new TextEncoder().encode(s)) === s;
+  // A token-cap finding's excerpt is the whole tag, from its opener.
+  const tagWithEmojiAt = (at: number): string => {
+    const head = "{{ " + "a+".repeat(200);
+    const filler = head.slice(0, at - 1); // the opening quote sits at at - 1
+    return filler + "'\u{1F600}'" + "+a".repeat(1100) + " }}";
+  };
+  const excerptOf = (src: string): string | undefined =>
+    scan(src).findings.find((f) => f.ruleId === "unanalyzable" && f.severity === "HIGH")?.excerpt;
+
+  // The emoji's surrogates are units 199 and 200: the cut drops it and stops at 199.
+  const straddle = tagWithEmojiAt(199);
+  expect(straddle.charCodeAt(199)).toBe(0xd83d);
+  const cut = excerptOf(straddle)!;
+  expect(cut).toBe(`${straddle.slice(0, 199)}…`);
+  expect(roundTrips(cut)).toBe(true);
+
+  // Control: the emoji wholly before the cut (units 197 and 198) is kept.
+  const before = tagWithEmojiAt(197);
+  const kept = excerptOf(before)!;
+  expect(kept).toBe(`${before.slice(0, 200)}…`);
+  expect(kept).toContain("\u{1F600}");
+  expect(roundTrips(kept)).toBe(true);
 });
 
 test("findings are capped at 100 per rule, plus one finding carrying the remaining count", () => {

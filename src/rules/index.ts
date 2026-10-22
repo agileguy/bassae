@@ -11,9 +11,9 @@
 // raw-text fallback) and in memory (round-2 memory review: over the size cap no full token
 // array or line map is built; the raw-text fallback streams).
 
-import type { AnalysisContext, Finding, RuleId, RuleResult, Severity } from "../types.ts";
+import type { AnalysisContext, Finding, RuleId, RuleResult, Severity, Span } from "../types.ts";
 import { SEVERITY_RANK } from "../types.ts";
-import { parseTemplate } from "../parse/parse.ts";
+import { parseTemplate, WHOLE_TEMPLATE } from "../parse/parse.ts";
 import { hasDunderName, resolveBindings, type Node } from "../parse/support.ts";
 import { runCodeExec, type RuleCtx } from "./codeexec.ts";
 import { runFold } from "./fold.ts";
@@ -46,7 +46,7 @@ export function analyzeCodeExec(ctx: AnalysisContext): RuleResult {
     // HIGH unanalyzable and incomplete, exactly as an unparseable one would be.
     const message = e instanceof Error ? e.message : String(e);
     return {
-      findings: [{ ruleId: "unanalyzable", severity: "HIGH", message: `internal error analyzing template: ${message}`, ...base }],
+      findings: [{ ruleId: "unanalyzable", severity: "HIGH", message: `internal error analyzing template: ${message}`, ...base, span: { ...WHOLE_TEMPLATE } }],
       complete: false,
     };
   }
@@ -109,14 +109,26 @@ function runStringLiteralDunder(outcome: ReturnType<typeof parseTemplate>, ctx: 
   return out;
 }
 
+// Cut to MAX_EXCERPT code units. An astral character straddling the cut is
+// dropped whole, so the excerpt never ends in a lone high surrogate, which a
+// UTF-8 writer would turn into U+FFFD and a strict consumer could reject.
 function clip(s: string): string {
-  return s.length > MAX_EXCERPT ? `${s.slice(0, MAX_EXCERPT)}…` : s;
+  if (s.length <= MAX_EXCERPT) return s;
+  const last = s.charCodeAt(MAX_EXCERPT - 1);
+  const cut = last >= 0xd800 && last <= 0xdbff ? MAX_EXCERPT - 1 : MAX_EXCERPT;
+  return `${s.slice(0, cut)}…`;
 }
 
-// Every finding passes through here, so no rule can copy a long span (a cap's
-// whitespace run, a whole tag) into the output as its excerpt.
+// Every finding passes through here, so two things hold for all of them: no
+// rule can copy a long span (a cap's whitespace run, a whole tag) into the
+// output as its excerpt, and no finding is spanless (ISC-26.1). One a rule
+// could not place is the whole-template case.
 function pushAll(into: Finding[], from: Finding[]): void {
-  for (const f of from) into.push(f.excerpt && f.excerpt.length > MAX_EXCERPT ? { ...f, excerpt: clip(f.excerpt) } : f);
+  for (let f of from) {
+    if (f.excerpt && f.excerpt.length > MAX_EXCERPT) f = { ...f, excerpt: clip(f.excerpt) };
+    if (!f.span) f = { ...f, span: { ...WHOLE_TEMPLATE } };
+    into.push(f);
+  }
 }
 
 // Two rules can legitimately name the same span (e.g. an unparseable template
@@ -140,6 +152,7 @@ function capPerRule(findings: Finding[], base: Base): Finding[] {
   const counts = new Map<RuleId, number>();
   const suppressed = new Map<RuleId, number>();
   const severity = new Map<RuleId, Severity>();
+  const firstSuppressed = new Map<RuleId, Span | undefined>(); // where the summary points (ISC-26.1)
   for (const f of findings) {
     // The summary carries the HIGHEST severity seen for the rule, not the first
     // (review item C): a suppressed HIGH must not be summarized as MEDIUM.
@@ -151,6 +164,7 @@ function capPerRule(findings: Finding[], base: Base): Finding[] {
       counts.set(f.ruleId, c + 1);
     } else {
       suppressed.set(f.ruleId, (suppressed.get(f.ruleId) ?? 0) + 1);
+      if (!firstSuppressed.has(f.ruleId)) firstSuppressed.set(f.ruleId, f.span);
     }
   }
   for (const [ruleId, n] of suppressed) {
@@ -159,6 +173,7 @@ function capPerRule(findings: Finding[], base: Base): Finding[] {
       severity: severity.get(ruleId) ?? "HIGH",
       message: `${n} more ${ruleId} findings suppressed`,
       ...base,
+      span: firstSuppressed.get(ruleId) ?? { ...WHOLE_TEMPLATE },
       detail: { suppressed: n },
     });
   }

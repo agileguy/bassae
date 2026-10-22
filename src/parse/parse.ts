@@ -28,6 +28,9 @@ import {
 // scan the interiors (round-2 memory review).
 const MAX_PARSE_UNITS = 512 * 1024;
 
+/** The whole-template span, offset 0 with length 0: for a finding about the template as a whole (M5, ISC-26.1). */
+export const WHOLE_TEMPLATE: Readonly<Span> = { start: 0, end: 0, line: 1, col: 1 };
+
 // Shape caps checked linearly BEFORE the library parser runs, so the result is
 // decided by integer token counts that are identical on every platform (ISC-31)
 // — never by whether a given machine's stack survives a hostile nesting depth.
@@ -86,7 +89,7 @@ export function parseTemplate(text: string): ParseOutcome {
   // streaming raw-text fallback (rules/index.ts) scans the interiors with
   // incremental spans.
   if (text.length > MAX_PARSE_UNITS) {
-    const capAt = { start: 0, end: 0, line: 1, col: 1 }; // the whole template; no line map is built
+    const capAt = { ...WHOLE_TEMPLATE }; // no line map is built over the size cap
     return { spans: new Map(), unsupported: [], tooLarge: true, oversized: true, parseError: "template exceeds the in-process parse budget", capAt };
   }
 

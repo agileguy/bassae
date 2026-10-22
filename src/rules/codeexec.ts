@@ -71,8 +71,16 @@ export function runCodeExec(ctx: RuleCtx): Finding[] {
   const aliases = gadgetAliases(program);
   const spanOf = (n: Node | undefined): Span | undefined => (n ? outcome.spans.get(n) : undefined);
 
+  // The node the main walk is visiting. A flagged node with no identifier or
+  // string leaf of its own (the key in `messages[0][[1]]`) is spanned on the
+  // expression that holds it (ISC-26.1).
+  let visiting: Node | undefined;
   const add = (ruleId: Finding["ruleId"], message: string, node: Node | undefined, span?: Span): void => {
-    const s = span ?? spanOf(node) ?? (node ? firstLeafSpan(node, outcome.spans) : undefined);
+    const s =
+      span ??
+      spanOf(node) ??
+      (node ? firstLeafSpan(node, outcome.spans) : undefined) ??
+      (visiting ? firstLeafSpan(visiting, outcome.spans) : undefined);
     findings.push({
       ruleId,
       severity: "HIGH",
@@ -201,6 +209,7 @@ export function runCodeExec(ctx: RuleCtx): Finding[] {
       continue;
     }
     const n = node as Node;
+    visiting = n;
 
     // ISC-15, M2 fix 2 — a bare gadget handle used as a value.
     if (n.type === "Identifier" && GADGET_VALUE_HANDLES.has(String(n.value)) && !excusedGadget.has(n)) {

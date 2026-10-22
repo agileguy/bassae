@@ -7,7 +7,7 @@
 // and tests it parses but does not implement are reported from the ParseOutcome.
 
 import type { Finding, Severity } from "../types.ts";
-import type { ParseOutcome } from "../parse/parse.ts";
+import { type ParseOutcome, WHOLE_TEMPLATE } from "../parse/parse.ts";
 
 type Base = Pick<Finding, "file" | "templateName" | "templateSha256">;
 
@@ -33,9 +33,12 @@ export function runUnanalyzable(outcome: ParseOutcome, knownGood: boolean, base:
     if (!knownGood) {
       const named = outcome.parseError ? namedConstruct(outcome.parseError) : undefined;
       // Point at the named construct in the raw text when we can find it, and
-      // at where a size or shape cap tripped (M5, ISC-26.1).
+      // at where a size or shape cap tripped (M5, ISC-26.1). The library's own
+      // parse errors carry no position ("Unexpected token: CloseExpression",
+      // "Unexpected end of input"), so one with no locatable construct is the
+      // whole-template case.
       const tok = named && outcome.pre ? outcome.pre.tokens.find((t) => t.type === "identifier" && t.value === named) : undefined;
-      const span = tok && outcome.lines ? outcome.lines.span(tok.start, tok.end) : outcome.capAt;
+      const span = tok && outcome.lines ? outcome.lines.span(tok.start, tok.end) : (outcome.capAt ?? { ...WHOLE_TEMPLATE });
       // Carry the real reason for a size/shape cap, not a generic blurb (item D):
       // parseError holds e.g. "whitespace run of 5000 exceeds the parse limit".
       const detail = outcome.tooLarge
