@@ -45,3 +45,25 @@ test("LineMap turns offsets into 1-based line and code-point column", () => {
   // The € is one code point; the char after it is col 4 on line 2.
   expect(lines.at(src.indexOf("f"))).toEqual({ line: 2, col: 4 });
 });
+
+// jinja2 outputs a raw block's body verbatim, so it is one text run: a `{#` or
+// `{{` inside it opens nothing, and the code after `endraw` is live (round 4).
+test("a raw block's body is literal text up to the matching endraw", () => {
+  const segs = (src: string) => preLex(src).textSegments.map((s) => src.slice(s.start, s.end));
+  const tags = (src: string) => preLex(src).regions.map((r) => r.value.trim());
+  const src = "{% raw %}{#{% endraw %}{{ x.__class__ }}{# #}";
+  expect(segs(src)).toEqual(["{#"]);
+  expect(tags(src)).toEqual(["raw", "endraw", "x.__class__"]);
+  // The body runs to the FIRST endraw, whatever it holds.
+  expect(segs("{% raw %}{{ a }}{% if b %}{% endraw %}c")).toEqual(["{{ a }}{% if b %}", "c"]);
+  // Whitespace and modifiers on both tags.
+  expect(segs("{%- raw -%}{{ a }}{%+ endraw +%}{%raw%}b{%endraw%}")).toEqual(["{{ a }}", "b"]);
+  // Unclosed: the body runs to the end of the text.
+  expect(segs("{% raw %}{{ a }}")).toEqual(["{{ a }}"]);
+  // Not a raw opener: another keyword, or a raw tag inside a comment or a string.
+  expect(tags("{% rawx %}{{ a }}")).toEqual(["rawx", "a"]);
+  expect(tags("{# {% raw %} #}{{ a }}")).toEqual(["a"]);
+  expect(tags('{{ "{% raw %}" }}{{ a }}')).toEqual(['"{% raw %}"', "a"]);
+  // The raw tag is still lexed as a tag, so a parse error naming `raw` can be spanned on it.
+  expect(preLex(src).tokens.find((t) => t.type === "identifier")).toMatchObject({ value: "raw", start: 3, end: 6 });
+});

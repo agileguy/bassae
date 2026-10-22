@@ -6,7 +6,7 @@
 
 import type { Finding, RuleId } from "../types.ts";
 import { ENGINE_GLOBALS, ENGINE_PROBE_TESTS, EXEC_SURFACES, GADGETS, type LineMap } from "../parse/support.ts";
-import type { TextRun } from "../parse/prelexer.ts";
+import { keywordTagEnd, rawBodyEnd, type TextRun } from "../parse/prelexer.ts";
 
 type Base = Pick<Finding, "file" | "templateName" | "templateSha256">;
 
@@ -109,11 +109,13 @@ class IncrementalPos {
 }
 
 // The interior [start, end) of the next {{ }} or {% %} tag at or after `from`,
-// plus the index just past its close, or null when no further tag opens. The
+// plus the index the scan resumes from, or null when no further tag opens. The
 // bounds are the pre-lexer's (lexTag), found in one pass with no token array: a
 // {# #} comment is skipped whole, a quoted string (with backslash escapes) never
 // closes a tag, and `}}` closes an expression only at object-literal depth 0.
 // Ending a tag at a quoted or nested close would leave the rest of it unscanned.
+// After a `{% raw %}` tag the scan resumes at its endraw, as the pre-lexer does:
+// the body is literal text, so a `{#` in it opens no comment (round 4).
 function nextTag(text: string, from: number): { start: number; end: number; next: number } | null {
   const n = text.length;
   let i = from;
@@ -135,6 +137,7 @@ function nextTag(text: string, from: number): { start: number; end: number; next
       i++; // not '{%'
       continue;
     }
+    const raw = !expr && keywordTagEnd(text, i, "raw") >= 0;
     let j = i + 2;
     const mod = text.charCodeAt(j);
     if (mod === 0x2d || mod === 0x2b) j++; // '-' / '+'
@@ -146,7 +149,7 @@ function nextTag(text: string, from: number): { start: number; end: number; next
       const k = c === 0x2d || c === 0x2b ? j + 1 : j;
       const c1 = text.charCodeAt(k);
       const c2 = text.charCodeAt(k + 1);
-      if (expr ? depth === 0 && c1 === 0x7d && c2 === 0x7d : c1 === 0x25 && c2 === 0x7d) return { start, end: j, next: k + 2 };
+      if (expr ? depth === 0 && c1 === 0x7d && c2 === 0x7d : c1 === 0x25 && c2 === 0x7d) return { start, end: j, next: raw ? rawBodyEnd(text, k + 2) : k + 2 };
       if (c === 0x27 || c === 0x22) {
         // A quoted string, to its closing quote; a backslash escapes the next unit.
         j++;
