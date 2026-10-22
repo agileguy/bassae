@@ -54,8 +54,9 @@ export function bytesSource(bytes: Uint8Array): ByteSource {
 
 /** Opens a regular file read-only. The caller closes it. */
 export function openFileSource(path: string): ByteSource & { close(): void } {
-  // O_NONBLOCK keeps a FIFO from blocking the open. The type check runs on the descriptor, so nothing can be swapped in after it.
-  const fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
+  // O_NONBLOCK keeps a FIFO from blocking the open, and O_NOCTTY keeps a terminal device from becoming the scanner's
+  // controlling tty. The type check runs on the descriptor, so nothing can be swapped in after it.
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOCTTY);
   let size: number;
   try {
     const stat = fstatSync(fd);
