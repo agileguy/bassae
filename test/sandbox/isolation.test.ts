@@ -1,0 +1,97 @@
+import { expect, test } from "bun:test";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { sandboxAvailable, spawnSandboxed } from "../../src/sandbox/launcher.ts";
+
+const status = await sandboxAvailable();
+if (!status.available) console.warn(`\n[sandbox] SKIPPING canary under the sandbox: ${status.reason}\n`);
+
+const CANARY = join(import.meta.dir, "canary.ts");
+const ROOT = join(import.meta.dir, "../..");
+
+interface CanaryReport {
+  write: string;
+  read: string;
+  spawn: string;
+  connect: string;
+}
+
+/** Runs the canary against a fresh temp dir and a live local TCP listener. */
+async function runCanary(start: (argv: string[]) => { stdout: ReadableStream<Uint8Array>; exited: Promise<number> } | undefined) {
+  const dir = mkdtempSync(join(tmpdir(), "bassae-canary-"));
+  const writePath = join(dir, "written.txt");
+  const readPath = join(dir, "secret.txt");
+  writeFileSync(readPath, "secret");
+  let accepted = 0;
+  const server = Bun.listen({
+    hostname: "127.0.0.1",
+    port: 0,
+    socket: {
+      open(socket) {
+        accepted++;
+        socket.end();
+      },
+      data() {},
+    },
+  });
+  try {
+    const proc = start([process.execPath, CANARY, writePath, String(server.port), readPath]);
+    if (!proc) throw new Error("sandbox refused to start the canary");
+    const out = await new Response(proc.stdout).text();
+    await proc.exited;
+    return { report: JSON.parse(out) as CanaryReport, wrote: existsSync(writePath), accepted };
+  } finally {
+    server.stop(true);
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("sandbox availability is reported, and required where CI says so", () => {
+  console.log(`[sandbox] ${process.platform}: ${JSON.stringify(status)}`);
+  if (process.env.BASSAE_REQUIRE_SANDBOX) expect(status.available).toBe(true);
+  if (process.platform === "darwin") expect(status).toEqual({ available: true, kind: "sandbox-exec" });
+  if (!status.available) expect(status.reason.length).toBeGreaterThan(0);
+});
+
+test("control: outside the sandbox the canary can write, read and connect", async () => {
+  const { report, wrote, accepted } = await runCanary((argv) => Bun.spawn(argv, { stdout: "pipe" }));
+  expect(report).toEqual({ write: "ok", read: "ok", spawn: "ok", connect: "ok" });
+  expect(wrote).toBe(true);
+  expect(accepted).toBe(1);
+});
+
+test.skipIf(!status.available)("under the worker's sandbox wrapper the canary cannot write, read or connect (ISC-43.1)", async () => {
+  const { report, wrote, accepted } = await runCanary((argv) => spawnSandboxed(argv));
+  console.log(`[sandbox] canary under ${status.available ? status.kind : "-"}: ${JSON.stringify(report)}`);
+  expect(report.write).toStartWith("denied");
+  expect(report.read).toStartWith("denied");
+  expect(report.connect).toStartWith("denied");
+  expect(wrote).toBe(false);
+  expect(accepted).toBe(0);
+  // bwrap has no exec filter; the macOS profile denies fork outright.
+  if (status.available && status.kind === "sandbox-exec") expect(report.spawn).toStartWith("denied");
+});
+
+test("with no sandbox, nothing is started at all", () => {
+  expect(spawnSandboxed([process.execPath, "-e", "0"], "none")).toBeUndefined();
+});
+
+async function sourceFiles(dir: string): Promise<{ path: string; text: string }[]> {
+  const files = [];
+  for await (const path of new Bun.Glob("**/*.ts").scan({ cwd: join(ROOT, dir) })) {
+    files.push({ path: `${dir}/${path}`, text: await Bun.file(join(ROOT, dir, path)).text() });
+  }
+  return files;
+}
+
+test("ISC-37: process spawning appears in src/ only in the launcher", async () => {
+  const hits = (await sourceFiles("src")).filter((f) => /import.*jinja2|Bun\.spawn|child_process/.test(f.text)).map((f) => f.path);
+  expect(hits).toEqual(["src/sandbox/launcher.ts"]);
+});
+
+test("ISC-36: nothing in src/sandbox reaches for the network", async () => {
+  const net = /\bfetch\b|Bun\.(connect|listen|serve)|node:(net|http|https|http2|dgram|tls|dns)|\bWebSocket\b/;
+  const hits = (await sourceFiles("src/sandbox")).filter((f) => net.test(f.text)).map((f) => f.path);
+  expect(hits).toEqual([]);
+});
