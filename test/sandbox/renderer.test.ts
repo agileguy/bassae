@@ -265,6 +265,21 @@ describe.skipIf(!live)("caps (ISC-43)", () => {
     SLOW,
   );
 
+  test(
+    "after two renders in a row time out, the rest of the batch fails fast and says it was not attempted",
+    async () => {
+      const eight = Array.from({ length: 8 }, (_, i) => req(`r${i}`));
+      const [results, ms] = await timed(() => renderer.renderBatch(SPIN, eight, { timeoutMs: 500 }));
+      console.log(`[sandbox] 8 hanging renders at timeoutMs 500: ${ms.toFixed(0)}ms`);
+      expect(results).toEqual(eight.map((r) => failed(r.id, "timeout")));
+      const messages = results.map((r) => (r as { message: string }).message);
+      expect(messages.map((m) => m.includes("not attempted"))).toEqual([false, false, true, true, true, true, true, true]);
+      // Two timeouts' worth, not eight.
+      expect(ms).toBeLessThan(3 * 500);
+    },
+    SLOW,
+  );
+
   test("the output cap is exact", async () => {
     const src = "{% for i in range(n) %}x{% endfor %}";
     const results = await renderer.renderBatch(src, [req("at", { n: 100 }), req("over", { n: 101 })], { maxOutputBytes: 100 });
