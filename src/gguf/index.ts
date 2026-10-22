@@ -1,4 +1,4 @@
-import { realpathSync, statSync } from "node:fs";
+import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { firstHfCacheLocation } from "../hf/cache.ts";
 import type { Finding, ModelRecord } from "../types.ts";
@@ -25,8 +25,6 @@ export async function readGgufModel(path: string): Promise<ModelRecord> {
   let realPath = abs;
   try {
     realPath = realpathSync(abs);
-    // A FIFO or device would block or lie about its size.
-    if (!statSync(realPath).isFile()) throw new Error("not a regular file");
     const src = openFileSource(realPath);
     try {
       return readGgufSource(src, abs, realPath);

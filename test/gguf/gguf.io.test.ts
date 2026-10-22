@@ -118,6 +118,25 @@ test("a KV section running past MAX_KV_SECTION_BYTES stops with parse_error, wit
   }
 });
 
+const openProbe = `
+const { openFileSource } = await import(${JSON.stringify(join(import.meta.dir, "../../src/gguf/reader.ts"))});
+const { readGgufModel } = await import(${JSON.stringify(join(import.meta.dir, "../../src/gguf/index.ts"))});
+let open = "opened";
+try { openFileSource(process.env.GGUF_PATH).close(); } catch (e) { open = e.message; }
+const r = await readGgufModel(process.env.GGUF_PATH);
+console.log(JSON.stringify({ open, rules: r.findings.map((f) => f.ruleId) }));
+`;
+
+test("a FIFO, a device or a directory is refused on the open descriptor, and a FIFO doesn't block the open", () => {
+  const fifo = join(dir, "pipe.gguf");
+  expect(Bun.spawnSync(["mkfifo", fifo]).exitCode).toBe(0);
+  for (const path of [fifo, "/dev/null", dir]) {
+    // In a child with a deadline, so an open that blocks fails the test instead of hanging the run.
+    const p = Bun.spawnSync([process.execPath, "-e", openProbe], { env: { ...process.env, GGUF_PATH: path }, timeout: 5000 });
+    expect([path, p.stdout.toString().trim()]).toEqual([path, JSON.stringify({ open: "not a regular file", rules: ["scanner_error"] })]);
+  }
+}, 20_000);
+
 const rssProbe = `
 const { readGgufModel } = await import(${JSON.stringify(join(import.meta.dir, "../../src/gguf/index.ts"))});
 const r = await readGgufModel(process.env.GGUF_PATH);

@@ -1,4 +1,4 @@
-import { closeSync, fstatSync, openSync, readSync } from "node:fs";
+import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
 import type { Severity } from "../types.ts";
 import { MAX_ARRAY_LENGTH, MAX_KEY_BYTES, MAX_KV_COUNT, MAX_KV_SECTION_BYTES, MAX_STRING_BYTES } from "./limits.ts";
 import { CHAT_TEMPLATE_KEY, cKey, TEMPLATE_LIST_KEY } from "./templates.ts";
@@ -52,12 +52,16 @@ export function bytesSource(bytes: Uint8Array): ByteSource {
   return { size: bytes.length, read: (offset, length) => bytes.subarray(offset, offset + length) };
 }
 
-/** Opens a file read-only. The caller closes it. */
+/** Opens a regular file read-only. The caller closes it. */
 export function openFileSource(path: string): ByteSource & { close(): void } {
-  const fd = openSync(path, "r");
+  // O_NONBLOCK keeps a FIFO from blocking the open. The type check runs on the descriptor, so nothing can be swapped in after it.
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
   let size: number;
   try {
-    size = fstatSync(fd).size;
+    const stat = fstatSync(fd);
+    // A FIFO or device would block a read or lie about its size.
+    if (!stat.isFile()) throw new Error("not a regular file");
+    size = stat.size;
   } catch (e) {
     closeSync(fd);
     throw e;
