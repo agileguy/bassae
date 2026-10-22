@@ -181,7 +181,9 @@ export type UrlSink = (start: number, end: number, kind: UrlKind) => void;
 // Known TLDs that are also everyday file extensions: `config.py`, `README.md`,
 // `run.sh`, `main.rs`, `weights.pt`, `Foo.app`, `MANIFEST.in`. A name under one
 // of these is a domain only when something else says so: a path or port after
-// it, or a second-level label such as `com` (`example.com.py`).
+// it, or a second-level label such as `com` (`example.com.py`). `.ai` and
+// `.io` are not here: they name a host far more often than a file, and listing
+// them would hide `evil.ai`.
 const FILE_EXTENSION_TLDS: ReadonlySet<string> = new Set([
   "ac", "am", "app", "ar", "cc", "cl", "cr", "fish", "gd", "in", "key", "md", "mk", "ml", "mm", "mo", "mobi",
   "mov", "pl", "pm", "properties", "ps", "pt", "pub", "py", "rs", "sc", "sh", "so", "st", "tf", "ws", "zip",
