@@ -45,7 +45,8 @@ test("ISC-38: at Gemma scale, no read reaches past the end of the KV section", (
 test("ISC-38: the same holds for a small file and for a file on disk", () => {
   const { bytes, kvEnd } = buildGguf(typicalKvs(), { tensors: [weights(64)] });
   const mem = instrument(bytesSource(bytes));
-  readGgufSource(mem.source, "/m.gguf");
+  expect(readGgufSource(mem.source, "/m.gguf").templates).toHaveLength(2);
+  expect(mem.reads.length).toBeGreaterThan(0);
   expect(mem.maxEnd()).toBeLessThanOrEqual(kvEnd);
 
   const path = join(dir, "small.gguf");

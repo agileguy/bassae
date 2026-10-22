@@ -36,7 +36,7 @@ const hostile: Record<string, () => Uint8Array> = {
   "big-endian version 3": () => new Writer().header(0, 0x03000000).finish(),
   "KV count 2^64-1": () => new Writer().header(2n ** 64n - 1n).finish(),
   "KV count one past the cap": () => new Writer().header(MAX_KV_COUNT + 1).kv("a", str("b")).finish(),
-  "KV count larger than the KVs present": () => new Writer().header(10).kv(KEY, str("x")).finish(),
+  "KV count larger than the KVs present": () => new Writer().header(10).kv("general.name", str("x")).finish(),
   "2^60-byte template string": () => one().str(KEY).u32(T.STRING).u64(2n ** 60n).bytes(new Uint8Array(64)).finish(),
   "2^60-byte key": () => one().u64(2n ** 60n).bytes(new Uint8Array(64)).finish(),
   "string length that wraps a u64 offset": () => one().str(KEY).u32(T.STRING).u64(2n ** 64n - 16n).bytes(new Uint8Array(64)).finish(),
