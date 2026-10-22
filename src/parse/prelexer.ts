@@ -1,7 +1,8 @@
 // Offset-tracking pre-lexer. @huggingface/jinja tokens and AST nodes carry no
 // source positions (Decisions, 2026-10-22 16:20), so every finding span starts
-// here. We re-tokenize the raw template, tracking byte-for-byte offsets, and
-// correlate leaves back to the library's AST by walking both in source order.
+// here. We re-tokenize the raw template, recording each token's UTF-16 code-unit
+// offsets, and correlate leaves back to the library's AST by walking both in
+// source order.
 //
 // Phase 2 (hidden-instruction rules, ISC-17..21) reuses this: `stringLiterals`
 // and `textSegments` expose every literal and every text run with its span.
@@ -125,10 +126,12 @@ function lexTag(src: string, i: number, tokens: PreToken[], regions: TextRun[], 
       i++;
       continue;
     }
-    // Close, with optional `-`/`+` modifier before it.
+    // Close, with optional `-`/`+` modifier before it. Matching the library's
+    // tokenizer: `%}` closes a statement always, `}}` closes an expression only
+    // at curly-bracket depth 0 (so `}}` inside an object literal does not close).
     const mod = c === "-" || c === "+" ? 1 : 0;
     const closeTwo = src.slice(i + mod, i + mod + 2);
-    if (curlyDepth === 0 && ((isExpr && closeTwo === "}}") || (!isExpr && closeTwo === "%}"))) {
+    if ((!isExpr && closeTwo === "%}") || (isExpr && curlyDepth === 0 && closeTwo === "}}")) {
       regions.push({ value: src.slice(regionStart, i), start: regionStart, end: i });
       const closeStart = i;
       i += mod + 2;
@@ -168,13 +171,16 @@ function lexTag(src: string, i: number, tokens: PreToken[], regions: TextRun[], 
       tokens.push({ type: "number", value: src.slice(start, i), start, end: i, inTag: true });
       continue;
     }
-    // Punctuation / operators. Track object-literal depth so `}}` inside `{ }` is not a close.
+    // Punctuation / operators. Braces are single characters that move the
+    // object-literal depth, exactly as the library lexes them, so a `}}` run
+    // inside `{ }` lowers the depth twice and never reads as one close token.
     if (PUNCT_START.has(c)) {
       if (c === "{") curlyDepth++;
       else if (c === "}") curlyDepth = Math.max(0, curlyDepth - 1);
       // Greedily take two-char operators so spans line up; value is informational.
+      // `}}`/`%}` are deliberately excluded: a brace is always one character.
       const two = src.slice(i, i + 2);
-      const take = ["**", "//", "==", "!=", "<=", ">=", "}}", "%}"].includes(two) ? 2 : 1;
+      const take = c !== "{" && c !== "}" && ["**", "//", "==", "!=", "<=", ">="].includes(two) ? 2 : 1;
       tokens.push({ type: "punct", value: src.slice(i, i + take), start: i, end: i + take, inTag: true });
       i += take;
       continue;

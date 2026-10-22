@@ -1,10 +1,13 @@
-// ISC-14 — constant folding. A dunder (or exec surface) assembled at parse time
-// from literals, via `~`, `|join`, `|replace`, slicing or escapes, is as
-// dangerous as writing it out. We fold literal-only composite expressions and
-// flag any that resolve to one.
+// ISC-14 — constant folding of obfuscated dunder names. A dunder assembled at
+// parse time from literals — via `~`, `*`, `|join`, `|replace`, `|reverse`,
+// slicing or escapes — is as dangerous as writing `__class__` out, and has no
+// benign use, so we flag any composite expression that folds to one wherever it
+// appears. Exec-surface names are deliberately NOT flagged here (a folded
+// `'system'` or `'open a ticket'` is only dangerous in a callable/attribute
+// position; that is handled position-aware in codeexec.ts — ISC-16, item 9).
 
 import type { Finding, Span } from "../types.ts";
-import { foldLiteral, hasDunder, hasExecSurface, type Node } from "../parse/support.ts";
+import { foldLiteral, hasDunder, type Node } from "../parse/support.ts";
 import type { RuleCtx } from "./codeexec.ts";
 
 // Node kinds worth folding: a bare StringLiteral is not obfuscation, so we only
@@ -16,21 +19,23 @@ export function runFold(ctx: RuleCtx): Finding[] {
   if (!outcome.program) return [];
   const findings: Finding[] = [];
 
-  const visit = (node: unknown): void => {
-    if (!node || typeof node !== "object") return;
+  const stack: unknown[] = [outcome.program];
+  while (stack.length) {
+    const node = stack.pop();
+    if (!node || typeof node !== "object") continue;
     if (Array.isArray(node)) {
-      for (const c of node) visit(c);
-      return;
+      for (const c of node) stack.push(c);
+      continue;
     }
     const n = node as Node;
     if (COMPOSITE.has(n.type)) {
       const folded = foldLiteral(n);
-      if (typeof folded === "string" && (hasDunder(folded) || hasExecSurface(folded))) {
+      if (typeof folded === "string" && hasDunder(folded) && !ctx.scaffolding.has(folded)) {
         const span: Span | undefined = outcome.spans.get(n) ?? firstLeafSpan(n, outcome.spans);
         findings.push({
           ruleId: "folded_dunder",
           severity: "HIGH",
-          message: `literal expression folds to '${folded}'`,
+          message: `literal expression folds to a dunder '${folded}'`,
           file: ctx.file,
           templateName: ctx.templateName,
           templateSha256: ctx.sha256,
@@ -38,33 +43,29 @@ export function runFold(ctx: RuleCtx): Finding[] {
           excerpt: span ? ctx.text.slice(span.start, span.end) : undefined,
           detail: { folded },
         });
-        return; // don't also flag the nested pieces
+        continue; // don't also flag the nested pieces
       }
     }
-    for (const v of Object.values(n)) visit(v);
-  };
-
-  visit(outcome.program);
+    for (const v of Object.values(n)) stack.push(v);
+  }
   return findings;
 }
 
 // A composite node has no span of its own; point at its first leaf.
 function firstLeafSpan(node: Node, spans: Map<Node, Span>): Span | undefined {
-  let found: Span | undefined;
-  const visit = (x: unknown): void => {
-    if (found || !x || typeof x !== "object") return;
+  const stack: unknown[] = [node];
+  while (stack.length) {
+    const x = stack.pop();
+    if (!x || typeof x !== "object") continue;
     if (Array.isArray(x)) {
-      for (const c of x) visit(c);
-      return;
+      for (let i = x.length - 1; i >= 0; i--) stack.push(x[i]);
+      continue;
     }
     const n = x as Node;
     const s = spans.get(n);
-    if (s) {
-      found = s;
-      return;
-    }
-    for (const v of Object.values(n)) visit(v);
-  };
-  visit(node);
-  return found;
+    if (s) return s;
+    const vals = Object.values(n);
+    for (let i = vals.length - 1; i >= 0; i--) stack.push(vals[i]);
+  }
+  return undefined;
 }

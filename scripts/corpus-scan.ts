@@ -10,15 +10,30 @@
 import { readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
+import { tokenize } from "@huggingface/jinja";
 import { analyzeCodeExec } from "../src/rules/index.ts";
+import { preLex } from "../src/parse/prelexer.ts";
 import { makeTemplate, makeTemplateFromString } from "../src/template.ts";
 import type { ExtractedTemplate, SourceKind } from "../src/types.ts";
 
 const args = process.argv.slice(2);
 const verbose = args.includes("--verbose");
+const differential = args.includes("--differential");
 const dumpAt = args.indexOf("--dump");
 const dumpDir = dumpAt >= 0 ? args[dumpAt + 1] : undefined;
 const roots = args.filter((a, i) => !a.startsWith("--") && !(dumpAt >= 0 && i === dumpAt + 1));
+
+// --differential: confirm the pre-lexer segments text exactly where the library
+// does, across every corpus template (ISC-12 pre-lexer sync). Trimmed per run,
+// empties dropped, generation-tag templates skipped (preprocess merges them).
+function libraryText(src: string): string[] | null {
+  try {
+    return (tokenize(src) as { type: string; value: string }[])
+      .filter((t) => t.type === "Text").map((t) => t.value.trim()).filter(Boolean);
+  } catch {
+    return null;
+  }
+}
 if (roots.length === 0) roots.push(join(homedir(), ".cache/huggingface/hub"), join(homedir(), ".omlx"));
 
 const found: ExtractedTemplate[] = [];
@@ -92,6 +107,26 @@ for (const t of found) {
   const list = bySha.get(t.sha256) ?? [];
   list.push(t);
   bySha.set(t.sha256, list);
+}
+
+if (differential) {
+  let checked = 0;
+  let mismatches = 0;
+  const GENERATION_TAG = /\{%-?\s*(?:end)?generation\s*-?%\}/;
+  for (const [sha, list] of bySha) {
+    const src = list[0]!.text;
+    if (GENERATION_TAG.test(src)) continue;
+    const lib = libraryText(src);
+    if (lib === null) continue;
+    checked++;
+    const mine = preLex(src).textSegments.map((s) => s.value.trim()).filter(Boolean);
+    if (JSON.stringify(mine) !== JSON.stringify(lib)) {
+      mismatches++;
+      console.log(`MISMATCH ${sha.slice(0, 12)} ${list[0]!.source.path.replace(homedir(), "~")}`);
+    }
+  }
+  console.log(`differential: ${checked} templates checked, ${mismatches} mismatches`);
+  process.exit(mismatches === 0 ? 0 : 1);
 }
 
 let totalHigh = 0;

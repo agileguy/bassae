@@ -4,11 +4,12 @@
 
 import { Template } from "@huggingface/jinja";
 import type { Span } from "../types.ts";
-import { preLex, type PreLexResult } from "./prelexer.ts";
+import { preLex, type PreLexResult, type PreToken } from "./prelexer.ts";
 import {
   BENIGN_UNIMPLEMENTED_FILTERS,
   correlateSpans,
   DANGEROUS_FILTERS,
+  foldLiteral,
   IMPLEMENTED_TESTS,
   JINJA2_BUILTIN_FILTERS,
   JINJA2_BUILTIN_TESTS,
@@ -18,13 +19,24 @@ import {
   UNIMPLEMENTED_CALLABLE_GLOBALS,
 } from "./support.ts";
 
-// Templates larger than this are not parsed in-process; the library's
-// preprocess step is quadratic on long whitespace runs (measured: 3.8s for 100k
-// spaces). Real templates are ~18KB. Over the cap we fail closed to incomplete.
-const MAX_PARSE_BYTES = 512 * 1024;
+// Templates longer than this (in UTF-16 code units) are not parsed in-process;
+// the library's preprocess step is quadratic on long whitespace runs (measured:
+// 3.8s for 100k spaces). Real templates are ~18KB. Over the cap we fail closed
+// to incomplete and let the raw-text fallback scan the interiors.
+const MAX_PARSE_UNITS = 512 * 1024;
+
+// Shape caps checked linearly BEFORE the library parser runs, so the result is
+// decided by integer token counts that are identical on every platform (ISC-31)
+// — never by whether a given machine's stack survives a hostile nesting depth.
+// The corpus maxima are 37 / 35 / 3 / 10, so these leave 50x-100x headroom and
+// never trip a stock template. Over any of them: HIGH unanalyzable, no parse.
+const MAX_WHITESPACE_RUN = 4096;
+const MAX_TAG_TOKENS = 2048;
+const MAX_BRACKET_DEPTH = 100;
+const MAX_BLOCK_DEPTH = 128;
 
 export interface UnsupportedConstruct {
-  kind: "statement" | "filter" | "test" | "global";
+  kind: "statement" | "filter" | "test" | "global" | "operator";
   name: string;
   /** HIGH for exec gadgets and unparseable constructs, MEDIUM for benign data filters. */
   severity: "HIGH" | "MEDIUM";
@@ -56,8 +68,10 @@ export function parseTemplate(text: string): ParseOutcome {
   const pre = preLex(text);
   const lines = new LineMap(text);
 
-  if (text.length > MAX_PARSE_BYTES) {
-    return { pre, lines, spans: new Map(), unsupported: [], tooLarge: true, parseError: "template exceeds the in-process parse budget" };
+  const tooLargeReason =
+    text.length > MAX_PARSE_UNITS ? "template exceeds the in-process parse budget" : preParseLimit(text, pre.tokens);
+  if (tooLargeReason) {
+    return { pre, lines, spans: new Map(), unsupported: [], tooLarge: true, parseError: tooLargeReason };
   }
 
   let program: Node | undefined;
@@ -71,6 +85,67 @@ export function parseTemplate(text: string): ParseOutcome {
   const spans = program ? correlateSpans(sourceOrderLeaves(program), pre.tokens, lines) : new Map<Node, Span>();
   const unsupported = program ? findUnsupported(program, spans) : [];
   return { pre, lines, program, spans, parseError, unsupported, tooLarge: false };
+}
+
+// Longest run of whitespace anywhere in the text (code units). Linear.
+function maxWhitespaceRun(text: string): number {
+  let max = 0;
+  let run = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    // space, \t, \n, \v, \f, \r
+    if (c === 32 || (c >= 9 && c <= 13)) {
+      if (++run > max) max = run;
+    } else run = 0;
+  }
+  return max;
+}
+
+// Decide, in one linear pass over the pre-lexer tokens, whether the template's
+// shape is beyond what we will hand to the recursive-descent library parser.
+// Returns a reason string when a cap is exceeded, else undefined.
+function preParseLimit(text: string, tokens: PreToken[]): string | undefined {
+  const ws = maxWhitespaceRun(text);
+  if (ws > MAX_WHITESPACE_RUN) return `whitespace run of ${ws} exceeds the parse limit`;
+
+  let tagTokens = 0;
+  let bracket = 0;
+  let maxBracket = 0;
+  let block = 0;
+  let maxBlock = 0;
+  let expectBlockKeyword = false; // the identifier right after `{%`
+  for (const t of tokens) {
+    if (t.type === "open") {
+      tagTokens = 0;
+      bracket = 0;
+      expectBlockKeyword = t.value.startsWith("{%");
+      continue;
+    }
+    if (t.type === "close") continue;
+    if (!t.inTag) continue;
+    if (++tagTokens > MAX_TAG_TOKENS) return `single tag has more than ${MAX_TAG_TOKENS} tokens`;
+    if (t.type === "punct") {
+      if (t.value === "(" || t.value === "[" || t.value === "{") {
+        if (++bracket > maxBracket) maxBracket = bracket;
+        if (bracket > MAX_BRACKET_DEPTH) return `bracket nesting deeper than ${MAX_BRACKET_DEPTH}`;
+      } else if (t.value === ")" || t.value === "]" || t.value === "}") {
+        if (bracket > 0) bracket--;
+      }
+    }
+    if (expectBlockKeyword && t.type === "identifier") {
+      expectBlockKeyword = false;
+      const kw = t.value;
+      if (kw === "if" || kw === "for" || kw === "macro" || kw === "call" || kw === "filter") {
+        if (++block > maxBlock) maxBlock = block;
+        if (block > MAX_BLOCK_DEPTH) return `block nesting deeper than ${MAX_BLOCK_DEPTH}`;
+      } else if (kw.startsWith("end")) {
+        if (block > 0) block--;
+      }
+    }
+  }
+  void maxBracket;
+  void maxBlock;
+  return undefined;
 }
 
 // Walk the AST for filters, tests and globals the library parses but does not
@@ -126,20 +201,23 @@ function findUnsupported(program: Node, spans: Map<Node, Span>): UnsupportedCons
     checkNamedArg(name, args);
   };
 
-  const visit = (node: unknown): void => {
-    if (!node || typeof node !== "object") return;
+  // Explicit stack (ISC-31). A name-bearing child (a filter/test name, a dotted
+  // attribute, a keyword-argument key) is excluded from the descent so it is not
+  // re-read as a bare identifier. Order is irrelevant: `add` dedupes by kind:name.
+  const stack: unknown[] = [program];
+  while (stack.length) {
+    const node = stack.pop();
+    if (!node || typeof node !== "object") continue;
     if (Array.isArray(node)) {
-      for (const c of node) visit(c);
-      return;
+      for (const c of node) stack.push(c);
+      continue;
     }
     const n = node as Node;
-    // Children that hold a name rather than an expression: a filter or test
-    // name, a dotted attribute name, a keyword-argument name.
     let skip: string | undefined;
     if (n.type === "FilterExpression" || n.type === "FilterStatement") {
       const filter = n.filter as Node;
       checkFilter(filter);
-      if (filter.type === "CallExpression") visit(filter.args);
+      if (filter.type === "CallExpression") stack.push(filter.args);
       skip = "filter";
     } else if (n.type === "TestExpression") {
       classifyTest(String((n.test as Node).value), n.test as Node);
@@ -155,9 +233,20 @@ function findUnsupported(program: Node, spans: Map<Node, Span>): UnsupportedCons
       }
     } else if (n.type === "Identifier" && n.value === "self") {
       add({ kind: "global", name: "self", severity: "HIGH", span: spans.get(n) });
+    } else if (n.type === "BinaryExpression" && (n.operator as { value: string }).value === "*" && isStringStar(n)) {
+      // ISC-12.1 / item 6 — `'x' * 3` parses but the library throws on it at
+      // render ("Unknown operator * between StringValue and IntegerValue"), so a
+      // template using it is unanalyzable: MEDIUM (it still can't reach an
+      // attribute on its own; the code-exec rules flag it HIGH if it folds to one).
+      add({ kind: "operator", name: "*", severity: "MEDIUM", form: "string repetition", reason: "throws at render in @huggingface/jinja", span: spans.get(n.left as Node) ?? spans.get(n.right as Node) });
     }
-    for (const [k, v] of Object.entries(n)) if (k !== skip) visit(v);
-  };
-  visit(program);
+    for (const [k, v] of Object.entries(n)) if (k !== skip) stack.push(v);
+  }
   return out;
+}
+
+// True when a `*` binary expression has a string operand (string repetition).
+function isStringStar(n: Node): boolean {
+  const str = (side: unknown): boolean => (side as Node)?.type === "StringLiteral" || typeof foldLiteral(side) === "string";
+  return str(n.left) || str(n.right);
 }
