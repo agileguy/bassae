@@ -47,12 +47,16 @@ if (process.platform === "linux") {
 
 const min = (a: bigint, b: bigint) => (a < b ? a : b);
 
-/** Lets the process use `ms` more CPU time before SIGXCPU, and lowers the hard limit to `totalMs` more when given. */
+/**
+ * Lets the process use `ms` more CPU time before SIGXCPU, and lowers the hard limit to `totalMs` more when given.
+ * At the hard limit the kernel sends SIGKILL, which the parent cannot tell from any other kill, so the soft
+ * limit stays a second under it: a step that runs into the hard limit, ours or the host's, still ends by SIGXCPU.
+ */
 function limitCpu(ms: number, totalMs?: number): void {
   const { user, system } = process.cpuUsage();
   const used = (user + system) / 1e6;
   if (totalMs !== undefined) rlimit[1] = min(rlimit[1]!, BigInt(Math.ceil(used + totalMs / 1000)));
-  rlimit[0] = min(BigInt(Math.ceil(used + ms / 1000)), rlimit[1]!);
+  rlimit[0] = min(BigInt(Math.ceil(used + ms / 1000)), rlimit[1]! - 1n);
   if (libc.setrlimit(RLIMIT_CPU, ptr(rlimit)) !== 0) throw new Error("setrlimit(RLIMIT_CPU) failed");
 }
 
@@ -110,8 +114,9 @@ const [head = "", ...rest] = (await Bun.stdin.text()).split("\n").filter(Boolean
 const init = JSON.parse(head) as InitMessage;
 const requests = rest.map((line) => (JSON.parse(line) as RequestMessage).request);
 
-// The hard limit covers the parse and every render, plus a second; the soft limit covers one step at a time.
-limitCpu(init.cpuMs, (requests.length + 1) * init.cpuMs + 1000);
+// The soft limit covers one step at a time; the hard limit, the parse and every render. Each step's soft limit
+// rounds up to a whole second, so the hard limit allows a second more per step, and the second it keeps clear.
+limitCpu(init.cpuMs, (requests.length + 1) * (init.cpuMs + 1000) + 1000);
 let template: Template | undefined;
 let parseFailure = { failure: "parse" as RenderFailure, message: "" };
 try {

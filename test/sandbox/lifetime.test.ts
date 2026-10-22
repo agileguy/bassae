@@ -86,6 +86,27 @@ test.skipIf(!status.available)(
   30_000,
 );
 
+// At its hard CPU limit Linux sends SIGKILL, which the parent cannot tell from any other kill. A host that already
+// caps CPU time, here at 3 seconds, sets a hard limit well under what the worker would ask for one render.
+test("a worker under a host's own CPU cap still ends by SIGXCPU, never by the hard limit's SIGKILL", async () => {
+  const spin = "{% for i in range(1000) %}{% for j in range(1000) %}{% for k in range(1000) %}{% endfor %}{% endfor %}{% endfor %}";
+  const worker = Bun.spawn(["/bin/sh", "-c", 'ulimit -t 3 && exec "$0" --no-install "$1"', process.execPath, WORKER], {
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  try {
+    worker.stdin.write(encode({ t: "init", template: spin, maxOutputBytes: 1000, cpuMs: 10_000 }));
+    worker.stdin.write(encode({ t: "req", request: { id: "a", context: {}, profile: "hf-default" } }));
+    worker.stdin.end();
+    const [out] = await Promise.all([new Response(worker.stdout).text(), new Response(worker.stderr).text(), worker.exited]);
+    expect(out).toBe('{"t":"ready"}\n{"t":"parsed"}\n');
+    expect(worker.signalCode).toBe("SIGXCPU");
+  } finally {
+    worker.kill("SIGKILL");
+  }
+}, 30_000);
+
 // The kernel hands the /proc files of a process it will not dump to root, and leaves a dumpable one's with its
 // own uid. As root the two look alike, so this runs for an ordinary user only, as it does in CI.
 test.skipIf(!status.available || process.platform !== "linux" || process.getuid?.() === 0)(
