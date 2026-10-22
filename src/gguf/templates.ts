@@ -34,7 +34,7 @@ export function templateName(key: string): string {
   return name === "default" ? DOTTED_DEFAULT : name;
 }
 
-/** The key a llama.cpp view is recorded under: the stored key, then how many bytes of its value llama.cpp sees. */
+/** The key, or name, a llama.cpp view is recorded under: the stored one, then how many bytes of its value llama.cpp sees. */
 export const viewKey = (key: string, n: number) => `${key}[:${n}]`;
 
 export interface Extraction {
@@ -46,16 +46,16 @@ export interface Extraction {
 }
 
 export function extractTemplates(raw: RawTemplate[], path: string, realPath: string): Extraction {
-  const out: Extraction = { templates: [], views: [], findings: [] };
-  for (const r of raw) {
-    const source = { kind: "gguf", path, realPath, name: templateName(r.key), key: r.key } as const;
-    const t = makeTemplate(source, r.bytes);
-    out.templates.push(t);
+  const templates = raw.map((r) => makeTemplate({ kind: "gguf", path, realPath, name: templateName(r.key), key: r.key }, r.bytes));
+  const out: Extraction = { templates, views: [], findings: [] };
+  raw.forEach((r, i) => {
+    const t = templates[i]!;
     const n = r.bytes.indexOf(0);
-    if (n < 0) continue;
+    if (n < 0) return;
     // llama.cpp reads string values through c_str(), so it renders only the bytes before the NUL while
-    // gguf-py and HF tooling show the whole value. Both get analyzed.
-    const view = makeTemplate({ ...source, key: viewKey(r.key, n) }, r.bytes.slice(0, n));
+    // gguf-py and HF tooling show the whole value. Both get analyzed. The view gets its own name as well as
+    // its own key, so nothing keyed by name merges it with the full value.
+    const view = makeTemplate({ ...t.source, name: viewKey(t.source.name, n), key: viewKey(r.key, n) }, r.bytes.slice(0, n));
     out.views.push(view);
     const at = t.text.indexOf("\0");
     out.findings.push({
@@ -63,12 +63,24 @@ export function extractTemplates(raw: RawTemplate[], path: string, realPath: str
       severity: "HIGH",
       message: `${JSON.stringify(r.key)} holds a NUL at byte ${n}; llama.cpp renders only the ${n} bytes before it`,
       file: path,
-      templateName: source.name,
+      templateName: t.source.name,
       templateSha256: t.sha256,
       span: new LineMap(t.text).span(at, at + 1),
       detail: { key: r.key, byteOffset: n, fileOffset: r.offset + n, viewSha256: view.sha256 },
     });
-  }
+    // A stored key can be spelled like a view, e.g. tokenizer.chat_template.x[:3], and then the two share a name or key.
+    const clash = templates.find((s) => s.source.name === view.source.name || s.source.key === view.source.key);
+    if (!clash) return;
+    out.findings.push({
+      ruleId: "parse_error",
+      severity: "HIGH",
+      message: `${JSON.stringify(clash.source.key)} is recorded under the same name or key as the llama.cpp view of ${JSON.stringify(r.key)}`,
+      file: path,
+      templateName: clash.source.name,
+      templateSha256: clash.sha256,
+      detail: { key: clash.source.key, viewKey: view.source.key, viewName: view.source.name, viewSha256: view.sha256 },
+    });
+  });
   return out;
 }
 
