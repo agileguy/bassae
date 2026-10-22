@@ -147,19 +147,23 @@ const killLive = () => {
 };
 process.on("exit", killLive);
 
-// "exit" does not run when a signal ends the process, so the usual ones kill the workers too. Then,
-// unless the host program listens for the signal itself, it takes its default action as if we had not
-// been here. Nothing runs on SIGKILL or an OOM kill: bwrap's --die-with-parent covers Linux, and the
-// worker's own CPU limit covers macOS.
+// "exit" does not run when a signal ends the process, so the usual ones kill the workers too, every
+// time: a host program that lives through one may start more workers. When no one else listens, the
+// listener steps aside and raises the signal again, so it takes its default action as if we had not
+// been here, and cannot come back to us. Nothing runs on SIGKILL or an OOM kill: bwrap's
+// --die-with-parent covers Linux, and the worker's own CPU limit covers macOS.
 let handlingSignals = false;
 function killLiveOnSignals(): void {
   if (handlingSignals) return;
   handlingSignals = true;
   for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
-    process.once(signal, () => {
+    const onSignal = () => {
       killLive();
-      if (process.listenerCount(signal) === 0) process.kill(process.pid, signal);
-    });
+      if (process.listenerCount(signal) > 1) return;
+      process.off(signal, onSignal);
+      process.kill(process.pid, signal);
+    };
+    process.on(signal, onSignal);
   }
 }
 

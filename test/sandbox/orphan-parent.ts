@@ -1,16 +1,25 @@
 // Test-only. Starts a render that would spin for hours, says so, then waits to be killed, so a test
 // can kill this process and check that its worker dies with it.
-// Usage: bun orphan-parent.ts <wait|block>
-//   wait:  idle on the event loop, so signal handlers can run.
-//   block: freeze the event loop, as a hung parent would, so not even the render timeout can fire.
+// Usage: bun orphan-parent.ts <wait|block|swallow>
+//   wait:    idle on the event loop, so signal handlers can run.
+//   block:   freeze the event loop, as a hung parent would, so not even the render timeout can fire.
+//   swallow: like wait, but live through SIGINT, as a host program may, and start a fresh render after each one.
 
 import { writeSync } from "node:fs";
 import { createRenderer } from "../../src/sandbox/index.ts";
 
-const block = process.argv[2] === "block";
+const mode = process.argv[2];
+const block = mode === "block";
 const spin = "{% for i in range(1000) %}{% for j in range(1000) %}{% for k in range(1000) %}{% endfor %}{% endfor %}{% endfor %}";
-void createRenderer().renderBatch(spin, [{ id: "spin", context: {}, profile: "hf-default" }], { timeoutMs: block ? 1000 : 5000 });
-await Bun.sleep(300);
-writeSync(1, "rendering\n");
+
+async function render(): Promise<void> {
+  void createRenderer().renderBatch(spin, [{ id: "spin", context: {}, profile: "hf-default" }], { timeoutMs: block ? 1000 : 5000 });
+  await Bun.sleep(300);
+  writeSync(1, "rendering\n");
+}
+
+// The host's own listener runs first; the fresh render starts once the renderer's listener has run too.
+if (mode === "swallow") process.on("SIGINT", () => setTimeout(render, 50));
+await render();
 if (block) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 60_000);
 else await Bun.sleep(60_000);

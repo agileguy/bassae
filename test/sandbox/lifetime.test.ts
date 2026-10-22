@@ -121,6 +121,37 @@ test.skipIf(!status.available)(
 );
 
 test.skipIf(!status.available)(
+  "a host that lives through SIGINT and renders again has its new workers killed by the next SIGINT too",
+  async () => {
+    const parent = Bun.spawn([process.execPath, PARENT, "swallow"], { stdout: "pipe", stderr: "inherit" });
+    const reader = parent.stdout.getReader();
+    let said = "";
+    const seen: number[] = [];
+    try {
+      const survivors: number[][] = [];
+      for (let round = 1; round <= 2; round++) {
+        while (said.split("rendering").length <= round) said += new TextDecoder().decode((await reader.read()).value);
+        const workers = descendants(parent.pid).filter((pid) => !seen.includes(pid));
+        seen.push(...workers);
+        expect(workers.length).toBeGreaterThan(0);
+        expect(workers.every(running)).toBe(true);
+        parent.kill("SIGINT");
+        const start = performance.now();
+        while (workers.some(running) && performance.now() - start < 2000) await Bun.sleep(50);
+        survivors.push(workers.filter(running));
+      }
+      expect(survivors).toEqual([[], []]);
+      // The host chose to live through both, and did.
+      expect(parent.exitCode).toBeNull();
+    } finally {
+      parent.kill("SIGKILL");
+      for (const pid of seen) if (running(pid)) process.kill(pid, "SIGKILL");
+    }
+  },
+  30_000,
+);
+
+test.skipIf(!status.available)(
   "a worker dies within seconds of its renderer being SIGKILLed while hung",
   async () => {
     const { survivors, ms } = await killMidRender("block", "SIGKILL", 15_000);
