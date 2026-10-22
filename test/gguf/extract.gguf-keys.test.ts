@@ -118,26 +118,32 @@ test("ISC-4.2: a duplicated named template key is HIGH too", () => {
 
 // llama.cpp keeps keys as std::string but looks them up with strcmp and C-string map keys, so the part
 // after a NUL is invisible to it. Byte-exact readers would miss these templates entirely.
-test("a template key with a NUL suffix is extracted under the name llama.cpp sees, and flagged", () => {
+test("a lone template key with a NUL is extracted under the name llama.cpp sees, and is HIGH", () => {
   const r = read([
     ["tokenizer.chat_template\u0000x", str("A")],
     ["tokenizer.chat_template.tool_use\u0000y", str("B")],
+    ["general.name\u0000z", str("C")],
   ]);
   expect(r.templates.map((t) => [t.source.name, t.source.key])).toEqual([
     ["default", "tokenizer.chat_template\u0000x"],
     ["tool_use", "tokenizer.chat_template.tool_use\u0000y"],
   ]);
-  expect(rules(r)).toEqual([["parse_error", "MEDIUM"], ["parse_error", "MEDIUM"]]);
+  // A NUL in a key that is not a template stays MEDIUM.
+  expect(rules(r)).toEqual([["parse_error", "HIGH"], ["parse_error", "HIGH"], ["parse_error", "MEDIUM"]]);
+  expect(r.findings.map((f) => f.templateName)).toEqual(["default", "tool_use", undefined]);
 });
 
-test("ISC-4.2: a NUL alias of the bare template key is a HIGH duplicate", () => {
+test("ISC-4.2: a NUL alias of the bare template key is HIGH for the NUL and HIGH for the duplicate", () => {
   const r = read([
     ["tokenizer.chat_template\u0000evil", str("evil")],
     ["tokenizer.chat_template", str("clean")],
     ["tokenizer.chat_templates", arr(T.STRING, [])],
   ]);
-  expect(r.findings.map((f) => f.severity)).toContain("HIGH");
-  expect(r.findings.every((f) => f.ruleId === "parse_error")).toBe(true);
+  expect(rules(r)).toEqual([["parse_error", "HIGH"], ["parse_error", "HIGH"]]);
+  expect(r.findings.map((f) => f.message)).toEqual([
+    'key "tokenizer.chat_template\\u0000evil" contains a NUL byte; llama.cpp reads it as "tokenizer.chat_template"',
+    'key "tokenizer.chat_template" appears more than once',
+  ]);
   expect(r.templates.map((t) => t.text)).toEqual(["evil", "clean"]);
 });
 

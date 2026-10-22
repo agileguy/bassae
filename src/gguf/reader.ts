@@ -239,7 +239,8 @@ export function parseGguf(src: ByteSource): GgufParse {
     const type = cur.u32();
     const isTemplate = CHAT_TEMPLATE_KEY.test(name);
     if (name !== key) {
-      out.problems.push({ ruleId: "parse_error", severity: "MEDIUM", message: `key ${q(key)} contains a NUL byte; llama.cpp reads it as ${q(name)}`, key });
+      // No real file has one. On a template key it hides the template from gguf-py and HF tooling while llama.cpp still renders it.
+      out.problems.push({ ruleId: "parse_error", severity: isTemplate ? "HIGH" : "MEDIUM", message: `key ${q(key)} contains a NUL byte; llama.cpp reads it as ${q(name)}`, key });
     }
     if (seen.has(name)) {
       // Readers disagree on which copy wins. llama.cpp refuses exact duplicates but takes the first NUL alias.
