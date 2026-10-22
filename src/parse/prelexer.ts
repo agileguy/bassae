@@ -94,7 +94,18 @@ export function preLex(src: string): PreLexResult {
         i = end;
         continue;
       }
+      const raw = keywordTagEnd(src, i, "raw") >= 0;
       i = lexTag(src, i, tokens, regions, stringLiterals);
+      if (raw) {
+        // A raw block's body is literal text up to its endraw (round 4).
+        const start = i;
+        i = rawBodyEnd(src, i);
+        if (i > start) {
+          const value = src.slice(start, i);
+          tokens.push({ type: "text", value, start, end: i, inTag: false });
+          textSegments.push({ value, start, end: i });
+        }
+      }
       continue;
     }
     // A run of literal text.
@@ -106,6 +117,32 @@ export function preLex(src: string): PreLexResult {
   }
 
   return { tokens, regions, stringLiterals, textSegments };
+}
+
+/**
+ * When the `{%` at `i` opens a tag holding only the keyword `name`, as in
+ * `{%[-+]?\s*raw\s*[-+]?%}`, the index just past its `%}`; otherwise -1. Used
+ * for `raw` and `endraw`, which @huggingface/jinja does not know but jinja2
+ * does: the body between them is output verbatim, never lexed.
+ */
+export function keywordTagEnd(src: string, i: number, name: string): number {
+  if (src[i] !== "{" || src[i + 1] !== "%") return -1;
+  let j = i + 2;
+  if (src[j] === "-" || src[j] === "+") j++;
+  while (isSpace(src[j])) j++;
+  if (!src.startsWith(name, j)) return -1;
+  j += name.length;
+  while (isSpace(src[j])) j++;
+  if (src[j] === "-" || src[j] === "+") j++;
+  return src[j] === "%" && src[j + 1] === "}" ? j + 2 : -1;
+}
+
+/** Where a raw block's body that starts at `from` ends: the `{%` of the first endraw tag, or the end of the text when it is unclosed. */
+export function rawBodyEnd(src: string, from: number): number {
+  for (let k = src.indexOf("{%", from); k >= 0; k = src.indexOf("{%", k + 1)) {
+    if (keywordTagEnd(src, k, "endraw") >= 0) return k;
+  }
+  return src.length;
 }
 
 // Lex one {{ ... }} or {% ... %} tag starting at `i` (on the `{`). Returns the

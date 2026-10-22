@@ -123,6 +123,16 @@ test("an over-cap template of many tiny tags grows linearly (streaming is O(text
   expect(r.findings.some((f) => f.ruleId === "dunder_access")).toBe(true);
 }, TIMING_TIMEOUT_MS);
 
+// Round 4 — finding a raw block's endraw stays one forward pass: an unclosed raw
+// whose body is full of near-miss `{%   endraw x` tags, and many small raw blocks.
+test("over the size cap, raw blocks grow linearly", () => {
+  const unclosed = (n: number) => "{% raw %}" + "{%   endraw x".repeat(n) + "{{ x.__class__ }}";
+  expect(unclosed(50_000).length).toBeGreaterThan(512 * 1024);
+  expect(expectLinear("unclosed raw, near-miss endraws", unclosed, 50_000).findings.some((f) => f.ruleId === "dunder_access")).toBe(false);
+  const blocks = (n: number) => "{% raw %}{#{% endraw %}{{ x }}".repeat(n) + "{{ y.__class__ }}";
+  expect(expectLinear("many raw blocks", blocks, 25_000).findings.some((f) => f.ruleId === "dunder_access")).toBe(true);
+}, TIMING_TIMEOUT_MS);
+
 // The raw-text select/reject probe pattern once used an unbounded lazy gap that
 // rescanned to the end from every `select(` with no `)`: 119K units took 582 ms
 // and 476K took 9.4 s. A long run of them inside one tag now scans linearly.
