@@ -193,6 +193,14 @@ describe.skipIf(!live)("caps (ISC-43)", () => {
     SLOW,
   );
 
+  test("a string that keeps doubling is a memory failure, though JSC stops it long before RSS grows", async () => {
+    // JSC refuses a rope past its length limit in milliseconds; a Python engine would allocate every byte.
+    const src = '{% set ns = namespace(s="a") %}{% if boom %}{% for i in range(64) %}{% set ns.s = ns.s ~ ns.s %}{% endfor %}{% endif %}{{ ns.s }}';
+    const results = await renderer.renderBatch(src, [req("a"), req("b", { boom: true }), req("c")]);
+    expect(results).toEqual([ok("a", "a"), failed("b", "memory"), ok("c", "a")]);
+    expect((results[1] as { message: string }).message).toContain("Out of memory");
+  });
+
   test(
     "a stack overflow while parsing fails every request with stack, once",
     async () => {

@@ -16,6 +16,8 @@ test("decodeChild round-trips ready, parsed and results", () => {
   expect(decodeChild(encode(bad).trim())).toEqual(bad);
   const stack = { t: "res", result: { id: "c", ok: false, failure: "stack", message: "m" } } as const;
   expect(decodeChild(encode(stack).trim())).toEqual(stack);
+  const memory = { t: "res", result: { id: "d", ok: false, failure: "memory", message: "RangeError: Out of memory" } } as const;
+  expect(decodeChild(encode(memory).trim())).toEqual(memory);
 });
 
 test("decodeChild rejects malformed lines", () => {
@@ -31,7 +33,7 @@ test("decodeChild drops extra fields", () => {
 });
 
 test("the worker cannot claim failures only the parent can see", () => {
-  for (const failure of ["timeout", "memory", "sandbox", "made_up"]) {
+  for (const failure of ["timeout", "sandbox", "made_up"]) {
     const line = JSON.stringify({ t: "res", result: { id: "a", ok: false, failure, message: "m" } });
     expect(decodeChild(line)).toBeUndefined();
   }

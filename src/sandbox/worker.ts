@@ -69,8 +69,9 @@ async function send(message: ChildMessage): Promise<void> {
 /** A thrown value as a failure kind and a message the parent will accept. */
 function failure(e: unknown, otherwise: RenderFailure): { failure: RenderFailure; message: string } {
   // A recursive macro or deeply nested template exhausts the stack; that is a resource cap, not a template error.
-  const overflow = e instanceof RangeError && /call stack/i.test(e.message);
-  return { failure: overflow ? "stack" : otherwise, message: clip(e instanceof Error ? `${e.name}: ${e.message}` : String(e)) };
+  // So is a string past JSC's length limit: JSC refuses it at once, where a Python engine would allocate it all.
+  const cap = !(e instanceof RangeError) ? undefined : /call stack/i.test(e.message) ? "stack" : /out of memory/i.test(e.message) ? "memory" : undefined;
+  return { failure: cap ?? otherwise, message: clip(e instanceof Error ? `${e.name}: ${e.message}` : String(e)) };
 }
 
 function render(template: Template, request: RenderRequest, maxOutputBytes: number): RenderResult {
