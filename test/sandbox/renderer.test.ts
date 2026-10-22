@@ -239,6 +239,10 @@ describe.skipIf(!live)("the parent does not trust the worker", () => {
     expect(await rogue("exit").renderBatch("", two)).toEqual([failed("a", "render_error"), failed("b", "render_error")]);
   });
 
+  test("results before the ready line mean the worker never started properly", async () => {
+    expect(await rogue("skip-ready").renderBatch("", two)).toEqual([failed("a", "sandbox"), failed("b", "sandbox")]);
+  });
+
   test("a worker that floods stderr does not stall the batch", async () => {
     expect(await rogue("noisy").renderBatch("", two)).toEqual([ok("a", "noisy"), ok("b", "noisy")]);
   });

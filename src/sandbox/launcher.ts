@@ -29,10 +29,11 @@ const BUN = realpathSync(process.execPath);
 const WORKER = join(import.meta.dir, "worker.ts");
 const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
 
-// What the worker may read: bun, this checkout, and the jinja package wherever it was installed.
-const READ_ROOTS = [
-  ...new Set([realpathSync(join(import.meta.dir, "../..")), dirname(dirname(realpathSync(Bun.resolveSync("@huggingface/jinja", import.meta.dir))))]),
-];
+// What the worker may read besides bun and system libraries: this checkout, plus the jinja
+// package if it was installed outside it. The package entry point is <root>/dist/index.js.
+const CHECKOUT = realpathSync(join(import.meta.dir, "../.."));
+const JINJA = dirname(dirname(realpathSync(Bun.resolveSync("@huggingface/jinja", import.meta.dir))));
+const READ_ROOTS = JINJA.startsWith(CHECKOUT + "/") ? [CHECKOUT] : [CHECKOUT, JINJA];
 
 // UTC keeps strftime_now() identical across machines. The transpiler cache is off because the worker cannot write it.
 const CHILD_ENV = { TZ: "UTC", BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0", NO_COLOR: "1" };
@@ -217,7 +218,7 @@ export async function runWorker(
   if ("error" in launched) return { results: [], sandboxError: launched.error };
   const { kind, proc } = launched;
   const rss = kind === "sandbox-exec" ? darwinRss : linuxTreeRss;
-  const stderr = keepHead(proc.stderr);
+  const stderr = keepHead(proc.stderr).catch(() => "");
   // JSON escaping can grow output up to six-fold; anything longer than that is not a result line.
   const maxLine = limits.maxOutputBytes * 6 + 65536;
 
@@ -226,6 +227,7 @@ export async function runWorker(
     let ready = false;
     let settled = false;
     let timer: Timer | undefined;
+    let poll: Timer | undefined;
 
     const settle = (sandboxError?: string) => {
       if (settled) return;
@@ -251,11 +253,6 @@ export async function runWorker(
         : setTimeout(() => settle(`worker did not start within ${STARTUP_MS}ms`), STARTUP_MS);
     };
 
-    const poll = setInterval(() => {
-      const bytes = rss(proc.pid);
-      if (bytes > limits.maxRssBytes) fail("memory", `worker resident memory ${mib(bytes)} exceeded the ${mib(limits.maxRssBytes)} cap`);
-    }, POLL_MS);
-
     const onLine = (line: string) => {
       if (settled) return;
       const message = decodeChild(line);
@@ -264,7 +261,7 @@ export async function runWorker(
         return arm();
       }
       const expected = requests[results.length];
-      if (message?.t !== "res" || message.result.id !== expected?.id) return fail("render_error", "worker protocol error");
+      if (!ready || message?.t !== "res" || message.result.id !== expected?.id) return fail("render_error", "worker protocol error");
       const result = message.result;
       const bytes = result.ok ? Buffer.byteLength(result.output) : 0;
       results.push(
@@ -277,7 +274,12 @@ export async function runWorker(
     };
 
     arm();
-    readLines(proc.stdout, maxLine, onLine).then(async (overflowed) => {
+    poll = setInterval(() => {
+      const bytes = rss(proc.pid);
+      if (bytes > limits.maxRssBytes) fail("memory", `worker resident memory ${mib(bytes)} exceeded the ${mib(limits.maxRssBytes)} cap`);
+    }, POLL_MS);
+    // A broken pipe reads as end of stream; the exit path then reports it.
+    readLines(proc.stdout, maxLine, onLine).catch(() => false).then(async (overflowed) => {
       if (settled) return;
       if (overflowed) return fail("output_limit", `worker wrote a line longer than ${maxLine} characters`);
       const code = await proc.exited;
