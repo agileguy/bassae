@@ -476,3 +476,25 @@ test("computed-callee review: an unbound key is dynamic with a message naming it
     "subscript key is neither a literal nor runtime data",
   ]);
 });
+
+// ISC-14.1 object rule (round-3 gate): both conditions hold together. The object
+// must be runtime-rooted, and the key a direct literal, a number, a slice or
+// runtime data. A runtime key on a value the template made lets the data pick
+// an attribute of the template's object, so it is HIGH, and the template is
+// still fully analyzed.
+test("ISC-14.1 object rule: a runtime key on a template-made object is HIGH", () => {
+  const made = [
+    "{% set s = 'abc' %}{% for m in messages %}{{ s[m.content]() }}{% endfor %}",
+    "{% set s = 'abc' %}{% for m in messages %}{{ s[m.role] }}{% endfor %}",
+    "{% set xs = ['a'] %}{% for m in messages %}{{ xs[m.role] }}{% endfor %}",
+    "{% macro f(o) %}{{ o[messages[0].role] }}{% endmacro %}{{ f('abc') }}",
+  ];
+  for (const src of made) {
+    const t = makeTemplate({ kind: "bare", path: "/t", realPath: "/t", name: "default" }, new TextEncoder().encode(src));
+    const r = analyzeCodeExec({ template: t, scaffolding: new Set(), knownGood: false });
+    const got = r.findings.filter((f) => f.severity === "HIGH").map((f) => f.ruleId);
+    expect({ src, complete: r.complete, highs: got }).toEqual({ src, complete: true, highs: ["dynamic_attribute"] });
+  }
+  // A runtime key on a runtime object is the carve-out, and stays clean.
+  expect(highs("{% for m in messages %}{{ m[m.role] }}{% endfor %}")).toEqual([]);
+});

@@ -229,6 +229,41 @@ test("M8: an inline `set x = ...` is NOT a block and does not deepen nesting", (
   expect(r.findings.some((f) => f.ruleId === "unanalyzable")).toBe(false);
 });
 
+// M5 — a shape-cap finding points at the offset where the cap tripped: the first
+// whitespace code unit past the run cap, the keyword that opens one block level
+// too many, the bracket one level too deep, the token one past the tag cap. Each
+// template starts on line 2 so the line and column are checked as well.
+test("M5: a shape-cap unanalyzable finding is spanned at the offset where the cap tripped", () => {
+  const NL = "x\n";
+  const nth = (src: string, needle: string, n: number): number => {
+    let i = -1;
+    for (let k = 0; k < n; k++) i = src.indexOf(needle, i + 1);
+    return i;
+  };
+  const check = (src: string, start: number, text: string): void => {
+    const f = scan(src).findings.find((x) => x.ruleId === "unanalyzable" && x.severity === "HIGH");
+    const end = start + text.length;
+    expect({ span: f?.span, excerpt: f?.excerpt }).toEqual({ span: { start, end, line: 2, col: start - NL.length + 1 }, excerpt: text });
+  };
+  // Whitespace run: the 513th unit of the run, ASCII or not (M6).
+  for (const ch of [" ", " ", " "]) {
+    const head = NL + "{{ x";
+    check(head + ch.repeat(600) + "}}", head.length + 512, ch);
+  }
+  // Block depth: the 128th elif nests the 129th level under its `if`.
+  const elifs = NL + "{% if a0 %}x" + Array.from({ length: 140 }, (_, i) => `{% elif a${i + 1} %}x`).join("") + "{% endif %}";
+  check(elifs, nth(elifs, "elif", 128), "elif");
+  // The 129th nested block set, and the 129th nested if.
+  const sets = NL + "{% set v %}".repeat(140) + "x" + "{% endset %}".repeat(140);
+  check(sets, nth(sets, "set v", 129), "set");
+  const ifs = NL + "{% if x %}".repeat(140) + "y" + "{% endif %}".repeat(140);
+  check(ifs, nth(ifs, "if x", 129), "if");
+  // Bracket depth: the 101st open paren.
+  check(NL + "{{ " + "(".repeat(150) + "x" + ")".repeat(150) + " }}", NL.length + 3 + 100, "(");
+  // Tag tokens: the 2049th token of one tag.
+  check(NL + "{{ " + "a+".repeat(1100) + "a }}", NL.length + 3 + 2048, "a");
+});
+
 test("findings are capped at 100 per rule, plus one finding carrying the remaining count", () => {
   const r = scan("{{ x.__a__ }}".repeat(250));
   const dunder = r.findings.filter((f) => f.ruleId === "dunder_access");

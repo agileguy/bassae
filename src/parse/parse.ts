@@ -68,6 +68,8 @@ export interface ParseOutcome {
   unsupported: UnsupportedConstruct[];
   /** True when the input was too large/hostile to parse safely. */
   tooLarge: boolean;
+  /** Where a shape cap tripped: the code unit or token that went one past it, as offsets into the text (M5). */
+  capAt?: { start: number; end: number };
   /** True when the input was over the size cap, so no pre-lexer or line map was built; the raw-text fallback streams instead. */
   oversized?: boolean;
 }
@@ -85,18 +87,20 @@ export function parseTemplate(text: string): ParseOutcome {
   // Below the size cap the text is at most ~1 MB, so the pre-lexer and line map
   // are cheap. The whitespace run must count every Unicode space the library's
   // `\s` preprocess regex matches, or a run of U+00A0/U+3000 slips past (M6).
-  const ws = maxWhitespaceRun(text);
-  if (ws > MAX_WHITESPACE_RUN) {
+  const ws = whitespaceRuns(text);
+  if (ws.max > MAX_WHITESPACE_RUN) {
     const pre = preLex(text);
     const lines = new LineMap(text);
-    return { pre, lines, spans: new Map(), unsupported: [], tooLarge: true, parseError: `whitespace run of ${ws} exceeds the parse limit` };
+    const capAt = { start: ws.tripAt, end: ws.tripAt + 1 };
+    return { pre, lines, spans: new Map(), unsupported: [], tooLarge: true, parseError: `whitespace run of ${ws.max} exceeds the parse limit`, capAt };
   }
 
   const pre = preLex(text);
   const lines = new LineMap(text);
-  const shapeReason = preParseLimit(pre.tokens);
-  if (shapeReason) {
-    return { pre, lines, spans: new Map(), unsupported: [], tooLarge: true, parseError: shapeReason };
+  const shape = preParseLimit(pre.tokens);
+  if (shape) {
+    const capAt = { start: shape.at.start, end: shape.at.end };
+    return { pre, lines, spans: new Map(), unsupported: [], tooLarge: true, parseError: shape.reason, capAt };
   }
 
   let program: Node | undefined;
@@ -112,9 +116,9 @@ export function parseTemplate(text: string): ParseOutcome {
   return { pre, lines, program, spans, parseError, unsupported, tooLarge: false };
 }
 
-// Longest run of whitespace anywhere in the text (code units), where whitespace
-// is exactly what JavaScript's `/\s/` matches — the same class the library's
-// preprocess step uses (M6). All of these are in the BMP, so charCodeAt is enough.
+// Whitespace is exactly what JavaScript's `/\s/` matches — the same class the
+// library's preprocess step uses (M6). All of these are in the BMP, so
+// charCodeAt is enough.
 export function isJsWhitespace(c: number): boolean {
   return (
     c === 0x20 ||
@@ -131,31 +135,35 @@ export function isJsWhitespace(c: number): boolean {
   );
 }
 
-function maxWhitespaceRun(text: string): number {
+// Longest run of whitespace anywhere in the text (code units), and the offset of
+// the first code unit that takes a run past MAX_WHITESPACE_RUN, or -1 (M5).
+function whitespaceRuns(text: string): { max: number; tripAt: number } {
   let max = 0;
   let run = 0;
+  let tripAt = -1;
   for (let i = 0; i < text.length; i++) {
     if (isJsWhitespace(text.charCodeAt(i))) {
       if (++run > max) max = run;
+      if (run === MAX_WHITESPACE_RUN + 1 && tripAt < 0) tripAt = i;
     } else run = 0;
   }
-  return max;
+  return { max, tripAt };
 }
 
 // Decide, in one linear pass over the pre-lexer tokens, whether the template's
 // shape is beyond what we will hand to the recursive-descent library parser.
-// Returns a reason string when a cap is exceeded, else undefined. The result is
-// a platform-independent integer count, never a function of the host's stack
-// (ISC-31): an `elif` deepens the open `if` (the parser nests it), a `{% set %}`
+// Returns the reason and the token that went past the cap (M5) when one is
+// exceeded, else undefined. The result is a platform-independent integer count,
+// never a function of the host's stack (ISC-31): an `elif` deepens the open `if` (the parser nests it), a `{% set %}`
 // with no top-level `=` is a block closed by `endset`, and each `end*` releases
 // the whole amount its opener added (M8).
-function preParseLimit(tokens: PreToken[]): string | undefined {
+function preParseLimit(tokens: PreToken[]): { reason: string; at: PreToken } | undefined {
   let tagTokens = 0;
   let bracket = 0;
   const blockStack: number[] = []; // depth each open block contributes (1, or 1 + elifs for an `if`)
   let block = 0; // current nesting depth = sum of blockStack
   let expectBlockKeyword = false; // the identifier right after `{%`
-  let pendingSet = false; // this tag opened with `set`
+  let pendingSet: PreToken | undefined; // the `set` keyword this tag opened with
   let setHasEquals = false; // a top-level `=` was seen in the pending set
   const TOO_DEEP = `block nesting deeper than ${MAX_BLOCK_DEPTH}`;
   for (const t of tokens) {
@@ -163,7 +171,7 @@ function preParseLimit(tokens: PreToken[]): string | undefined {
       tagTokens = 0;
       bracket = 0;
       expectBlockKeyword = t.value.startsWith("{%");
-      pendingSet = false;
+      pendingSet = undefined;
       setHasEquals = false;
       continue;
     }
@@ -171,15 +179,15 @@ function preParseLimit(tokens: PreToken[]): string | undefined {
       // A `{% set x %}` with no top-level `=` is a block closed by `endset`.
       if (pendingSet && !setHasEquals) {
         blockStack.push(1);
-        if (++block > MAX_BLOCK_DEPTH) return TOO_DEEP;
+        if (++block > MAX_BLOCK_DEPTH) return { reason: TOO_DEEP, at: pendingSet };
       }
       continue;
     }
     if (!t.inTag) continue;
-    if (++tagTokens > MAX_TAG_TOKENS) return `single tag has more than ${MAX_TAG_TOKENS} tokens`;
+    if (++tagTokens > MAX_TAG_TOKENS) return { reason: `single tag has more than ${MAX_TAG_TOKENS} tokens`, at: t };
     if (t.type === "punct") {
       if (t.value === "(" || t.value === "[" || t.value === "{") {
-        if (++bracket > MAX_BRACKET_DEPTH) return `bracket nesting deeper than ${MAX_BRACKET_DEPTH}`;
+        if (++bracket > MAX_BRACKET_DEPTH) return { reason: `bracket nesting deeper than ${MAX_BRACKET_DEPTH}`, at: t };
       } else if (t.value === ")" || t.value === "]" || t.value === "}") {
         if (bracket > 0) bracket--;
       } else if (t.value === "=" && bracket === 0) {
@@ -191,13 +199,13 @@ function preParseLimit(tokens: PreToken[]): string | undefined {
       const kw = t.value;
       if (kw === "if" || kw === "for" || kw === "macro" || kw === "call" || kw === "filter") {
         blockStack.push(1);
-        if (++block > MAX_BLOCK_DEPTH) return TOO_DEEP;
+        if (++block > MAX_BLOCK_DEPTH) return { reason: TOO_DEEP, at: t };
       } else if (kw === "elif") {
         // Each `elif` nests another `if` in the parser; one `endif` releases all.
         if (blockStack.length) blockStack[blockStack.length - 1]!++;
-        if (++block > MAX_BLOCK_DEPTH) return TOO_DEEP;
+        if (++block > MAX_BLOCK_DEPTH) return { reason: TOO_DEEP, at: t };
       } else if (kw === "set") {
-        pendingSet = true; // block-vs-inline decided when the tag closes
+        pendingSet = t; // block-vs-inline decided when the tag closes
       } else if (kw.startsWith("end")) {
         block -= blockStack.pop() ?? 0;
         if (block < 0) block = 0;
