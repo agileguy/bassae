@@ -1,11 +1,11 @@
 // Test-only canary. Run it under the same sandbox wrapper as the render worker; it tries
 // what a hijacked worker would try and prints one JSON line saying what got through.
-// Usage: bun canary.ts <write-path> <tcp-port> <read-path>
+// Usage: bun canary.ts <write-path> <tcp-port> <read-path> <home-path> <checkout-path>
 
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, statSync, writeFileSync } from "node:fs";
 import { connect } from "node:net";
 
-const [writePath = "", portArg = "0", readPath = ""] = process.argv.slice(2);
+const [writePath = "", portArg = "0", readPath = "", homePath = "", checkoutPath = ""] = process.argv.slice(2);
 
 function attempt(fn: () => void): string {
   try {
@@ -38,10 +38,21 @@ function tryConnect(port: number): Promise<string> {
 const report = {
   write: attempt(() => writeFileSync(writePath, "canary")),
   read: attempt(() => readFileSync(readPath)),
+  stat: attempt(() => statSync(readPath)),
+  home: attempt(() => readFileSync(homePath)),
+  checkout: attempt(() => readFileSync(checkoutPath)),
   spawn: attempt(() => {
     const p = Bun.spawnSync(["/bin/echo", "canary"]);
     if (!p.success) throw new Error(`exit ${p.exitCode}`);
   }),
+  // A threaded process cannot unshare a user namespace itself, so ask a single-threaded helper to. Linux only.
+  userns:
+    process.platform !== "linux"
+      ? "n/a"
+      : attempt(() => {
+          const p = Bun.spawnSync(["/usr/bin/unshare", "--user", "/usr/bin/true"], { stderr: "pipe" });
+          if (!p.success) throw new Error(p.stderr.toString().trim() || `exit ${p.exitCode}`);
+        }),
   connect: await tryConnect(Number(portArg)),
 };
 process.stdout.write(JSON.stringify(report) + "\n");
