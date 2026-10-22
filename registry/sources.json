@@ -1,3 +1,37 @@
 {
-  "sources": []
+  "sources": [
+    { "family": "functiongemma", "repo": "mlx-community/functiongemma-270m-it-bf16", "revision": "bb327a9ad61044e1496a2bee2365a6b6a6684c72" },
+    { "family": "gemma-3", "repo": "mlx-community/gemma-3-1b-it-4bit", "revision": "2d44e83dc9e80843d22fb941d3d699a0b1351aa6" },
+    { "family": "gemma-3n", "repo": "mlx-community/gemma-3n-E4B-it-4bit", "revision": "505468a22e5703ff090e222aae9beedec49b383f" },
+    { "family": "gemma-4", "repo": "google/gemma-4-E4B-it", "revision": "ee0ef6023621cff504d758262d4e04895a5af4a2" },
+    { "family": "gemma-4", "repo": "google/gemma-4-26B-A4B-it", "revision": "4d7ae4984b7db7de8f8457170b3f1a419ee76d52" },
+    { "family": "gemma-4", "repo": "ggml-org/gemma-4-E2B-it-GGUF", "revision": "b4243c156154b6dca9324415f8c7ccc098b4aed1", "gguf": ["gemma-4-E2B-it-Q8_0.gguf"] },
+    { "family": "gemma-4", "repo": "ggml-org/gemma-4-E4B-it-GGUF", "revision": "b8093469224f83f5c38f691eb906c380e9e63114", "gguf": ["gemma-4-E4B-it-Q8_0.gguf"] },
+    { "family": "gemma-4", "repo": "lmstudio-community/gemma-4-26B-A4B-it-QAT-MLX-4bit", "revision": "aa5e2e50376f54254d503276ca2222ea8569b95e" },
+    { "family": "gemma-4", "repo": "mlx-community/gemma-4-26b-a4b-it-8bit", "revision": "33c6d23798a0af159529890f79329206dbfbd73c" },
+    { "family": "gemma-4", "repo": "mlx-community/gemma-4-26b-a4b-it-bf16", "revision": "c5e94f24a28a9b8f075dbfe0ba0395d3b88e85fc" },
+    { "family": "gemma-4", "repo": "mlx-community/gemma-4-31b-it-8bit", "revision": "f5f3dc92ab4af76724c36c21eb6bedadb3a851be" },
+    { "family": "gemma-4", "repo": "mlx-community/gemma-4-e2b-it-4bit", "revision": "238767527555cb75a05732a84dff5d6ba0dd6809" },
+    { "family": "gemma-4", "repo": "mlx-community/gemma-4-e2b-it-4bit", "revision": "2c3e507453b4f218d05fe3cc97bea5c5a654257e" },
+    { "family": "gemma-4", "repo": "mlx-community/gemma-4-e4b-it-4bit", "revision": "475b9088d29754a3379866cf5aeb6b41acd313c2" },
+    { "family": "gemma-4", "repo": "mlx-community/gemma-4-e4b-it-4bit", "revision": "deb1db712068b1c9f83fb1c97f08c1204b9459a1" },
+    { "family": "glm-4.5", "repo": "lmstudio-community/GLM-4.5-Air-MLX-4bit", "revision": "92ce339f9fe1bbb3afa840d46cad1988b6a0e0bd" },
+    { "family": "gpt-oss", "repo": "openai/gpt-oss-120b", "revision": "b5c939de8f754692c1647ca79fbf85e8c1e70f8a" },
+    { "family": "gpt-oss", "repo": "mlx-community/gpt-oss-120b-MXFP4-Q8", "revision": "81e5ac3ad0af6efb1298a8e8c7a10ed2990c137b" },
+    { "family": "lfm2", "repo": "LiquidAI/LFM2-1.2B-Tool", "revision": "6d24c6b7471fcbcec084935e377a5302f4b84389" },
+    { "family": "lfm2", "repo": "LiquidAI/LFM2-1.2B-Tool-GGUF", "revision": "e7ec4149433c75d4bb53a0742ee1ebde7fcbd183", "gguf": ["LFM2-1.2B-Tool-Q8_0.gguf"] },
+    { "family": "qwen2.5", "repo": "Qwen/Qwen2.5-0.5B-Instruct", "revision": "7ae557604adf67be50417f59c2c2f167def9a775" },
+    { "family": "qwen2.5", "repo": "Qwen/Qwen2.5-0.5B-Instruct-GGUF", "revision": "9217f5db79a29953eb74d5343926648285ec7e67", "gguf": ["qwen2.5-0.5b-instruct-q8_0.gguf"] },
+    { "family": "qwen2.5", "repo": "mlx-community/Qwen2.5-0.5B-Instruct-4bit", "revision": "a5339a4131f135d0fdc6a5c8b5bbed2753bbe0f3" },
+    { "family": "qwen2.5", "repo": "mlx-community/Qwen2.5-3B-Instruct-4bit", "revision": "4f83f8f146fdf28b512a06562b671d7af4fab457" },
+    { "family": "qwen3", "repo": "Qwen/Qwen3-0.6B-GGUF", "revision": "23749fefcc72300e3a2ad315e1317431b06b590a", "gguf": ["Qwen3-0.6B-Q8_0.gguf"] },
+    { "family": "qwen3", "repo": "mlx-community/Qwen3-0.6B-4bit", "revision": "73e3e38d981303bc594367cd910ea6eb48349da8" },
+    { "family": "qwen3", "repo": "mlx-community/Qwen3-1.7B-4bit", "revision": "3b1b1768f8f8cf8351c712464f906e86c2b8269e" },
+    { "family": "qwen3", "repo": "mlx-community/Qwen3-8B-4bit", "revision": "545dc4251c05440727734bcd94334791f6ab0192" },
+    { "family": "qwen3-coder", "repo": "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit", "revision": "6e302ea604ad9ab206367e2c501d1571023e7b6d" },
+    { "family": "qwen3-embedding", "repo": "mlx-community/Qwen3-Embedding-4B-4bit-DWQ", "revision": "b5d88f1fe49b50d2ac01b4692ca2d387f14f9c72" },
+    { "family": "qwen3.5", "repo": "mlx-community/Qwen3.5-0.8B-MLX-bf16", "revision": "7aef04e9adfd926ce0da9da376fe9610c8818a58" },
+    { "family": "qwen3.6", "repo": "mlx-community/Qwen3.6-35B-A3B-bf16", "revision": "04bbe07c3ed2d93cbf832f523fea344bca1d0fcf" },
+    { "family": "xlam-2", "repo": "Salesforce/xLAM-2-1b-fc-r", "revision": "6870fcf102f434bd01819302d85780b8e767925d" }
+  ]
 }
