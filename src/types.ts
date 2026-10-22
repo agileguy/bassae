@@ -91,6 +91,8 @@ export interface ExtractedTemplate {
   /** Lowercase hex SHA-256 of `bytes`. */
   sha256: string;
   validUtf8: boolean;
+  /** True when another source in the same model wins for every runtime profile; still scanned (ISC-7.5). */
+  shadowed?: boolean;
 }
 
 /** Where a model sits inside a Hugging Face cache, when it does. */
@@ -141,6 +143,26 @@ export interface RegistryEntry {
   sha256: string;
 }
 
+/** A registry entry with the template text pinned for it, as loaded from the checked-in registry. */
+export interface KnownGoodTemplate {
+  entry: RegistryEntry;
+  text: string;
+}
+
+/** How a template relates to the registry: an exact SHA-256 match (ISC-24), a whitespace-only variant (ISC-24.2), or neither. */
+export type RegistryMatch =
+  | { kind: "exact"; known: KnownGoodTemplate }
+  | { kind: "whitespace"; known: KnownGoodTemplate }
+  | { kind: "none" };
+
+/** The checked-in known-good registry. Read-only: nothing a scan sees is ever written to it (ISC-24.1). */
+export interface Registry {
+  readonly entries: readonly KnownGoodTemplate[];
+  match(template: ExtractedTemplate): RegistryMatch;
+  /** Entries pinned to this repo, any revision: the candidate baselines for a template that diverges (ISC-25). */
+  forRepo(repo: string): readonly KnownGoodTemplate[];
+}
+
 /** Everything a rule may look at for one template. */
 export interface AnalysisContext {
   template: ExtractedTemplate;
@@ -148,8 +170,41 @@ export interface AnalysisContext {
   scaffolding: ReadonlySet<string>;
   /** True when the template's SHA-256 matches a known-good registry entry. */
   knownGood: boolean;
-  registryEntry?: RegistryEntry;
+  /** The registry entry the template matched, or the trusted baseline it is compared with; its literals are not injected text (ISC-17.1). */
+  known?: KnownGoodTemplate;
 }
+
+/** A literal a template can emit that is not scaffolding (Constraints: "injected text", ISC-17). */
+export interface InjectedText {
+  text: string;
+  span: Span;
+  /** The innermost test the emission depends on, when it is conditional. `presence` tests are exempt from ISC-18. */
+  condition?: { span: Span; test: "presence" | "content" | "nondeterministic" };
+  /** Emitted after the generation-prompt marker, as prefilled assistant text (ISC-17.2). */
+  afterGenerationPrompt: boolean;
+}
+
+// ---- runtime precedence and baselines ----
+
+/** The runtimes whose template choice the checked-in precedence table pins (Constraints). */
+export type RuntimeProfile =
+  | "transformers-tokenizer" // transformers 5.x tokenizer apply_chat_template
+  | "transformers-processor" // transformers 5.x processor apply_chat_template
+  | "mlx-lm" //                 mlx-lm 0.31
+  | "llama.cpp"; //             llama.cpp with its native Jinja engine
+
+/** For each runtime, the sources it loads the default template from, highest priority first (ISC-7.4). */
+export interface PrecedenceTable {
+  order: Record<RuntimeProfile, SourceKind[]>;
+  /** Where each order was read from: upstream repo, pinned version and file. */
+  provenance: Record<RuntimeProfile, string>;
+}
+
+/** What a template is compared with. Only a pinned registry entry or a pinned upstream fetch is trusted (Principles); a sibling file is a local comparison, never a baseline (ISC-23). */
+export type Baseline =
+  | { kind: "registry"; known: KnownGoodTemplate }
+  | { kind: "upstream"; repo: string; revision: string; path: string; templateName: string; text: string }
+  | { kind: "none" };
 
 export interface RuleResult {
   findings: Finding[];
