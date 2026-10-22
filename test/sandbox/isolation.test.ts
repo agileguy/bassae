@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { sandboxAvailable, spawnSandboxed } from "../../src/sandbox/launcher.ts";
+import { bwrapDegraded, sandboxAvailable, spawnSandboxed } from "../../src/sandbox/launcher.ts";
 
 const status = await sandboxAvailable();
 if (!status.available) console.warn(`\n[sandbox] SKIPPING canary under the sandbox: ${status.reason}\n`);
@@ -61,8 +61,16 @@ async function runCanary(start: (argv: string[]) => { stdout: ReadableStream<Uin
 test("sandbox availability is reported, and required where CI says so", () => {
   console.log(`[sandbox] ${process.platform}: ${JSON.stringify(status)}`);
   if (process.env.BASSAE_REQUIRE_SANDBOX) expect(status.available).toBe(true);
-  if (process.platform === "darwin") expect(status).toEqual({ available: true, kind: "sandbox-exec" });
+  if (process.platform === "darwin") expect(status).toEqual({ available: true, kind: "sandbox-exec", degraded: [] });
   if (!status.available) expect(status.reason.length).toBeGreaterThan(0);
+});
+
+test("a bwrap without --disable-userns is a downgrade the status names, not a silent one", () => {
+  expect(bwrapDegraded("usage: bwrap [OPTIONS...] [--] COMMAND [ARGS...]\n    --unshare-user  Create new user namespace")).toEqual([
+    expect.stringContaining("--disable-userns"),
+  ]);
+  expect(bwrapDegraded("    --disable-userns  Disable further use of user namespaces inside sandbox")).toEqual([]);
+  if (status.available && status.kind === "bwrap") expect(status.degraded).toEqual(disablesUserns ? [] : [expect.stringContaining("--disable-userns")]);
 });
 
 test("control: outside the sandbox the canary can write, read and connect", async () => {

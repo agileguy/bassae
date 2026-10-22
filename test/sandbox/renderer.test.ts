@@ -193,6 +193,14 @@ describe.skipIf(!live)("caps (ISC-43)", () => {
     SLOW,
   );
 
+  test("a string that keeps doubling is a memory failure, though JSC stops it long before RSS grows", async () => {
+    // JSC refuses a rope past its length limit in milliseconds; a Python engine would allocate every byte.
+    const src = '{% set ns = namespace(s="a") %}{% if boom %}{% for i in range(64) %}{% set ns.s = ns.s ~ ns.s %}{% endfor %}{% endif %}{{ ns.s }}';
+    const results = await renderer.renderBatch(src, [req("a"), req("b", { boom: true }), req("c")]);
+    expect(results).toEqual([ok("a", "a"), failed("b", "memory"), ok("c", "a")]);
+    expect((results[1] as { message: string }).message).toContain("Out of memory");
+  });
+
   test(
     "a stack overflow while parsing fails every request with stack, once",
     async () => {
@@ -253,6 +261,21 @@ describe.skipIf(!live)("caps (ISC-43)", () => {
       expect(one).toEqual([failed("a", "timeout")]);
       expect(all).toEqual(eight.map((r) => failed(r.id, "timeout")));
       expect(allMs).toBeLessThan(oneMs + 400);
+    },
+    SLOW,
+  );
+
+  test(
+    "after two renders in a row time out, the rest of the batch fails fast and says it was not attempted",
+    async () => {
+      const eight = Array.from({ length: 8 }, (_, i) => req(`r${i}`));
+      const [results, ms] = await timed(() => renderer.renderBatch(SPIN, eight, { timeoutMs: 500 }));
+      console.log(`[sandbox] 8 hanging renders at timeoutMs 500: ${ms.toFixed(0)}ms`);
+      expect(results).toEqual(eight.map((r) => failed(r.id, "timeout")));
+      const messages = results.map((r) => (r as { message: string }).message);
+      expect(messages.map((m) => m.includes("not attempted"))).toEqual([false, false, true, true, true, true, true, true]);
+      // Two timeouts' worth, not eight.
+      expect(ms).toBeLessThan(3 * 500);
     },
     SLOW,
   );

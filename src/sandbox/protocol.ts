@@ -37,8 +37,9 @@ export function clip(message: string): string {
   return message.slice(0, end) + TRUNCATED;
 }
 
-// The worker can only report what it can see. Timeouts, memory and sandbox failures are the parent's call.
-const CHILD_FAILURES: ReadonlySet<string> = new Set<RenderFailure>(["parse", "render_error", "output_limit", "stack"]);
+// The worker can only report what it can see. Timeouts and sandbox failures are the parent's call, and so is
+// memory, except when the engine itself refuses an allocation.
+const CHILD_FAILURES: ReadonlySet<string> = new Set<RenderFailure>(["parse", "render_error", "output_limit", "stack", "memory"]);
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);

@@ -86,6 +86,27 @@ test.skipIf(!status.available)(
   30_000,
 );
 
+// At its hard CPU limit Linux sends SIGKILL, which the parent cannot tell from any other kill. A host that already
+// caps CPU time, here at 3 seconds, sets a hard limit well under what the worker would ask for one render.
+test("a worker under a host's own CPU cap still ends by SIGXCPU, never by the hard limit's SIGKILL", async () => {
+  const spin = "{% for i in range(1000) %}{% for j in range(1000) %}{% for k in range(1000) %}{% endfor %}{% endfor %}{% endfor %}";
+  const worker = Bun.spawn(["/bin/sh", "-c", 'ulimit -t 3 && exec "$0" --no-install "$1"', process.execPath, WORKER], {
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  try {
+    worker.stdin.write(encode({ t: "init", template: spin, maxOutputBytes: 1000, cpuMs: 10_000 }));
+    worker.stdin.write(encode({ t: "req", request: { id: "a", context: {}, profile: "hf-default" } }));
+    worker.stdin.end();
+    const [out] = await Promise.all([new Response(worker.stdout).text(), new Response(worker.stderr).text(), worker.exited]);
+    expect(out).toBe('{"t":"ready"}\n{"t":"parsed"}\n');
+    expect(worker.signalCode).toBe("SIGXCPU");
+  } finally {
+    worker.kill("SIGKILL");
+  }
+}, 30_000);
+
 // The kernel hands the /proc files of a process it will not dump to root, and leaves a dumpable one's with its
 // own uid. As root the two look alike, so this runs for an ordinary user only, as it does in CI.
 test.skipIf(!status.available || process.platform !== "linux" || process.getuid?.() === 0)(
@@ -121,13 +142,44 @@ test.skipIf(!status.available)(
 );
 
 test.skipIf(!status.available)(
+  "a host that lives through SIGINT and renders again has its new workers killed by the next SIGINT too",
+  async () => {
+    const parent = Bun.spawn([process.execPath, PARENT, "swallow"], { stdout: "pipe", stderr: "inherit" });
+    const reader = parent.stdout.getReader();
+    let said = "";
+    const seen: number[] = [];
+    try {
+      const survivors: number[][] = [];
+      for (let round = 1; round <= 2; round++) {
+        while (said.split("rendering").length <= round) said += new TextDecoder().decode((await reader.read()).value);
+        const workers = descendants(parent.pid).filter((pid) => !seen.includes(pid));
+        seen.push(...workers);
+        expect(workers.length).toBeGreaterThan(0);
+        expect(workers.every(running)).toBe(true);
+        parent.kill("SIGINT");
+        const start = performance.now();
+        while (workers.some(running) && performance.now() - start < 2000) await Bun.sleep(50);
+        survivors.push(workers.filter(running));
+      }
+      expect(survivors).toEqual([[], []]);
+      // The host chose to live through both, and did.
+      expect(parent.exitCode).toBeNull();
+    } finally {
+      parent.kill("SIGKILL");
+      for (const pid of seen) if (running(pid)) process.kill(pid, "SIGKILL");
+    }
+  },
+  30_000,
+);
+
+test.skipIf(!status.available)(
   "a worker dies within seconds of its renderer being SIGKILLed while hung",
   async () => {
     const { survivors, ms } = await killMidRender("block", "SIGKILL", 15_000);
     console.log(`[sandbox] worker gone ${ms.toFixed(0)}ms after SIGKILL to its hung parent`);
     expect(survivors).toEqual([]);
-    // The worker's own CPU limit for one render at timeoutMs 1000 is 3 seconds.
-    expect(ms).toBeLessThan(5000);
+    // The worker's own CPU limit for one render at timeoutMs 1000 is 2 seconds, rounded up to a whole second.
+    expect(ms).toBeLessThan(4000);
   },
   30_000,
 );

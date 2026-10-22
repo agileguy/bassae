@@ -15,13 +15,24 @@ function serializable(request: RenderRequest): boolean {
   }
 }
 
+// Each render that times out costs a fresh worker and a full timeout. Two in a row say the template hangs
+// whatever the context, so the rest of the batch fails at once rather than costing a timeout each.
+const TIMEOUTS_IN_A_ROW = 2;
+
 async function renderAll(template: string, requests: RenderRequest[], limits: RenderLimits, options: WorkerOptions): Promise<RenderResult[]> {
   const results: RenderResult[] = [];
+  let timeouts = 0;
   while (results.length < requests.length) {
+    if (timeouts >= TIMEOUTS_IN_A_ROW) {
+      const message = `not attempted: the ${TIMEOUTS_IN_A_ROW} renders before it timed out on this template`;
+      for (const { id } of requests.slice(results.length)) results.push({ id, ok: false, failure: "timeout", message });
+      break;
+    }
     let sandboxError: string | undefined;
     try {
       const run = await runWorker(template, requests.slice(results.length), limits, options);
       results.push(...run.results);
+      for (const result of run.results) timeouts = !result.ok && result.failure === "timeout" ? timeouts + 1 : 0;
       // Every run answers at least one request or says why it could not; anything else would loop forever.
       sandboxError = run.sandboxError ?? (run.results.length === 0 ? "worker made no progress" : undefined);
     } catch (e) {

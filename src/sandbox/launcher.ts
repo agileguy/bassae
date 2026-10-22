@@ -10,7 +10,8 @@ import { clip, decodeChild, encode } from "./protocol.ts";
 
 export type SandboxKind = "sandbox-exec" | "bwrap";
 
-export type SandboxStatus = { available: true; kind: SandboxKind } | { available: false; reason: string };
+/** `degraded` names each protection this machine's sandbox lacks; it is empty at full strength. */
+export type SandboxStatus = { available: true; kind: SandboxKind; degraded: string[] } | { available: false; reason: string };
 
 export interface SpawnOptions {
   /** Which sandbox to use. "none" means no sandbox is available, so nothing starts. Defaults to the platform's own. */
@@ -86,11 +87,15 @@ const sbpl = (readable: string[]) => {
 };
 
 // bwrap 0.8 added --disable-userns, which stops the worker making user namespaces of its own. Asking
-// the binary itself what it supports runs nothing untrusted.
-let disablesUserns: boolean | undefined;
-function supportsDisableUserns(bwrap: string): boolean {
-  disablesUserns ??= Bun.spawnSync([bwrap, "--help"], { stdout: "pipe", stderr: "pipe" }).stdout.toString().includes("--disable-userns");
-  return disablesUserns;
+// the binary itself what it supports runs nothing untrusted. An older bwrap still sandboxes, so it is
+// used without the flag, and the status says so.
+let bwrapHelp: string | undefined;
+const helpOf = (bwrap: string) => (bwrapHelp ??= Bun.spawnSync([bwrap, "--help"], { stdout: "pipe", stderr: "pipe" }).stdout.toString());
+const supportsDisableUserns = (bwrap: string) => helpOf(bwrap).includes("--disable-userns");
+
+/** What a bwrap with this --help text cannot do that the sandbox would have it do. */
+export function bwrapDegraded(help: string): string[] {
+  return help.includes("--disable-userns") ? [] : ["bwrap has no --disable-userns (added in 0.8), so the worker can make user namespaces of its own"];
 }
 
 // New user, network, pid, ipc, uts and cgroup namespaces; a read-only root with only the system
@@ -142,19 +147,26 @@ const killLive = () => {
 };
 process.on("exit", killLive);
 
-// "exit" does not run when a signal ends the process, so the usual ones kill the workers too. Then,
-// unless the host program listens for the signal itself, it takes its default action as if we had not
-// been here. Nothing runs on SIGKILL or an OOM kill: bwrap's --die-with-parent covers Linux, and the
-// worker's own CPU limit covers macOS.
+// "exit" does not run when a signal ends the process, so the usual ones kill the workers too, every
+// time: a host program that lives through one may start more workers. When no one else listens, the
+// listener steps aside and raises the signal again, so it takes its default action as if we had not
+// been here, and cannot come back to us. Nothing runs on SIGKILL or an OOM kill: bwrap's
+// --die-with-parent covers Linux. On macOS the orphaned worker runs on until it next writes to its
+// dead parent, at the end of the step it is in, and dies of the broken pipe. A step that never ends
+// dies at the worker's own CPU limit: timeoutMs and a second, rounded up to a whole second, so an
+// orphan costs less than timeoutMs + 2 s of CPU time.
 let handlingSignals = false;
 function killLiveOnSignals(): void {
   if (handlingSignals) return;
   handlingSignals = true;
   for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
-    process.once(signal, () => {
+    const onSignal = () => {
       killLive();
-      if (process.listenerCount(signal) === 0) process.kill(process.pid, signal);
-    });
+      if (process.listenerCount(signal) > 1) return;
+      process.off(signal, onSignal);
+      process.kill(process.pid, signal);
+    };
+    process.on(signal, onSignal);
   }
 }
 
@@ -190,7 +202,7 @@ export function sandboxAvailable(): Promise<SandboxStatus> {
     const timer = setTimeout(() => proc.kill("SIGKILL"), STARTUP_MS);
     const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
     clearTimeout(timer);
-    if (code === 0 && out === "ok") return { available: true, kind };
+    if (code === 0 && out === "ok") return { available: true, kind, degraded: kind === "bwrap" ? bwrapDegraded(helpOf(findBwrap()!)) : [] };
     return { available: false, reason: `${kind} could not start a process (exit ${proc.signalCode ?? code}): ${err.trim().slice(0, 500)}` };
   })();
   return availability;
@@ -302,9 +314,10 @@ export async function runWorker(
   // JSON escaping can grow output up to six-fold. Past that, plus room for the envelope and a message,
   // nothing the worker sends between two results is well-formed, whatever kind of line it is.
   const perRequest = limits.maxOutputBytes * 6 + 65536;
-  // The worker's own CPU limit per step. The parent's timer should always fire first, but GC and JIT
-  // threads count towards CPU time too, so it allows twice the timeout and a second more.
-  const cpuMs = limits.timeoutMs * 2 + 1000;
+  // The worker's own CPU limit per step, the backstop for an orphan, so it is kept tight. GC and JIT
+  // threads count towards CPU time too: a render that allocates hard uses about 1.3 s of CPU a second,
+  // so past a timeout of 3 s or so it can reach this limit before the timer. Either way it is a timeout.
+  const cpuMs = limits.timeoutMs + 1000;
 
   return new Promise<WorkerRun>((resolve) => {
     const results: RenderResult[] = [];
@@ -392,7 +405,7 @@ export async function runWorker(
       const code = await proc.exited;
       const detail = await stderr;
       if (settled) return;
-      // SIGXCPU is the worker's own CPU limit, so its parse or render ran far too long. bwrap reports
+      // SIGXCPU is the worker's own CPU limit, so its parse or render ran too long. bwrap reports
       // a child killed by a signal as exit 128 + the signal.
       if (proc.signalCode === "SIGXCPU" || (kind === "bwrap" && code === 128 + constants.signals.SIGXCPU)) {
         return fail("timeout", `worker exceeded its ${cpuMs}ms CPU limit`);

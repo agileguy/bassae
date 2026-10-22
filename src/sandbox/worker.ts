@@ -4,7 +4,7 @@
 // It also limits its own CPU time, because the launcher's caps die with the launcher.
 
 import { Template } from "@huggingface/jinja";
-import { dlopen, FFIType, ptr } from "bun:ffi";
+import { dlopen, FFIType, ptr, type FFIFunction } from "bun:ffi";
 import type { RenderFailure, RenderRequest, RenderResult } from "../types.ts";
 import { profileGlobals } from "./profiles.ts";
 import { clip, encode, type ChildMessage, type InitMessage, type RequestMessage } from "./protocol.ts";
@@ -15,7 +15,19 @@ import { clip, encode, type ChildMessage, type InitMessage, type RequestMessage 
 // resource 0 on macOS and Linux, and struct rlimit is two 64-bit counts on both. Loading it before the
 // ready line means a sandbox without it fails to start rather than rendering without a backstop.
 const RLIMIT_CPU = 0;
-const { symbols: libc } = dlopen(process.platform === "darwin" ? "/usr/lib/libSystem.B.dylib" : "libc.so.6", {
+// musl's loader answers to "libc.so.6" with itself, so the one name serves glibc and musl alike.
+const LIBC = process.platform === "darwin" ? "/usr/lib/libSystem.B.dylib" : "libc.so.6";
+
+/** Functions from the C library. Without them there is no CPU backstop, so the worker refuses to start and says why. */
+function fromLibc<Fns extends Record<string, FFIFunction>>(fns: Fns) {
+  try {
+    return dlopen(LIBC, fns).symbols;
+  } catch (e) {
+    throw new Error(`no RLIMIT_CPU backstop, so the worker will not start: cannot load ${LIBC}: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+const libc = fromLibc({
   getrlimit: { args: [FFIType.i32, FFIType.ptr], returns: FFIType.i32 },
   setrlimit: { args: [FFIType.i32, FFIType.ptr], returns: FFIType.i32 },
 });
@@ -29,20 +41,22 @@ if (libc.getrlimit(RLIMIT_CPU, ptr(rlimit)) !== 0) throw new Error("getrlimit(RL
 // macOS writes cores only to /cores, which only root may write, and the default RLIMIT_CORE is 0.
 if (process.platform === "linux") {
   const PR_SET_DUMPABLE = 4;
-  const { symbols } = dlopen("libc.so.6", {
-    prctl: { args: [FFIType.i32, FFIType.u64, FFIType.u64, FFIType.u64, FFIType.u64], returns: FFIType.i32 },
-  });
-  if (symbols.prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) !== 0) throw new Error("prctl(PR_SET_DUMPABLE) failed");
+  const { prctl } = fromLibc({ prctl: { args: [FFIType.i32, FFIType.u64, FFIType.u64, FFIType.u64, FFIType.u64], returns: FFIType.i32 } });
+  if (prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) !== 0) throw new Error("prctl(PR_SET_DUMPABLE) failed");
 }
 
 const min = (a: bigint, b: bigint) => (a < b ? a : b);
 
-/** Lets the process use `ms` more CPU time before SIGXCPU, and lowers the hard limit to `totalMs` more when given. */
+/**
+ * Lets the process use `ms` more CPU time before SIGXCPU, and lowers the hard limit to `totalMs` more when given.
+ * At the hard limit the kernel sends SIGKILL, which the parent cannot tell from any other kill, so the soft
+ * limit stays a second under it: a step that runs into the hard limit, ours or the host's, still ends by SIGXCPU.
+ */
 function limitCpu(ms: number, totalMs?: number): void {
   const { user, system } = process.cpuUsage();
   const used = (user + system) / 1e6;
   if (totalMs !== undefined) rlimit[1] = min(rlimit[1]!, BigInt(Math.ceil(used + totalMs / 1000)));
-  rlimit[0] = min(BigInt(Math.ceil(used + ms / 1000)), rlimit[1]!);
+  rlimit[0] = min(BigInt(Math.ceil(used + ms / 1000)), rlimit[1]! - 1n);
   if (libc.setrlimit(RLIMIT_CPU, ptr(rlimit)) !== 0) throw new Error("setrlimit(RLIMIT_CPU) failed");
 }
 
@@ -69,8 +83,9 @@ async function send(message: ChildMessage): Promise<void> {
 /** A thrown value as a failure kind and a message the parent will accept. */
 function failure(e: unknown, otherwise: RenderFailure): { failure: RenderFailure; message: string } {
   // A recursive macro or deeply nested template exhausts the stack; that is a resource cap, not a template error.
-  const overflow = e instanceof RangeError && /call stack/i.test(e.message);
-  return { failure: overflow ? "stack" : otherwise, message: clip(e instanceof Error ? `${e.name}: ${e.message}` : String(e)) };
+  // So is a string past JSC's length limit: JSC refuses it at once, where a Python engine would allocate it all.
+  const cap = !(e instanceof RangeError) ? undefined : /call stack/i.test(e.message) ? "stack" : /out of memory/i.test(e.message) ? "memory" : undefined;
+  return { failure: cap ?? otherwise, message: clip(e instanceof Error ? `${e.name}: ${e.message}` : String(e)) };
 }
 
 function render(template: Template, request: RenderRequest, maxOutputBytes: number): RenderResult {
@@ -99,8 +114,9 @@ const [head = "", ...rest] = (await Bun.stdin.text()).split("\n").filter(Boolean
 const init = JSON.parse(head) as InitMessage;
 const requests = rest.map((line) => (JSON.parse(line) as RequestMessage).request);
 
-// The hard limit covers the parse and every render, plus a second; the soft limit covers one step at a time.
-limitCpu(init.cpuMs, (requests.length + 1) * init.cpuMs + 1000);
+// The soft limit covers one step at a time; the hard limit, the parse and every render. Each step's soft limit
+// rounds up to a whole second, so the hard limit allows a second more per step, and the second it keeps clear.
+limitCpu(init.cpuMs, (requests.length + 1) * (init.cpuMs + 1000) + 1000);
 let template: Template | undefined;
 let parseFailure = { failure: "parse" as RenderFailure, message: "" };
 try {
