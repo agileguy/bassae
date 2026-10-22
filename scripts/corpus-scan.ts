@@ -18,7 +18,7 @@ const args = process.argv.slice(2);
 const verbose = args.includes("--verbose");
 const dumpAt = args.indexOf("--dump");
 const dumpDir = dumpAt >= 0 ? args[dumpAt + 1] : undefined;
-const roots = args.filter((a, i) => !a.startsWith("--") && i !== dumpAt + 1);
+const roots = args.filter((a, i) => !a.startsWith("--") && !(dumpAt >= 0 && i === dumpAt + 1));
 if (roots.length === 0) roots.push(join(homedir(), ".cache/huggingface/hub"), join(homedir(), ".omlx"));
 
 const found: ExtractedTemplate[] = [];

@@ -27,6 +27,13 @@ function excerpt(ctx: RuleCtx, span: Span | undefined): string | undefined {
   return span ? ctx.text.slice(span.start, span.end) : undefined;
 }
 
+// The Identifier a member chain hangs off, as a node (for its span).
+function baseIdentifier(node: Node): Node | undefined {
+  let cur: Node | undefined = node;
+  while (cur && cur.type === "MemberExpression") cur = cur.object as Node;
+  return cur && cur.type === "Identifier" ? cur : undefined;
+}
+
 export function runCodeExec(ctx: RuleCtx): Finding[] {
   const { outcome } = ctx;
   if (!outcome.program) return [];
@@ -86,20 +93,26 @@ export function runCodeExec(ctx: RuleCtx): Finding[] {
       }
     }
 
-    // ISC-16 — OS/exec surface in a callable position.
+    // ISC-16 — OS/exec surface in a callable position. The surface may be the
+    // callee itself (system(...)), the chain root (subprocess.run(...)) or the
+    // called member (x.popen(...)).
     if (n.type === "CallExpression") {
       const callee = n.callee as Node;
       if (callee.type === "Identifier" && EXEC_SURFACES.has(String(callee.value))) {
         add("exec_surface", `call to OS/exec surface '${String(callee.value)}'`, callee);
       } else if (callee.type === "MemberExpression") {
+        const base = baseIdentifier(callee);
+        if (base && EXEC_SURFACES.has(String(base.value))) {
+          add("exec_surface", `call rooted at OS/exec surface '${String(base.value)}'`, base);
+        }
         const prop = callee.property as Node;
         if (prop.type === "Identifier" && EXEC_SURFACES.has(String(prop.value))) {
           add("exec_surface", `call to OS/exec surface '.${String(prop.value)}'`, prop);
         }
         // ISC-13.1 — str.format() format-spec traversal / ISC-14.1 — .format( on any object.
         if (prop.type === "Identifier" && String(prop.value) === "format") {
-          const base = callee.object as Node;
-          if (base.type === "StringLiteral") add("format_traversal", "str.format() enables format-spec attribute traversal", prop);
+          const obj = callee.object as Node;
+          if (obj.type === "StringLiteral") add("format_traversal", "str.format() enables format-spec attribute traversal", prop);
           else add("dynamic_attribute", ".format() reaches attributes by name", prop);
         }
       }

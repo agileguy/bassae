@@ -38,12 +38,15 @@ export function runUnanalyzable(outcome: ParseOutcome, knownGood: boolean, base:
   if (outcome.parseError || outcome.tooLarge) {
     if (!knownGood) {
       const named = outcome.parseError ? namedConstruct(outcome.parseError) : undefined;
+      // Point at the named construct in the raw text when we can find it.
+      const tok = named ? outcome.pre.tokens.find((t) => t.type === "identifier" && t.value === named) : undefined;
+      const span = tok ? outcome.lines.span(tok.start, tok.end) : undefined;
       const detail = outcome.tooLarge
         ? "template too large to parse in-process"
         : named
           ? `@huggingface/jinja cannot parse this template (construct: ${named})`
           : `@huggingface/jinja cannot parse this template: ${outcome.parseError}`;
-      findings.push(mk("HIGH", detail));
+      findings.push(mk("HIGH", detail, span));
     }
     return findings;
   }

@@ -36,9 +36,11 @@ export const BENIGN_UNIMPLEMENTED_FILTERS = new Set([
   "round", "center", "truncate", "urlize", "striptags", "pprint", "e", "escape", "forceescape",
 ]);
 
-// Filters that are also code-execution gadgets: always HIGH, never benign.
-// `map` is NOT here: map('upper') is a benign jinja2 builtin stock templates use.
-export const DANGEROUS_FILTERS = new Set(["attr", "format"]);
+// Filters that are HIGH when the library lacks them: `attr`/`format` reach
+// attributes by name, and `random` is a nondeterminism source (ISC-12.1,
+// ISC-18.1). `map` is NOT here: map('upper') is a benign builtin stock
+// templates use, and none of the HIGH three appears in any local template.
+export const DANGEROUS_FILTERS = new Set(["attr", "format", "random"]);
 
 export const IMPLEMENTED_TESTS = new Set([
   "boolean", "callable", "odd", "even", "false", "true", "none", "string", "number", "integer",
@@ -133,13 +135,23 @@ export interface Leaf {
   value: string;
 }
 
-/** Walk the AST in source order, emitting identifier and string leaves. */
+const STATEMENT_TYPES = new Set(["If", "For", "Set", "Macro", "CallStatement", "FilterStatement", "Break", "Continue", "Comment", "Program"]);
+
+/**
+ * Walk the AST in source order, emitting identifier and quoted-string leaves.
+ *
+ * The parser represents literal template text as `StringLiteral` nodes too, so
+ * we track context: in a statement body, a StringLiteral is template text (or a
+ * bare `{{ 'x' }}` output) and never needs a code-exec span, so we skip it.
+ * Inside an expression, a StringLiteral is a real quoted literal and is emitted.
+ */
 export function sourceOrderLeaves(program: Node): Leaf[] {
   const out: Leaf[] = [];
-  const visit = (node: unknown): void => {
+
+  const expr = (node: unknown): void => {
     if (!node || typeof node !== "object") return;
     if (Array.isArray(node)) {
-      for (const c of node) visit(c);
+      for (const c of node) expr(c);
       return;
     }
     const n = node as Node;
@@ -152,107 +164,123 @@ export function sourceOrderLeaves(program: Node): Leaf[] {
         return;
       case "IntegerLiteral":
       case "FloatLiteral":
-      case "Comment":
-      case "Break":
-      case "Continue":
         return;
       case "MemberExpression":
-        visit(n.object);
-        if (n.computed) visit(n.property);
-        else visit(n.property); // dot property is still a leaf identifier in source order
+        expr(n.object);
+        expr(n.property);
         return;
       case "CallExpression":
-        visit(n.callee);
-        visit(n.args);
+        expr(n.callee);
+        expr(n.args);
         return;
       case "FilterExpression":
-        visit(n.operand);
-        visit(n.filter);
-        return;
-      case "FilterStatement":
-        visit(n.body);
-        visit(n.filter);
+        expr(n.operand);
+        expr(n.filter);
         return;
       case "TestExpression":
-        visit(n.operand);
-        visit(n.test);
+        expr(n.operand);
+        expr(n.test);
         return;
       case "SelectExpression":
-        visit(n.lhs);
-        visit(n.test);
+        expr(n.lhs);
+        expr(n.test);
         return;
       case "BinaryExpression":
-        visit(n.left);
-        visit(n.right);
+        expr(n.left);
+        expr(n.right);
         return;
       case "Ternary":
         // Source order: trueExpr `if` condition `else` falseExpr.
-        visit(n.trueExpr);
-        visit(n.condition);
-        visit(n.falseExpr);
-        return;
-      case "If":
-        visit(n.test);
-        visit(n.body);
-        visit(n.alternate);
-        return;
-      case "For":
-        visit(n.loopvar);
-        visit(n.iterable);
-        visit(n.body);
-        visit(n.defaultBlock);
-        return;
-      case "Set":
-        visit(n.assignee);
-        visit(n.value);
-        visit(n.body);
-        return;
-      case "Macro":
-        visit(n.name);
-        visit(n.args);
-        visit(n.body);
-        return;
-      case "CallStatement":
-        visit(n.call);
-        visit(n.callerArgs);
-        visit(n.body);
+        expr(n.trueExpr);
+        expr(n.condition);
+        expr(n.falseExpr);
         return;
       case "KeywordArgumentExpression":
-        visit(n.key);
-        visit(n.value);
+        expr(n.key);
+        expr(n.value);
         return;
       case "ObjectLiteral": {
         const map = n.value as Map<unknown, unknown>;
         if (map instanceof Map) for (const [k, v] of map) {
-          visit(k);
-          visit(v);
+          expr(k);
+          expr(v);
         }
         return;
       }
       case "ArrayLiteral":
       case "TupleLiteral":
-        visit(n.value);
+        expr(n.value);
         return;
       case "SliceExpression":
-        visit(n.start);
-        visit(n.stop);
-        visit(n.step);
+        expr(n.start);
+        expr(n.stop);
+        expr(n.step);
         return;
       case "UnaryExpression":
-        visit(n.argument);
+        expr(n.argument);
         return;
       case "SpreadExpression":
       case "KeywordSpreadExpression":
-        visit(n.argument);
-        return;
-      case "Program":
-        visit(n.body);
+        expr(n.argument);
         return;
       default:
-        for (const v of Object.values(n)) visit(v);
+        if (STATEMENT_TYPES.has(n.type)) stmt(n);
+        else for (const v of Object.values(n)) expr(v);
     }
   };
-  visit(program);
+
+  // A statement body: statements, nested blocks, bare output expressions, and
+  // text/comment nodes (which we skip).
+  const list = (arr: unknown): void => {
+    for (const el of (arr as Node[] | undefined) ?? []) {
+      if (!el) continue;
+      if (el.type === "StringLiteral" || el.type === "Comment") continue;
+      if (STATEMENT_TYPES.has(el.type)) stmt(el);
+      else expr(el);
+    }
+  };
+
+  const stmt = (n: Node): void => {
+    switch (n.type) {
+      case "Program":
+        list(n.body);
+        return;
+      case "If":
+        expr(n.test);
+        list(n.body);
+        list(n.alternate);
+        return;
+      case "For":
+        expr(n.loopvar);
+        expr(n.iterable);
+        list(n.body);
+        list(n.defaultBlock);
+        return;
+      case "Set":
+        expr(n.assignee);
+        expr(n.value);
+        list(n.body);
+        return;
+      case "Macro":
+        expr(n.name);
+        expr(n.args);
+        list(n.body);
+        return;
+      case "CallStatement":
+        expr(n.call);
+        expr(n.callerArgs);
+        list(n.body);
+        return;
+      case "FilterStatement":
+        list(n.body);
+        expr(n.filter);
+        return;
+      default:
+        return; // Break, Continue, Comment
+    }
+  };
+
+  stmt(program);
   return out;
 }
 
@@ -268,23 +296,27 @@ export function correlateSpans(leaves: Leaf[], tokens: PreToken[], lines: LineMa
   let ti = 0;
   for (const leaf of leaves) {
     if (leaf.kind === "identifier") {
+      // Skip keyword/operator identifier tokens that are not AST leaves.
       while (ti < leafTokens.length && !(leafTokens[ti]!.type === "identifier" && leafTokens[ti]!.value === leaf.value)) ti++;
       if (ti < leafTokens.length) {
         const t = leafTokens[ti++]!;
         spans.set(leaf.node, lines.span(t.start, t.end));
       }
     } else {
-      while (ti < leafTokens.length && leafTokens[ti]!.type !== "string") ti++;
+      // Advance to a string token that begins this literal, skipping stray
+      // tokens (keywords, bare output strings) that do not start it.
+      while (ti < leafTokens.length && !(leafTokens[ti]!.type === "string" && leaf.value.startsWith(leafTokens[ti]!.value))) ti++;
       if (ti >= leafTokens.length) continue;
       const start = leafTokens[ti]!.start;
       let acc = "";
       let end = start;
-      while (ti < leafTokens.length && leafTokens[ti]!.type === "string" && acc !== leaf.value) {
+      // Reunite adjacent string literals the parser merged into one node.
+      while (ti < leafTokens.length && leafTokens[ti]!.type === "string" && acc !== leaf.value && leaf.value.startsWith(acc + leafTokens[ti]!.value)) {
         acc += leafTokens[ti]!.value;
         end = leafTokens[ti]!.end;
         ti++;
       }
-      spans.set(leaf.node, lines.span(start, end));
+      if (acc === leaf.value) spans.set(leaf.node, lines.span(start, end));
     }
   }
   return spans;
