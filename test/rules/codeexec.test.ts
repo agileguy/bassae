@@ -291,8 +291,9 @@ test("carve-out: a key held in a non-runtime binding is dynamic, not exempt", ()
   expect(highs("{% set s = 'abc' %}{% set k = 'upper' %}{{ s[k]() }}")).toContain("dynamic_attribute");
   // A loop item is runtime, but a set-held key is still template-built.
   expect(highs("{% set k = 'upper' %}{% for m in messages %}{{ m[k]() }}{% endfor %}")).toContain("dynamic_attribute");
-  // A macro parameter is caller-controlled, not runtime: a param key is dynamic.
-  expect(highs("{% macro f(p) %}{{ messages[0][p] }}{% endmacro %}")).toContain("dynamic_attribute");
+  // A macro parameter is caller-controlled: a caller that passes a literal makes
+  // the param key dynamic.
+  expect(highs("{% macro f(p) %}{{ messages[0][p] }}{% endmacro %}{{ f('upper') }}")).toContain("dynamic_attribute");
   // The exemptions still hold: a direct literal index, a numeric index however
   // derived, a slice, and a provably-runtime key are all benign.
   expect(highs("{{ messages[0]['content'] }}")).toHaveLength(0);
@@ -353,4 +354,125 @@ test("M7: findings carry templateSha256 and never a sha256 key", () => {
     }
   }
   expect(checked).toBeGreaterThan(0);
+});
+
+// --- Review round 2, part 3 -------------------------------------------------
+
+function messagesOf(src: string): string[] {
+  return scan(src).filter((f) => f.severity === "HIGH").map((f) => f.message);
+}
+
+// Macro-parameter review — a parameter is runtime data only when EVERY direct
+// call site, and its default if it has one, passes runtime data. A runtime key on
+// a parameter some caller fills with a literal is a template-made object reached
+// by a data-chosen name.
+test("macro-parameter review: a param is runtime only when every call site and its default pass runtime data", () => {
+  const TEMPLATE_MADE = "runtime-data key indexes a value the template made, not runtime data";
+  // The reported probe.
+  expect(messagesOf("{% macro f(o) %}{{ o[messages[0].role] }}{% endmacro %}{{ f('abc') }}")).toEqual([TEMPLATE_MADE]);
+  // Every caller passes runtime data: clean.
+  expect(highs("{% macro f(o) %}{{ o[messages[0].role] }}{% endmacro %}{{ f(messages[0]) }}")).toHaveLength(0);
+  expect(highs("{% macro f(o) %}{{ o[messages[0].role] }}{% endmacro %}{{ f(o=messages[0]) }}")).toHaveLength(0);
+  // One literal caller, a literal keyword argument, or a literal default is enough.
+  expect(highs("{% macro f(o) %}{{ o[messages[0].role] }}{% endmacro %}{{ f(messages[0]) }}{{ f('abc') }}")).toContain("dynamic_attribute");
+  expect(highs("{% macro f(o) %}{{ o[messages[0].role] }}{% endmacro %}{{ f(o='abc') }}")).toContain("dynamic_attribute");
+  expect(highs("{% macro f(o='abc') %}{{ o[messages[0].role] }}{% endmacro %}{{ f(messages[0]) }}")).toContain("dynamic_attribute");
+  // A {% call %} block is a call site too.
+  expect(highs("{% macro f(o) %}{{ o[messages[0].role] }}{{ caller() }}{% endmacro %}{% call f('abc') %}x{% endcall %}")).toContain("dynamic_attribute");
+  // A param named like a runtime input is whatever its callers bind.
+  expect(highs("{% macro f(message) %}{{ message[messages[0].role] }}{% endmacro %}{{ f('abc') }}")).toContain("dynamic_attribute");
+  expect(highs("{% macro f(content) %}{{ messages[0][content]() }}{% endmacro %}{{ f('upper') }}")).toContain("dynamic_attribute");
+  // A macro whose name escapes (bound by set) or that is called with a spread
+  // can receive arguments we cannot see: its params are opaque.
+  expect(highs("{% macro f(o) %}{{ o[messages[0].role] }}{% endmacro %}{% set g = f %}{{ g('abc') }}")).toContain("dynamic_attribute");
+  expect(highs("{% macro f(o) %}{{ o[messages[0].role] }}{% endmacro %}{{ f(*['abc']) }}")).toContain("dynamic_attribute");
+  // Recursion: the greatest fixpoint keeps a self-call on runtime data clean and
+  // demotes the param when any call, recursive or not, passes a literal.
+  expect(highs("{% macro f(o) %}{% for k, v in o|items %}{{ o[k] }}{{ f(v) }}{% endfor %}{% endmacro %}{{ f(tools[0]) }}")).toHaveLength(0);
+  expect(highs("{% macro f(o) %}{% for k, v in o|items %}{{ o[k] }}{{ f('abc') }}{% endfor %}{% endmacro %}{{ f(tools[0]) }}")).toContain("dynamic_attribute");
+  // A macro that is never called never runs: nothing reaches its params.
+  expect(highs("{% macro f(o) %}{{ o[messages[0].role] }}{% endmacro %}")).toHaveLength(0);
+});
+
+// The upstream Qwen3-Coder template's render_extra_keys macro and its three call
+// sites (structure as published; the local corpus copy predates it). Every call
+// passes tool data, so `json_dict[json_key]` must stay clean.
+test("macro-parameter review: Qwen3-Coder render_extra_keys stays clean", () => {
+  const src = [
+    "{% macro render_extra_keys(json_dict, handled_keys) %}",
+    "{%- if json_dict is mapping %}",
+    "{%- for json_key in json_dict if json_key not in handled_keys %}",
+    "{%- if json_dict[json_key] is mapping or (json_dict[json_key] is sequence and json_dict[json_key] is not string) %}",
+    "{{- '\\n<' ~ json_key ~ '>' ~ (json_dict[json_key] | tojson | safe) ~ '</' ~ json_key ~ '>' }}",
+    "{%- else %}",
+    "{{-'\\n<' ~ json_key ~ '>' ~ (json_dict[json_key] | string) ~ '</' ~ json_key ~ '>' }}",
+    "{%- endif %}",
+    "{%- endfor %}",
+    "{%- endif %}",
+    "{% endmacro %}",
+    "{%- for tool in tools %}",
+    "{%- if tool.function is defined %}{%- set tool = tool.function %}{%- endif %}",
+    "{%- for param_name, param_fields in tool.parameters.properties|items %}",
+    "{%- set handled_keys = ['name', 'type', 'description'] %}",
+    "{{- render_extra_keys(param_fields, handled_keys) }}",
+    "{%- endfor %}",
+    "{% set handled_keys = ['type', 'properties'] %}",
+    "{{- render_extra_keys(tool.parameters, handled_keys) }}",
+    "{%- set handled_keys = ['type', 'name', 'description', 'parameters'] %}",
+    "{{- render_extra_keys(tool, handled_keys) }}",
+    "{%- endfor %}",
+  ].join("\n");
+  expect(highs(src)).toHaveLength(0);
+  // The same macro fed a literal at one call site is flagged.
+  expect(highs(src.replace("render_extra_keys(tool, handled_keys)", "render_extra_keys('abc', handled_keys)"))).toContain("dynamic_attribute");
+});
+
+// The same hole through other bindings: a loop variable is runtime only when the
+// loop walks runtime data, a name written more than once holds the join of every
+// write, and `or`/`and`/`%` can hand back a template-chosen string.
+test("binding review: loops, rebinding, and operand-returning operators cannot launder a template-chosen value", () => {
+  // A set-held literal object indexed by runtime data.
+  expect(highs("{% set o = 'abc' %}{{ o[messages[0].role] }}")).toContain("dynamic_attribute");
+  // Loops over a literal list, or through a filter that can inject a value.
+  expect(highs("{% for o in ['abc'] %}{{ o[messages[0].role] }}{% endfor %}")).toContain("dynamic_attribute");
+  expect(highs("{% for k in ['upper'] %}{{ messages[0][k]() }}{% endfor %}")).toContain("dynamic_attribute");
+  expect(highs("{% for k in message.nope | default(['upper']) %}{{ messages[0][k]() }}{% endfor %}")).toContain("dynamic_attribute");
+  expect(highs("{% for m in messages %}{{ m.get('zz', 'abc')[m.content] }}{% endfor %}")).toContain("dynamic_attribute");
+  // A later clean write does not launder an earlier template-made one.
+  expect(highs("{% set k = 'upper' %}{{ messages[0][k]() }}{% set k = messages[0].role %}")).toContain("dynamic_attribute");
+  // `or` / `and` return an operand.
+  expect(highs("{% for m in messages %}{{ m[m.nope or 'upper']() }}{% endfor %}")).toContain("dynamic_attribute");
+  expect(highs("{% for m in messages %}{% set k = m.role and 'upper' %}{{ m[k]() }}{% endfor %}")).toContain("dynamic_attribute");
+  // Python %-formatting builds a string: folded when it can be, flagged when not.
+  expect(highs("{{ messages[0]['__%s__' % 'class'] }}")).toEqual(expect.arrayContaining(["dunder_access", "folded_dunder"]));
+  expect(highs("{{ messages[0]['%s' % 'upper']() }}")).toContain("dynamic_attribute");
+  // A {% call(x) %} block argument is whatever the macro passes to caller(), which is not traced.
+  expect(highs("{% macro f() %}{{ caller('abc') }}{% endmacro %}{% call(o) f() %}{{ o[messages[0].role] }}{% endcall %}")).toContain("dynamic_attribute");
+
+  // Stock shapes stay clean: a loop through data-preserving filters and methods,
+  // a range() index on anything, a counter, an `or []` default, and a runtime
+  // input that a branch resets to [].
+  const stock = [
+    "{% for k, v in tools[0].parameters.properties | dictsort %}{{ tools[0].parameters.properties[k] }}{% endfor %}",
+    "{% for k in message.keys() | reject('in', ['role']) %}{{ message[k] }}{% endfor %}",
+    "{% for tc in message.get('tool_calls') %}{% for k in tc %}{{ tc[k] }}{% endfor %}{% endfor %}",
+    "{% for tc in message.tool_calls or [] %}{% for k in tc %}{{ tc[k] }}{% endfor %}{% endfor %}",
+    "{% set roles = ['user', 'assistant'] %}{% for i in range(2) %}{{ roles[i] }}{% endfor %}",
+    "{% set ns = namespace(i=0) %}{% for m in messages %}{% set ns.i = ns.i + 1 %}{{ messages[ns.i - 1] }}{% endfor %}",
+    "{% if tools is not defined %}{% set tools = [] %}{% endif %}{% for t in tools %}{% for k in t %}{{ t[k] }}{% endfor %}{% endfor %}",
+    "{% for m in messages %}{{ messages[loop.index0 - 1] }}{% endfor %}",
+  ];
+  for (const src of stock) expect({ src, highs: highs(src) }).toEqual({ src, highs: [] });
+});
+
+// Computed-callee item — an unbound name used as a key is dynamic, and the
+// message says that it is unbound rather than calling it runtime-or-literal.
+test("computed-callee review: an unbound key is dynamic with a message naming it unbound", () => {
+  expect(messagesOf("{% for m in messages %}{{ m[format]() }}{% endfor %}")).toEqual([
+    "subscript key 'format' is not bound in the template and is not a known runtime input",
+  ]);
+  // A bound non-runtime key keeps the general message.
+  expect(messagesOf("{% set k = 'upper' %}{% for m in messages %}{{ m[k]() }}{% endfor %}")).toEqual([
+    "subscript key is neither a literal nor runtime data",
+  ]);
 });

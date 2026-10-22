@@ -42,7 +42,10 @@ const PATTERNS: RawPattern[] = [
   },
   {
     ruleId: "engine_fingerprint",
-    re: new RegExp(`\\b(?:select|reject|selectattr|rejectattr)\\s*\\([^)]*?['"](${[...ENGINE_PROBE_TESTS].join("|")})['"]`, "g"),
+    // The argument gap is bounded: an unbounded `[^)]*?` rescans to the end of
+    // the text from every `select(` that has no `)`, which is quadratic on a long
+    // run of them. 256 covers any real argument list before the probe name.
+    re: new RegExp(`\\b(?:select|reject|selectattr|rejectattr)\\s*\\([^)]{0,256}?['"](${[...ENGINE_PROBE_TESTS].join("|")})['"]`, "g"),
     message: (m) => `'${m[1]}' named in select/reject asks the engine whether it exists`,
   },
 ];
