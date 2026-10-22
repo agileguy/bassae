@@ -1,4 +1,5 @@
-import { lstat, readFile, readdir, realpath, stat } from "node:fs/promises";
+import { constants, type Stats } from "node:fs";
+import { type FileHandle, lstat, open, readdir, realpath, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { makeTemplate, makeTemplateFromString } from "../template.ts";
 import type { ExtractedTemplate, Finding, ModelRecord, RuleId, Severity, SourceKind } from "../types.ts";
@@ -90,6 +91,58 @@ interface LoadedJson extends Loaded {
   value: unknown;
 }
 
+// A FIFO planted under a source name opens at once instead of waiting for a writer, and a terminal
+// device cannot become the scanner's controlling tty. O_NONBLOCK changes nothing for regular files.
+const OPEN_FLAGS = constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOCTTY;
+
+/** Why a file that exists was not read. */
+export class ReadFailure extends Error {
+  constructor(
+    message: string,
+    readonly size?: number,
+  ) {
+    super(message);
+  }
+}
+
+/**
+ * Reads a regular file of at most `maxBytes`, or undefined when nothing is at `path`. The checks
+ * run on the open descriptor, so nothing can be swapped in between a check and the read.
+ */
+export async function readRegularFile(path: string, maxBytes: number): Promise<{ bytes: Uint8Array; realPath: string } | undefined> {
+  let fh: FileHandle;
+  try {
+    fh = await open(path, OPEN_FLAGS);
+  } catch (e) {
+    if (await isAbsent(e, path)) return undefined;
+    throw e;
+  }
+  try {
+    const st = await fh.stat();
+    if (!st.isFile()) throw new ReadFailure(`not a regular file (${fileType(st)})`);
+    if (st.size > maxBytes) throw new ReadFailure(`${st.size} bytes, over the ${maxBytes}-byte limit; not read`, st.size);
+    const bytes = new Uint8Array(st.size);
+    let got = 0;
+    while (got < bytes.length) {
+      const { bytesRead } = await fh.read(bytes, got, bytes.length - got, got);
+      if (bytesRead === 0) break;
+      got += bytesRead;
+    }
+    return { bytes: got === bytes.length ? bytes : bytes.slice(0, got), realPath: await realpath(path) };
+  } finally {
+    await fh.close();
+  }
+}
+
+function fileType(st: Stats): string {
+  if (st.isDirectory()) return "directory";
+  if (st.isFIFO()) return "FIFO";
+  if (st.isSocket()) return "socket";
+  if (st.isCharacterDevice()) return "character device";
+  if (st.isBlockDevice()) return "block device";
+  return "special file";
+}
+
 /** Reads one model's sources read-only, recording findings and whether every template-bearing source was read. */
 export class SourceReader {
   readonly findings: Finding[] = [];
@@ -98,20 +151,11 @@ export class SourceReader {
   /** An absent file is silently undefined; one that exists but cannot be read is a finding. */
   async file(path: string, role: Role): Promise<Loaded | undefined> {
     try {
-      // stat before open: opening a FIFO planted under a source name would block the scan.
-      const st = await stat(path);
-      if (!st.isFile()) {
-        this.fail(role, path, "not a regular file");
-        return undefined;
-      }
-      if (st.size > MAX_SOURCE_BYTES) {
-        this.fail(role, path, `larger than the ${MAX_SOURCE_BYTES}-byte cap; not analyzed`, undefined, { size: st.size });
-        return undefined;
-      }
-      const bytes = new Uint8Array(await readFile(path));
-      return { path, realPath: await realpath(path), bytes };
+      const got = await readRegularFile(path, MAX_SOURCE_BYTES);
+      return got && { path, ...got };
     } catch (e) {
-      if (!(await isAbsent(e, path))) this.fail(role, path, "cannot read", e);
+      if (e instanceof ReadFailure) this.fail(role, path, e.message, undefined, e.size === undefined ? undefined : { size: e.size });
+      else this.fail(role, path, "cannot read", e);
       return undefined;
     }
   }

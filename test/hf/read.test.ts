@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { truncateSync } from "node:fs";
 import { join } from "node:path";
 import { readHfModel } from "../../src/hf/index.ts";
-import { MAX_SOURCE_BYTES } from "../../src/hf/sources.ts";
+import { MAX_SOURCE_BYTES, readRegularFile } from "../../src/hf/sources.ts";
 import type { ExtractedTemplate, ModelRecord } from "../../src/types.ts";
 import { link, makeTree, removeTrees } from "../helpers/tree.ts";
 
@@ -277,6 +277,41 @@ describe("a template-bearing source that fails is HIGH and leaves extraction inc
     expect(r.templates).toEqual([]);
     expect(r.findings.map((f) => f.ruleId)).toEqual(["scanner_error"]);
     expect(r.extractionComplete).toBe(false);
+  });
+});
+
+describe("no hostile file can hang the read", () => {
+  test("readRegularFile opens a FIFO without blocking and refuses it", async () => {
+    const root = makeTree({});
+    const fifo = join(root, "p");
+    expect(Bun.spawnSync(["mkfifo", fifo]).exitCode).toBe(0);
+    // No stat beforehand: the open itself must not wait for a writer.
+    const outcome = await Promise.race([
+      readRegularFile(fifo, 1024).then(
+        () => "read",
+        (e: Error) => e.message,
+      ),
+      Bun.sleep(2000).then(() => "hung"),
+    ]);
+    expect(outcome).toBe("not a regular file (FIFO)");
+  });
+
+  test("a FIFO, socket or device under a source name is a HIGH parse_error", async () => {
+    const root = makeTree({ m: { "tokenizer_config.json": json({ chat_template: "T" }), "processor_config.json": link("/dev/null") } });
+    expect(Bun.spawnSync(["mkfifo", join(root, "m/chat_template.jinja")]).exitCode).toBe(0);
+    const server = Bun.listen({ unix: join(root, "m/chat_template.json"), socket: { data() {} } });
+    try {
+      const r = await readHfModel(join(root, "m"));
+      expect(summary(r).map((s) => s.text)).toEqual(["T"]);
+      expect(failures(r)).toEqual([
+        ["parse_error", "HIGH", join(root, "m/chat_template.jinja")],
+        ["parse_error", "HIGH", join(root, "m/chat_template.json")],
+        ["parse_error", "HIGH", join(root, "m/processor_config.json")],
+      ]);
+      expect(r.extractionComplete).toBe(false);
+    } finally {
+      server.stop(true);
+    }
   });
 });
 
