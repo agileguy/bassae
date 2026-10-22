@@ -85,7 +85,7 @@ export function runRawText(regions: TextRun[], lines: LineMap, text: string, bas
 // column in O(total text), O(1) extra memory — no line-start array. Line breaks
 // and column counting match LineMap exactly (round-2 memory review: used when the input is
 // over the size cap, so no full LineMap is built).
-class IncrementalPos {
+export class IncrementalPos {
   private i = 0;
   private line = 1;
   private lineStart = 0;

@@ -61,6 +61,9 @@ export interface Finding {
   detail?: Record<string, unknown>;
 }
 
+/** The fields every rule stamps onto its findings. */
+export type FindingBase = Pick<Finding, "file" | "templateName" | "templateSha256">;
+
 export type SourceKind =
   | "gguf" //                       tokenizer.chat_template or tokenizer.chat_template.<name>
   | "tokenizer_config" //           tokenizer_config.json chat_template, string or list entry
@@ -178,7 +181,7 @@ export interface AnalysisContext {
 export interface InjectedText {
   text: string;
   span: Span;
-  /** The innermost test the emission depends on, when it is conditional. `presence` tests are exempt from ISC-18. */
+  /** The strongest test among every conditional the emission sits under (nondeterministic over content over presence), or absent when it is unconditional. `presence` tests are exempt from ISC-18. */
   condition?: { span: Span; test: "presence" | "content" | "nondeterministic" };
   /** Emitted after the generation-prompt marker, as prefilled assistant text (ISC-17.2). */
   afterGenerationPrompt: boolean;
