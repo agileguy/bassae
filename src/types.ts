@@ -198,3 +198,15 @@ export const DEFAULT_RENDER_LIMITS: RenderLimits = {
 export interface Renderer {
   renderBatch(template: string, requests: RenderRequest[], limits?: Partial<RenderLimits>): Promise<RenderResult[]>;
 }
+
+// ---- discovery ----
+
+/** One model found by the walk, before any reader has opened it. */
+export interface DiscoveredModel {
+  format: "gguf" | "hf";
+  /** realpath of the GGUF file or the model directory; the dedup key. */
+  id: string;
+  /** Every path the walk reached it through, in walk order. */
+  paths: string[];
+  hfCache?: HfCacheLocation;
+}
