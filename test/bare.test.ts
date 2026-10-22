@@ -31,11 +31,26 @@ test("bytes are kept exactly, invalid UTF-8 included", async () => {
   expect(t.validUtf8).toBe(false);
 });
 
-test("an unreadable path is a finding, not a throw", async () => {
-  const root = makeTree({ dir: {} });
-  for (const p of [join(root, "missing.jinja"), join(root, "dir")]) {
+test("a template that was read is complete extraction", async () => {
+  const root = makeTree({ "t.jinja": "x" });
+  expect((await readBareTemplate(join(root, "t.jinja"))).extractionComplete).toBe(true);
+});
+
+test("a missing path is a scanner_error and incomplete, not a throw", async () => {
+  const root = makeTree({});
+  const r = await readBareTemplate(join(root, "missing.jinja"));
+  expect(r.templates).toEqual([]);
+  expect(r.findings.map((f) => [f.ruleId, f.severity, f.file])).toEqual([["scanner_error", "MEDIUM", join(root, "missing.jinja")]]);
+  expect(r.extractionComplete).toBe(false);
+});
+
+test("a directory, FIFO or device is a HIGH parse_error and incomplete, and never blocks", async () => {
+  const root = makeTree({ dir: {}, dev: link("/dev/null") });
+  expect(Bun.spawnSync(["mkfifo", join(root, "fifo")]).exitCode).toBe(0);
+  for (const p of ["dir", "fifo", "dev"].map((n) => join(root, n))) {
     const r = await readBareTemplate(p);
     expect(r.templates).toEqual([]);
-    expect(r.findings.map((f) => [f.ruleId, f.file])).toEqual([["scanner_error", p]]);
+    expect(r.findings.map((f) => [f.ruleId, f.severity, f.file])).toEqual([["parse_error", "HIGH", p]]);
+    expect(r.extractionComplete).toBe(false);
   }
 });

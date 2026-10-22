@@ -18,6 +18,13 @@ export const MAX_SOURCE_BYTES = 64 * 1024 * 1024;
 // Fatal and BOM-preserving, so a file Python's json.load would reject is rejected here too.
 const strictUtf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
+/**
+ * What a source can carry. A template-bearing source that fails to load or parse might have
+ * hidden a template, so the failure is HIGH and extraction is incomplete. tokenizer.json only
+ * feeds scaffolding, so its failure is MEDIUM.
+ */
+export type Role = "template" | "tokens";
+
 export interface Sources {
   templates: ExtractedTemplate[];
   hints: ModelRecord["hints"];
@@ -26,40 +33,40 @@ export interface Sources {
 }
 
 /** Reads every template source in `dir`, in a fixed order. Problems become findings; nothing throws. */
-export async function readTemplateSources(dir: string, findings: Finding[]): Promise<Sources> {
+export async function readTemplateSources(dir: string, reader: SourceReader): Promise<Sources> {
   const templates: ExtractedTemplate[] = [];
   const hints: ModelRecord["hints"] = {};
 
-  const tc = await loadJson(join(dir, "tokenizer_config.json"), findings, "HIGH");
+  const tc = await reader.json(join(dir, "tokenizer_config.json"), "template");
   if (tc) {
-    templates.push(...templatesFromJson(tc, "tokenizer_config", findings));
+    templates.push(...templatesFromJson(tc, "tokenizer_config", reader));
     if (isObject(tc.value)) {
       if (typeof tc.value.chat_template_type === "string") hints.chatTemplateType = tc.value.chat_template_type;
       if (typeof tc.value.tool_parser_type === "string") hints.toolParserType = tc.value.tool_parser_type;
     }
   }
 
-  const jinja = await loadFile(join(dir, "chat_template.jinja"), findings, "HIGH");
+  const jinja = await reader.file(join(dir, "chat_template.jinja"), "template");
   if (jinja) templates.push(makeTemplate(sourceOf("chat_template_jinja", jinja, "default"), jinja.bytes));
 
-  const legacy = await loadJson(join(dir, "chat_template.json"), findings, "HIGH");
-  if (legacy) templates.push(...templatesFromJson(legacy, "chat_template_json", findings));
+  const legacy = await reader.json(join(dir, "chat_template.json"), "template");
+  if (legacy) templates.push(...templatesFromJson(legacy, "chat_template_json", reader));
 
-  templates.push(...(await readAdditional(join(dir, "additional_chat_templates"), findings)));
+  templates.push(...(await readAdditional(join(dir, "additional_chat_templates"), reader)));
 
-  const pc = await loadJson(join(dir, "processor_config.json"), findings, "HIGH");
-  if (pc) templates.push(...templatesFromJson(pc, "processor_config", findings));
+  const pc = await reader.json(join(dir, "processor_config.json"), "template");
+  if (pc) templates.push(...templatesFromJson(pc, "processor_config", reader));
 
   return { templates, hints, tokenizerConfig: tc?.value };
 }
 
 // Like the runtimes: regular files ending in .jinja, named by what precedes the suffix. Subdirectories are ignored.
-async function readAdditional(dir: string, findings: Finding[]): Promise<ExtractedTemplate[]> {
+async function readAdditional(dir: string, reader: SourceReader): Promise<ExtractedTemplate[]> {
   let names: string[];
   try {
     names = (await readdir(dir)).filter((n) => n.endsWith(".jinja")).sort();
   } catch (e) {
-    if (!(await isAbsent(e, dir))) findings.push(problem("scanner_error", "MEDIUM", dir, "cannot list additional_chat_templates", e));
+    if (!(await isAbsent(e, dir))) reader.fail("template", dir, "cannot list additional_chat_templates", e);
     return [];
   }
   const out: ExtractedTemplate[] = [];
@@ -67,7 +74,7 @@ async function readAdditional(dir: string, findings: Finding[]): Promise<Extract
     const path = join(dir, name);
     const st = await stat(path).catch(() => undefined);
     if (st?.isDirectory()) continue;
-    const file = await loadFile(path, findings, "HIGH");
+    const file = await reader.file(path, "template");
     if (file) out.push(makeTemplate(sourceOf("additional_chat_templates", file, name.slice(0, -".jinja".length)), file.bytes));
   }
   return out;
@@ -83,53 +90,61 @@ interface LoadedJson extends Loaded {
   value: unknown;
 }
 
-/**
- * Reads one file read-only. An absent file is silently undefined; one that exists but cannot be
- * read (dangling link, not a regular file, over the size cap) becomes a finding.
- */
-export async function loadFile(path: string, findings: Finding[], oversize: Severity): Promise<Loaded | undefined> {
-  try {
-    // stat before open: opening a FIFO planted under a source name would block the scan.
-    const st = await stat(path);
-    if (!st.isFile()) {
-      findings.push(problem("scanner_error", "MEDIUM", path, "not a regular file"));
-      return undefined;
-    }
-    if (st.size > MAX_SOURCE_BYTES) {
-      findings.push(problem("parse_error", oversize, path, `larger than the ${MAX_SOURCE_BYTES}-byte cap; not analyzed`, undefined, { size: st.size }));
-      return undefined;
-    }
-    const bytes = new Uint8Array(await readFile(path));
-    return { path, realPath: await realpath(path), bytes };
-  } catch (e) {
-    if (!(await isAbsent(e, path))) findings.push(problem("scanner_error", "MEDIUM", path, "cannot read", e));
-    return undefined;
-  }
-}
+/** Reads one model's sources read-only, recording findings and whether every template-bearing source was read. */
+export class SourceReader {
+  readonly findings: Finding[] = [];
+  complete = true;
 
-/** loadFile plus a strict JSON parse; a malformed file is a MEDIUM parse_error. */
-export async function loadJson(path: string, findings: Finding[], oversize: Severity): Promise<LoadedJson | undefined> {
-  const file = await loadFile(path, findings, oversize);
-  if (!file) return undefined;
-  try {
-    return { ...file, value: JSON.parse(strictUtf8.decode(file.bytes)) };
-  } catch (e) {
-    findings.push(problem("parse_error", "MEDIUM", path, "not valid UTF-8 JSON", e));
-    return undefined;
+  /** An absent file is silently undefined; one that exists but cannot be read is a finding. */
+  async file(path: string, role: Role): Promise<Loaded | undefined> {
+    try {
+      // stat before open: opening a FIFO planted under a source name would block the scan.
+      const st = await stat(path);
+      if (!st.isFile()) {
+        this.fail(role, path, "not a regular file");
+        return undefined;
+      }
+      if (st.size > MAX_SOURCE_BYTES) {
+        this.fail(role, path, `larger than the ${MAX_SOURCE_BYTES}-byte cap; not analyzed`, undefined, { size: st.size });
+        return undefined;
+      }
+      const bytes = new Uint8Array(await readFile(path));
+      return { path, realPath: await realpath(path), bytes };
+    } catch (e) {
+      if (!(await isAbsent(e, path))) this.fail(role, path, "cannot read", e);
+      return undefined;
+    }
+  }
+
+  /** file() plus a strict JSON parse. */
+  async json(path: string, role: Role): Promise<LoadedJson | undefined> {
+    const file = await this.file(path, role);
+    if (!file) return undefined;
+    try {
+      return { ...file, value: JSON.parse(strictUtf8.decode(file.bytes)) };
+    } catch (e) {
+      this.fail(role, path, "not valid UTF-8 JSON", e);
+      return undefined;
+    }
+  }
+
+  fail(role: Role, path: string, message: string, error?: unknown, detail?: Record<string, unknown>): void {
+    if (role === "template") this.complete = false;
+    this.findings.push(problem("parse_error", role === "template" ? "HIGH" : "MEDIUM", path, message, error, detail));
   }
 }
 
 // `chat_template` may be a string or a list of {name, template}; each list entry stands alone.
-function templatesFromJson(file: LoadedJson, kind: SourceKind, findings: Finding[]): ExtractedTemplate[] {
+function templatesFromJson(file: LoadedJson, kind: SourceKind, reader: SourceReader): ExtractedTemplate[] {
   if (!isObject(file.value)) {
-    findings.push(problem("parse_error", "MEDIUM", file.path, "expected a JSON object"));
+    reader.fail("template", file.path, "expected a JSON object");
     return [];
   }
   const ct = file.value.chat_template;
   if (ct === undefined || ct === null) return [];
   if (typeof ct === "string") return [makeTemplateFromString(sourceOf(kind, file, "default", "chat_template"), ct)];
   if (!Array.isArray(ct)) {
-    findings.push(problem("parse_error", "MEDIUM", file.path, "chat_template is neither a string nor a list", undefined, { key: "chat_template" }));
+    reader.fail("template", file.path, "chat_template is neither a string nor a list", undefined, { key: "chat_template" });
     return [];
   }
   const out: ExtractedTemplate[] = [];
@@ -137,7 +152,7 @@ function templatesFromJson(file: LoadedJson, kind: SourceKind, findings: Finding
     if (isObject(entry) && typeof entry.name === "string" && typeof entry.template === "string") {
       out.push(makeTemplateFromString(sourceOf(kind, file, entry.name, `chat_template[${i}].template`), entry.template));
     } else {
-      findings.push(problem("parse_error", "MEDIUM", file.path, "chat_template entry is not {name, template} strings", undefined, { key: `chat_template[${i}]` }));
+      reader.fail("template", file.path, "chat_template entry is not {name, template} strings", undefined, { key: `chat_template[${i}]` });
     }
   });
   return out;
