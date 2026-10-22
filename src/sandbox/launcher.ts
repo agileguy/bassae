@@ -153,8 +153,8 @@ process.on("exit", killLive);
 // been here, and cannot come back to us. Nothing runs on SIGKILL or an OOM kill: bwrap's
 // --die-with-parent covers Linux. On macOS the orphaned worker runs on until it next writes to its
 // dead parent, at the end of the step it is in, and dies of the broken pipe. A step that never ends
-// dies at the worker's own CPU limit: timeoutMs and a second, rounded up to a whole second, so an
-// orphan costs less than timeoutMs + 2 s of CPU time.
+// dies at the worker's own CPU limit: 1.5 × timeoutMs and a second, rounded up to a whole second, so
+// an orphan costs less than 1.5 × timeoutMs + 2 s of CPU time.
 let handlingSignals = false;
 function killLiveOnSignals(): void {
   if (handlingSignals) return;
@@ -314,10 +314,11 @@ export async function runWorker(
   // JSON escaping can grow output up to six-fold. Past that, plus room for the envelope and a message,
   // nothing the worker sends between two results is well-formed, whatever kind of line it is.
   const perRequest = limits.maxOutputBytes * 6 + 65536;
-  // The worker's own CPU limit per step, the backstop for an orphan, so it is kept tight. GC and JIT
-  // threads count towards CPU time too: a render that allocates hard uses about 1.3 s of CPU a second,
-  // so past a timeout of 3 s or so it can reach this limit before the timer. Either way it is a timeout.
-  const cpuMs = limits.timeoutMs + 1000;
+  // The worker's own CPU limit per step, the backstop for an orphan. GC and JIT threads count towards
+  // CPU time too, and a render that allocates hard uses about 1.3 s of CPU a second, so the limit allows
+  // half as much again as the timeout, and a second. The parent's timer then fires first at any timeout,
+  // and whether a render timed out does not turn on how busy a machine's GC threads are (ISC-31).
+  const cpuMs = Math.ceil(limits.timeoutMs * 1.5) + 1000;
 
   return new Promise<WorkerRun>((resolve) => {
     const results: RenderResult[] = [];

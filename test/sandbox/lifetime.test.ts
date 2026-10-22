@@ -4,7 +4,7 @@
 import { expect, test } from "bun:test";
 import { readFileSync, statSync } from "node:fs";
 import { constants } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { sandboxAvailable } from "../../src/sandbox/index.ts";
 import { spawnSandboxed } from "../../src/sandbox/launcher.ts";
 import { encode } from "../../src/sandbox/protocol.ts";
@@ -118,7 +118,9 @@ test.skipIf(!status.available || process.platform !== "linux" || process.getuid?
       const proc = spawnSandboxed(argv)!;
       try {
         await proc.stdout.getReader().read();
-        const bun = descendants(proc.pid).find((pid) => readFileSync(`/proc/${pid}/comm`, "utf8").trim() === "bun");
+        // The kernel names a process after the file it runs, cut to 15 bytes, whatever that file is called.
+        const bun = descendants(proc.pid).find((pid) => readFileSync(`/proc/${pid}/comm`, "utf8").trim() === basename(process.execPath).slice(0, 15));
+        expect(bun).toBeDefined();
         owners[name] = statSync(`/proc/${bun}/status`).uid;
       } finally {
         proc.kill("SIGKILL");
@@ -178,8 +180,8 @@ test.skipIf(!status.available)(
     const { survivors, ms } = await killMidRender("block", "SIGKILL", 15_000);
     console.log(`[sandbox] worker gone ${ms.toFixed(0)}ms after SIGKILL to its hung parent`);
     expect(survivors).toEqual([]);
-    // The worker's own CPU limit for one render at timeoutMs 1000 is 2 seconds, rounded up to a whole second.
-    expect(ms).toBeLessThan(4000);
+    // The worker's own CPU limit for one render at timeoutMs 1000 is 2.5 seconds, rounded up to a whole second.
+    expect(ms).toBeLessThan(4500);
   },
   30_000,
 );

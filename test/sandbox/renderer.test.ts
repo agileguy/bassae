@@ -16,6 +16,7 @@ if (!live) {
 const BUN = process.execPath;
 const ROGUE = join(import.meta.dir, "rogue-worker.ts");
 const PROBE = join(import.meta.dir, "render-probe.ts");
+const BUSY = join(import.meta.dir, "busy-worker.ts");
 const SLOW = 30_000;
 // Spins for hours on small ranges, staying near 100 MiB for its first seconds, so only a timeout or a kill ends it.
 const SPIN = "{% for i in range(1000) %}{% for j in range(1000) %}{% for k in range(1000) %}{% endfor %}{% endfor %}{% endfor %}";
@@ -276,6 +277,21 @@ describe.skipIf(!live)("caps (ISC-43)", () => {
       expect(messages.map((m) => m.includes("not attempted"))).toEqual([false, false, true, true, true, true, true, true]);
       // Two timeouts' worth, not eight.
       expect(ms).toBeLessThan(3 * 500);
+    },
+    SLOW,
+  );
+
+  // GC and JIT threads count towards CPU time, so the worker's own CPU limit could beat the parent's timer, and
+  // whether a render timed out would turn on how busy a machine's GC threads are (ISC-31). At timeoutMs 8000 the
+  // limit is 13 s of CPU, reached at 1.3 s a second only after 10 s. At the timeout and a second, 9 to 10 s of
+  // CPU, it would have come first, by 7.7 s.
+  test(
+    "at a long timeout, a render using about 1.3 s of CPU a second still ends by the parent's timer",
+    async () => {
+      const busy = createRenderer({ command: [BUN, "--no-install", BUSY], readable: [BUSY] });
+      const [results, ms] = await timed(() => busy.renderBatch(SPIN, [req("a")], { timeoutMs: 8000 }));
+      console.log(`[sandbox] busy render at timeoutMs 8000 ended after ${ms.toFixed(0)}ms`);
+      expect(results).toEqual([{ id: "a", ok: false, failure: "timeout", message: "render exceeded 8000ms" }]);
     },
     SLOW,
   );
