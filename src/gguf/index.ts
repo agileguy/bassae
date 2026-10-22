@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { firstHfCacheLocation } from "../hf/cache.ts";
 import type { Finding, ModelRecord } from "../types.ts";
 import { openFileSource, parseGguf, type ByteSource } from "./reader.ts";
-import { checkTemplateList, extractTemplates, isTemplateKey, templateName } from "./templates.ts";
+import { checkDefaultPair, checkTemplateList, extractTemplates, isTemplateKey, templateName } from "./templates.ts";
 
 export { bytesSource, openFileSource, parseGguf, type ByteSource } from "./reader.ts";
 
@@ -63,7 +63,7 @@ export function readGgufSource(src: ByteSource, path: string, realPath = path): 
     }
     record.findings.push(f);
   }
-  record.findings.push(...findings);
+  record.findings.push(...findings, ...checkDefaultPair(templates, path));
   // A list check on a partial parse would blame keys that were never reached. Views are not keys, so they stay out of it.
   if (parse.kvEnd !== undefined) record.findings.push(...checkTemplateList(templates, parse.templateList, path));
   return record;

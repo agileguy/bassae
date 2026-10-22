@@ -10,6 +10,7 @@ export const CHAT_TEMPLATE_KEY = /^tokenizer\.chat_template(?:\.(.+))?$/s;
 export const TEMPLATE_LIST_KEY = "tokenizer.chat_templates";
 
 const BARE_KEY = "tokenizer.chat_template";
+const DOTTED_DEFAULT = `${BARE_KEY}.default`;
 
 /** The key as llama.cpp resolves it. Its lookups compare C strings, so a NUL ends the key. */
 export function cKey(key: string): string {
@@ -21,9 +22,16 @@ export function isTemplateKey(key: string): boolean {
   return CHAT_TEMPLATE_KEY.test(cKey(key));
 }
 
-/** "default" for the bare key, otherwise the suffix. */
+/** The part after "tokenizer.chat_template.", which is what gguf-py lists. Undefined for the bare key. */
+function suffix(key: string): string | undefined {
+  return CHAT_TEMPLATE_KEY.exec(cKey(key))?.[1];
+}
+
+/** "default" for the bare key, otherwise the suffix. tokenizer.chat_template.default is named by its key, so it can't pass for the bare one. */
 export function templateName(key: string): string {
-  return CHAT_TEMPLATE_KEY.exec(cKey(key))?.[1] ?? "default";
+  const name = suffix(key);
+  if (name === undefined) return "default";
+  return name === "default" ? DOTTED_DEFAULT : name;
 }
 
 /** The key a llama.cpp view is recorded under: the stored key, then how many bytes of its value llama.cpp sees. */
@@ -68,7 +76,8 @@ export function extractTemplates(raw: RawTemplate[], path: string, realPath: str
 export function checkTemplateList(templates: ExtractedTemplate[], list: string[] | undefined, file: string): Finding[] {
   if (!list) return [];
   const listed = new Set(list);
-  const present = new Set(templates.map((t) => t.source.name));
+  // Listed names are key suffixes, and "default" also stands for the bare key.
+  const present = new Set(templates.map((t) => suffix(t.source.key!) ?? "default"));
   const findings: Finding[] = [];
   for (const name of listed) {
     if (present.has(name)) continue;
@@ -83,7 +92,8 @@ export function checkTemplateList(templates: ExtractedTemplate[], list: string[]
   const reported = new Set<string>();
   for (const t of templates) {
     const { key, name } = t.source;
-    if (cKey(key!) === BARE_KEY || listed.has(name) || reported.has(name)) continue;
+    const listedAs = suffix(key!);
+    if (listedAs === undefined || listed.has(listedAs) || reported.has(name)) continue;
     reported.add(name);
     findings.push({
       ruleId: "template_list_mismatch",
@@ -95,4 +105,43 @@ export function checkTemplateList(templates: ExtractedTemplate[], list: string[]
     });
   }
   return findings;
+}
+
+/**
+ * tokenizer.chat_template.default beside the bare key. No writer makes both. llama.cpp renders the bare key, while a tool
+ * that turns named keys into an HF template list would make the other one the default.
+ */
+export function checkDefaultPair(templates: ExtractedTemplate[], file: string): Finding[] {
+  const bare = templates.find((t) => cKey(t.source.key!) === BARE_KEY);
+  if (!bare) return [];
+  return templates
+    .filter((t) => cKey(t.source.key!) === DOTTED_DEFAULT)
+    .map((t) => {
+      const pair = `${JSON.stringify(t.source.key)} and ${JSON.stringify(bare.source.key)}`;
+      const f: Finding = {
+        ruleId: "intra_model_divergence",
+        severity: "LOW",
+        message: `${pair} hold the same template`,
+        file,
+        templateName: t.source.name,
+        templateSha256: t.sha256,
+        detail: { key: t.source.key, otherKey: bare.source.key, otherSha256: bare.sha256 },
+      };
+      const byte = firstDifference(t.bytes, bare.bytes);
+      if (byte === undefined) return f;
+      f.severity = "HIGH";
+      f.message = `${pair} both hold a default template, and they differ`;
+      f.detail!.firstDifference = byte;
+      // Bytes can differ where the text doesn't: invalid UTF-8 all decodes to U+FFFD.
+      const at = firstDifference(t.text, bare.text);
+      if (at !== undefined) f.span = new LineMap(t.text).span(at, Math.min(at + 1, t.text.length));
+      return f;
+    });
+}
+
+/** The first index where a and b differ, counting the end of the shorter one. Undefined when they are equal. */
+function firstDifference(a: ArrayLike<unknown>, b: ArrayLike<unknown>): number | undefined {
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) if (a[i] !== b[i]) return i;
+  return a.length === b.length ? undefined : n;
 }

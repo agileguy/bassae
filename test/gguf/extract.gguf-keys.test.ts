@@ -76,6 +76,63 @@ test("ISC-4.1: the bare key needs no list entry, and 'default' in the list is sa
   }
 });
 
+// The bare key is "default", so tokenizer.chat_template.default is named by its key and can't pass for it.
+const DOTTED = "tokenizer.chat_template.default";
+
+test("tokenizer.chat_template.default is named by its key, not 'default'", () => {
+  const r = read([[DOTTED, str("B")]]);
+  expect(r.templates.map((t) => [t.source.name, t.source.key])).toEqual([[DOTTED, DOTTED]]);
+  expect(r.findings).toEqual([]);
+});
+
+test("the bare key beside tokenizer.chat_template.default is HIGH intra_model_divergence when they differ, LOW when they match", () => {
+  const differ = read([
+    ["tokenizer.chat_template", str("{{ a }}\n{{ clean }}")],
+    [DOTTED, str("{{ a }}\n{{ evil }}")],
+  ]);
+  expect(differ.templates.map((t) => [t.source.name, t.source.key])).toEqual([
+    ["default", "tokenizer.chat_template"],
+    [DOTTED, DOTTED],
+  ]);
+  expect(rules(differ)).toEqual([["intra_model_divergence", "HIGH"]]);
+  const f = differ.findings[0]!;
+  expect(f.templateName).toBe(DOTTED);
+  expect(f.templateSha256).toBe(differ.templates[1]!.sha256);
+  expect(f.span).toEqual({ start: 11, end: 12, line: 2, col: 4 });
+  expect(f.detail).toEqual({ key: DOTTED, otherKey: "tokenizer.chat_template", otherSha256: differ.templates[0]!.sha256, firstDifference: 11 });
+
+  const same = read([
+    [DOTTED, str("{{ x }}")],
+    ["tokenizer.chat_template", str("{{ x }}")],
+  ]);
+  expect(rules(same)).toEqual([["intra_model_divergence", "LOW"]]);
+  expect(same.findings[0]!.templateName).toBe(DOTTED);
+
+  // Different invalid bytes decode to the same U+FFFD, so the bytes decide and there is no span to point at.
+  const lossy = read([
+    ["tokenizer.chat_template", str(new Uint8Array([0x7b, 0x80]))],
+    [DOTTED, str(new Uint8Array([0x7b, 0xff]))],
+  ]);
+  expect(lossy.templates[0]!.text).toBe(lossy.templates[1]!.text);
+  expect(rules(lossy)).toEqual([["intra_model_divergence", "HIGH"]]);
+  expect(lossy.findings[0]!.detail).toMatchObject({ firstDifference: 1 });
+  expect(lossy.findings[0]!.span).toBeUndefined();
+});
+
+test("ISC-4.1: a listed 'default' matches tokenizer.chat_template.default by its suffix", () => {
+  const listed = read([
+    [DOTTED, str("B")],
+    ["tokenizer.chat_templates", arr(T.STRING, ["default"])],
+  ]);
+  expect(listed.findings).toEqual([]);
+  const unlisted = read([
+    [DOTTED, str("B")],
+    ["tokenizer.chat_templates", arr(T.STRING, [])],
+  ]);
+  expect(rules(unlisted)).toEqual([["template_list_mismatch", "MEDIUM"]]);
+  expect(unlisted.findings[0]!.templateName).toBe(DOTTED);
+});
+
 test("ISC-4.1: a tokenizer.chat_templates that is not a string array is a MEDIUM parse_error", () => {
   const r = read([
     ["tokenizer.chat_template.rag", str("C")],
