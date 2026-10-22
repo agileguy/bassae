@@ -112,11 +112,13 @@ export interface ModelRecord {
   templates: ExtractedTemplate[];
   /** mlx-lm hints from tokenizer_config.json, reported but not analyzed (ISC-7.3). */
   hints: { chatTemplateType?: string; toolParserType?: string };
-  /** GGUF `general.*` scalar metadata, for provenance hints (ISC-41.1). */
-  ggufGeneral?: Record<string, string | number | boolean | bigint>;
+  /** GGUF `general.*` scalar metadata, for provenance hints (ISC-41.1). 64-bit integers outside the safe range are decimal strings, so the record always survives JSON.stringify (ISC-27). */
+  ggufGeneral?: Record<string, string | number | boolean>;
   /** Special-token strings: tokenizer.json added tokens, or GGUF control and user-defined tokens. */
   specialTokens: string[];
   hfCache?: HfCacheLocation;
+  /** False when a template might exist that was not extracted: a parse stopped before the end of the GGUF KV section, or a template-bearing source failed to load or parse. A model with this false is never `no_template` and never clean (ISC-42). */
+  extractionComplete: boolean;
   /** Findings about the model or file as a whole, not one template. */
   findings: Finding[];
 }
@@ -173,7 +175,8 @@ export interface RenderRequest {
   now?: string;
 }
 
-export type RenderFailure = "timeout" | "memory" | "output_limit" | "parse" | "render_error" | "sandbox";
+/** `stack` is a stack overflow inside the render, e.g. a recursive macro; like timeout, memory and output_limit it becomes `render_dos` (ISC-43). */
+export type RenderFailure = "timeout" | "memory" | "output_limit" | "stack" | "parse" | "render_error" | "sandbox";
 
 export type RenderResult =
   | { id: string; ok: true; output: string }
