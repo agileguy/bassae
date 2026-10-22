@@ -172,3 +172,109 @@ test("item 9: exec-surface strings fire only in callable/attribute positions", (
   expect(highs("{{ x['system']('id') }}")).toContain("exec_surface");
   expect(highs("{{ messages | map(attribute='os.system') | list }}")).toContain("exec_surface");
 });
+
+// --- Review round 2 ---------------------------------------------------------
+
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+
+function findings(src: string) {
+  return scan(src);
+}
+
+// M1 — a dunder key assembled in an EARLIER statement. The carve-out checked
+// "built" only at the use site, so each of these parsed clean with 0 findings.
+test("M1: a dunder key built across set/loop statements is HIGH", () => {
+  const cases = [
+    "{% set ns = namespace(k='__cla') %}{% set ns.k = ns.k ~ 'ss__' %}{{ messages[0][ns.k] }}",
+    "{% set k = '__cla' %}{% set k = k ~ 'ss__' %}{{ messages[0][k] }}",
+    "{% for p in [['__cla','ss__']] %}{% set k = p|join %}{{ messages[0][k] }}{% endfor %}",
+  ];
+  const KEY_RULES = new Set(["dunder_access", "dynamic_attribute"]);
+  for (const src of cases) {
+    expect({ src, hit: highs(src).some((r) => KEY_RULES.has(r)) }).toEqual({ src, hit: true });
+  }
+  // A numeric counter carried through a namespace is NOT a string op: benign.
+  expect(highs("{% set ns = namespace(i=0) %}{% set ns.i = ns.i + 1 %}{{ messages[ns.i] }}")).toHaveLength(0);
+});
+
+// M2 — a gadget laundered through a local binding. cycler/joiner/lipsum are HIGH
+// on any reference; namespace/dict are HIGH when used as a value, benign when
+// called with keyword arguments.
+test("M2: gadgets laundered through a binding are HIGH; keyword-only calls are not", () => {
+  const laundered = [
+    "{% set x = [lipsum] %}{{ x }}",
+    "{{ (lipsum if true else 0) }}",
+    "{% for g in [lipsum] %}{{ g }}{% endfor %}",
+    "{% macro f(a) %}{{ a }}{% endmacro %}{{ f(lipsum) }}",
+    "{% set x = [cycler] %}{{ x }}",
+    "{% set x = [joiner] %}{{ x }}",
+    "{% set x = [namespace] %}{{ x }}",
+    "{% set x = [dict] %}{{ x }}",
+    "{{ namespace }}",
+    "{{ dict }}",
+  ];
+  for (const src of laundered) {
+    expect({ src, high: highs(src).length > 0 }).toEqual({ src, high: true });
+  }
+  expect(highs("{% set ns = namespace(found=false) %}{{ ns.found }}")).toHaveLength(0);
+  expect(highs("{{ dict(a=1, b=2) }}")).toHaveLength(0);
+});
+
+// M3 — a positional attribute argument. The library renders a positional sort
+// attribute, so `messages|sort(false, false, ns.k)` must be caught like attribute=.
+test("M3: a positional attribute argument reaches attributes by name (HIGH)", () => {
+  expect(highs("{{ (messages | sort(false, false, ns.k)) | list }}")).toContain("dynamic_attribute");
+  expect(highs("{{ (messages | unique(false, ns.k)) | list }}")).toContain("dynamic_attribute");
+  expect(highs("{{ (messages | min(false, ns.k)) | list }}")).toContain("dynamic_attribute");
+  expect(highs("{{ (messages | groupby(ns.k)) | list }}")).toContain("dynamic_attribute");
+  expect(highs("{{ (messages | sum(ns.k)) | list }}")).toContain("dynamic_attribute");
+  expect(highs("{{ (messages | sort(false, false, '__class__')) | list }}")).toContain("dunder_access");
+  // A literal attribute path and an attribute-free sort are benign.
+  expect(highs("{{ (messages | sort(false, false, 'role')) | list }}")).toHaveLength(0);
+  expect(highs("{{ (messages | sort(true)) | list }}")).toHaveLength(0);
+});
+
+// M4 — string methods the library renders are folded; any other method call in a
+// key position is built, so HIGH dynamic_attribute.
+test("M4: string methods fold into the key; other methods are dynamic", () => {
+  expect(highs("{{ messages[0]['__claXX'.replace('XX','ss__')] }}")).toContain("dunder_access");
+  expect(highs("{{ messages[0]['__CLA'.lower() ~ 'ss__'] }}")).toContain("dunder_access");
+  expect(highs("{{ messages[0][' __class__ '.strip()] }}")).toContain("dunder_access");
+  expect(highs("{{ messages[0][x.split('.')] }}")).toContain("dynamic_attribute");
+  // A folded exec surface in callee position is still exec_surface.
+  expect(highs("{{ messages[0]['POPEN'.lower()]('id') }}")).toContain("exec_surface");
+});
+
+// M5 — every HIGH finding carries a span, even when it names a composite node.
+test("M5: every HIGH finding from the fixtures and bypass probes has a span", () => {
+  const dir = join(import.meta.dir, "../../fixtures/malicious/codeexec");
+  const fixtures = readdirSync(dir).filter((f) => f.endsWith(".jinja")).map((f) => readFileSync(join(dir, f), "utf8"));
+  const probes = [
+    "{% set ns = namespace(k='__cla') %}{% set ns.k = ns.k ~ 'ss__' %}{{ messages[0][ns.k] }}",
+    "{% set k = '__cla' %}{% set k = k ~ 'ss__' %}{{ messages[0][k] }}",
+    "{{ messages[0]['__claXX'.replace('XX','ss__')] }}",
+    "{{ (messages | sort(false, false, ns.k)) | list }}",
+    "{{ messages[0]['_' * 2 ~ 'class' ~ '_' * 2] }}",
+    "{% set m = messages[0] %}{{ m['_' * 2 ~ 'class' ~ '_' * 2] }}",
+    "{{ namespace }}",
+  ];
+  for (const src of [...fixtures, ...probes]) {
+    for (const f of findings(src).filter((x) => x.severity === "HIGH")) {
+      expect({ src: src.slice(0, 40), ruleId: f.ruleId, hasSpan: Boolean(f.span) }).toEqual({ src: src.slice(0, 40), ruleId: f.ruleId, hasSpan: true });
+    }
+  }
+});
+
+// T9 — stock templates from Apache-2.0 models never raise HIGH or dunder_access.
+test("T9: clean stock templates produce no HIGH and no dunder_access", () => {
+  const dir = join(import.meta.dir, "../../fixtures/clean");
+  const files = readdirSync(dir).filter((f) => f.endsWith(".jinja"));
+  expect(files.length).toBeGreaterThanOrEqual(3);
+  for (const file of files) {
+    const src = readFileSync(join(dir, file), "utf8");
+    const fs = findings(src);
+    expect({ file, high: fs.filter((f) => f.severity === "HIGH").map((f) => f.ruleId) }).toEqual({ file, high: [] });
+    expect({ file, dunder: fs.some((f) => f.ruleId === "dunder_access") }).toEqual({ file, dunder: false });
+  }
+});
