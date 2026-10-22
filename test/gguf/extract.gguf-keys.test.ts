@@ -1,4 +1,4 @@
-// ISC-4, ISC-4.1, ISC-4.2: listed, unlisted and duplicate chat template keys.
+// ISC-4, ISC-4.1, ISC-4.2, ISC-4.3: listed, unlisted, duplicate and NUL-bearing chat template keys.
 import { expect, test } from "bun:test";
 import { readGgufSource } from "../../src/gguf/index.ts";
 import { bytesSource } from "../../src/gguf/reader.ts";
@@ -178,7 +178,7 @@ test("ISC-4.2: a duplicated named template key is HIGH too", () => {
 
 // llama.cpp keeps keys as std::string but looks them up with strcmp and C-string map keys, so the part
 // after a NUL is invisible to it. Byte-exact readers would miss these templates entirely.
-test("a lone template key with a NUL is extracted under the name llama.cpp sees, and is HIGH", () => {
+test("ISC-4.3: a lone template key with a NUL is extracted under the name llama.cpp sees, and is HIGH", () => {
   const r = read([
     ["tokenizer.chat_template\u0000x", str("A")],
     ["tokenizer.chat_template.tool_use\u0000y", str("B")],
@@ -193,7 +193,7 @@ test("a lone template key with a NUL is extracted under the name llama.cpp sees,
   expect(r.findings.map((f) => f.templateName)).toEqual(["default", "tool_use", undefined]);
 });
 
-test("ISC-4.2: a NUL alias of the bare template key is HIGH for the NUL and HIGH for the duplicate", () => {
+test("ISC-4.2, ISC-4.3: a NUL alias placed before the bare key is extracted first, HIGH for the NUL and HIGH for the duplicate", () => {
   const r = read([
     ["tokenizer.chat_template\u0000evil", str("evil")],
     ["tokenizer.chat_template", str("clean")],
