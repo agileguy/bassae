@@ -180,6 +180,14 @@ describe("Python json.load parity", () => {
     expect(await messages("bom")).toEqual(["starts with a UTF-8 byte order mark, which Python's json.load rejects"]);
     expect(await messages("syntax")).toEqual(["not valid JSON"]);
   });
+
+  test("a lone surrogate escape is accepted, as Python accepts it, and the template is not valid UTF-8", async () => {
+    const root = makeTree({ m: { "tokenizer_config.json": '{"chat_template": "a\\ud800b"}' } });
+    const r = await readHfModel(join(root, "m"));
+    expect(r.findings).toEqual([]);
+    expect(r.templates.map((t) => [t.text, t.validUtf8])).toEqual([["a�b", false]]);
+    expect(r.extractionComplete).toBe(true);
+  });
 });
 
 describe("a template-bearing source that fails is HIGH and leaves extraction incomplete", () => {
