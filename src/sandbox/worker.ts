@@ -4,7 +4,7 @@
 // It also limits its own CPU time, because the launcher's caps die with the launcher.
 
 import { Template } from "@huggingface/jinja";
-import { dlopen, FFIType, ptr } from "bun:ffi";
+import { dlopen, FFIType, ptr, type FFIFunction } from "bun:ffi";
 import type { RenderFailure, RenderRequest, RenderResult } from "../types.ts";
 import { profileGlobals } from "./profiles.ts";
 import { clip, encode, type ChildMessage, type InitMessage, type RequestMessage } from "./protocol.ts";
@@ -15,7 +15,19 @@ import { clip, encode, type ChildMessage, type InitMessage, type RequestMessage 
 // resource 0 on macOS and Linux, and struct rlimit is two 64-bit counts on both. Loading it before the
 // ready line means a sandbox without it fails to start rather than rendering without a backstop.
 const RLIMIT_CPU = 0;
-const { symbols: libc } = dlopen(process.platform === "darwin" ? "/usr/lib/libSystem.B.dylib" : "libc.so.6", {
+// musl's loader answers to "libc.so.6" with itself, so the one name serves glibc and musl alike.
+const LIBC = process.platform === "darwin" ? "/usr/lib/libSystem.B.dylib" : "libc.so.6";
+
+/** Functions from the C library. Without them there is no CPU backstop, so the worker refuses to start and says why. */
+function fromLibc<Fns extends Record<string, FFIFunction>>(fns: Fns) {
+  try {
+    return dlopen(LIBC, fns).symbols;
+  } catch (e) {
+    throw new Error(`no RLIMIT_CPU backstop, so the worker will not start: cannot load ${LIBC}: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+const libc = fromLibc({
   getrlimit: { args: [FFIType.i32, FFIType.ptr], returns: FFIType.i32 },
   setrlimit: { args: [FFIType.i32, FFIType.ptr], returns: FFIType.i32 },
 });
@@ -29,10 +41,8 @@ if (libc.getrlimit(RLIMIT_CPU, ptr(rlimit)) !== 0) throw new Error("getrlimit(RL
 // macOS writes cores only to /cores, which only root may write, and the default RLIMIT_CORE is 0.
 if (process.platform === "linux") {
   const PR_SET_DUMPABLE = 4;
-  const { symbols } = dlopen("libc.so.6", {
-    prctl: { args: [FFIType.i32, FFIType.u64, FFIType.u64, FFIType.u64, FFIType.u64], returns: FFIType.i32 },
-  });
-  if (symbols.prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) !== 0) throw new Error("prctl(PR_SET_DUMPABLE) failed");
+  const { prctl } = fromLibc({ prctl: { args: [FFIType.i32, FFIType.u64, FFIType.u64, FFIType.u64, FFIType.u64], returns: FFIType.i32 } });
+  if (prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) !== 0) throw new Error("prctl(PR_SET_DUMPABLE) failed");
 }
 
 const min = (a: bigint, b: bigint) => (a < b ? a : b);
