@@ -365,13 +365,13 @@ export function correlateSpans(leaves: Leaf[], tokens: PreToken[], lines: LineMa
 // anywhere along it. Everything else is folded and checked, or it is a dynamic
 // attribute reach. To decide that per use site we first resolve what every local
 // name is bound to, carrying taint through `set`, two-step `set`, namespace-
-// attribute assignment (`set ns.k = ...`), loop variables and macro parameters,
-// including values built inside containers or conditionals.
+// attribute assignment (`set ns.k = ...`) and loop variables (macro parameters
+// are opaque, not runtime), including values built inside containers or conditionals.
 
 /** What a local name resolves to, for the carve-out. */
 export type Binding =
   | { t: "const"; value: FoldValue } // folds to a compile-time constant
-  | { t: "runtime" } //                a loop var, macro parameter, or `set` of runtime-rooted data
+  | { t: "runtime" } //                a loop var or a `set`/`for` target rooted in runtime input data
   | { t: "built" } //                  assembled by a string op, filter, method or call — never exempt
   | { t: "gadget" } //                 an engine-gadget handle (cycler/joiner/lipsum/namespace/dict/self)
   | { t: "opaque" }; //                a local of unknown nature (a call result, a filtered value)
@@ -506,8 +506,11 @@ export function resolveBindings(program: Node): BindingEnv {
           walk(s.defaultBlock);
           continue;
         case "Macro":
+          // A macro parameter is NOT runtime data: the caller controls it and can
+          // pass a literal, a template-built value, or a gadget. It is opaque, so a
+          // param used as a subscript key or attribute path is not exempt (M1/M2).
           for (const a of (s.args as Node[] | undefined) ?? []) {
-            if (a.type === "Identifier") env.set(String(a.value), BINDING_RUNTIME);
+            if (a.type === "Identifier") env.set(String(a.value), BINDING_OPAQUE);
             else if (a.type === "KeywordArgumentExpression") env.set(String((a.key as Node).value), classifyValue(a.value, env));
           }
           walk(s.body);
@@ -542,12 +545,15 @@ function recordNamespaceInit(target: string, value: Node | undefined, env: Bindi
   }
 }
 
-/** True when a subscript/getattr object root is provably runtime data (ISC-14.1, M2 fix 3). */
-export function isDataObject(node: Node, env: BindingEnv): boolean {
-  const root = rootIdentifier(node);
-  if (root === undefined) return false;
-  if (RUNTIME_INPUTS.has(root)) return true;
-  return env.get(root)?.t === "runtime";
+/**
+ * True when a key/attribute/callee node is PROVABLY runtime data: a plain
+ * reference whose binding chain is rooted in a runtime input, with no string
+ * operation, method call or gadget anywhere along it (ISC-14.1). This is the
+ * only exemption — a literal, a template-built value, or a macro parameter is
+ * not runtime (Gemini M1/M2). A direct literal index is handled separately.
+ */
+export function keyIsRuntime(node: Node, env: BindingEnv): boolean {
+  return classifyValue(node, env).t === "runtime";
 }
 
 /** How a key/attribute/callee position resolves (ISC-14, ISC-14.1, ISC-16). */

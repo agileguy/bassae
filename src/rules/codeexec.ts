@@ -14,9 +14,9 @@ import {
   firstLeafSpan,
   gadgetAliases,
   hasDunder,
-  isDataObject,
   isExecName,
   foldLiteral,
+  keyIsRuntime,
   resolveKey,
   type Node,
 } from "../parse/support.ts";
@@ -30,7 +30,7 @@ export interface RuleCtx {
   scaffolding: ReadonlySet<string>;
   file: string;
   templateName: string;
-  sha256: string;
+  templateSha256: string;
 }
 
 // Filters whose `attribute=` keyword names an attribute path to traverse (ISC-14.1).
@@ -76,7 +76,7 @@ export function runCodeExec(ctx: RuleCtx): Finding[] {
       message,
       file: ctx.file,
       templateName: ctx.templateName,
-      templateSha256: ctx.sha256,
+      templateSha256: ctx.templateSha256,
       span: s,
       excerpt: s ? ctx.text.slice(s.start, s.end) : undefined,
     });
@@ -122,8 +122,13 @@ export function runCodeExec(ctx: RuleCtx): Finding[] {
       add("exec_surface", `call rooted at OS/exec surface '${String(base.value)}'`, base);
     }
     const prop = callee.property as Node;
-    // Dotted (.popen) or literal/assembled subscript (['popen']) callee property.
-    const name = prop.type === "Identifier" ? String(prop.value) : resolveKey(prop, env).value;
+    // Resolve the callee's method name. A DOTTED property (`.popen`) is a literal
+    // name, so its identifier text is the name. A COMPUTED property (`obj[k]`) is
+    // a subscript key: it must be resolved through its binding, never read as the
+    // variable's own spelling — otherwise `m[format]()` would fire the .format()
+    // rule merely because the key variable is called `format`, and `s[k]()` with
+    // `k = 'popen'` would be missed (round-2 computed-callee review).
+    const name = !callee.computed && prop.type === "Identifier" ? String(prop.value) : resolveKey(prop, env).value;
     if (name !== undefined && isExecName(name)) {
       add("exec_surface", `call to OS/exec surface '${name}'`, prop);
     }
@@ -152,7 +157,15 @@ export function runCodeExec(ctx: RuleCtx): Finding[] {
           flagged = true;
         }
       }
-      if (!flagged && rk.built) add("dynamic_attribute", `attribute argument to '${name}' is built by a string operation`, attr);
+      if (!flagged) {
+        // The path is benign only when written as a DIRECT string literal in the
+        // template (`attribute='role'`). A value that folds to a const can only
+        // come from a literal or a template-built binding — a runtime value never
+        // folds — so a non-literal here is an attribute name the template controls
+        // (`sort(false, false, k)` with `k` set to a string), which is dynamic (M3).
+        if (rk.built) add("dynamic_attribute", `attribute argument to '${name}' is built by a string operation`, attr);
+        else if (attr.type !== "StringLiteral") add("dynamic_attribute", `attribute argument to '${name}' is reached by a name the template controls`, attr);
+      }
       return;
     }
     // Anything not a plain string literal reaches an attribute by a name we
@@ -217,15 +230,30 @@ export function runCodeExec(ctx: RuleCtx): Finding[] {
       }
 
       // ISC-14.1 — a computed key that reaches an attribute by name. The key is
-      // exempt only when it is provably runtime data: not assembled, and either a
-      // literal index or a reference whose object root is runtime data.
+      // exempt only on the key itself (M1/M2), never on the object: either it is a
+      // DIRECT literal index written in the template (a string, or a number/sign/
+      // arithmetic that folds without the binding env), or it is PROVABLY runtime
+      // data (a plain reference rooted in a runtime input). A key reached through
+      // a binding to a literal, a template-built value, or a macro parameter is
+      // neither, so `m[k]` with a set-held `k` is flagged even when `m` is runtime.
       if (!dunderHit && n.computed) {
         const key = resolveKey(prop, env);
         if (key.built) {
           add("dynamic_attribute", "subscript key built by a string operation", prop);
-        } else if (!isDataObject(n, env)) {
-          const literalIndex = key.value !== undefined || typeof foldLiteral(prop, 0, env) === "number";
-          if (!literalIndex) add("dynamic_attribute", "subscript with a non-literal key on a non-runtime object", prop);
+        } else {
+          // Only a STRING key can name an attribute, so a key that is benign is:
+          // a slice (`x[::-1]`), a numeric index however it is derived (a number
+          // never names an attribute), a direct string literal in the template
+          // (`x['content']` — dunder literals are caught by the catch-all), or a
+          // string that is provably runtime data. A string reached through a
+          // binding to a literal, a template-built value or a macro parameter is
+          // none of these, so `m[k]` with a set-held `k` is flagged (M1/M2).
+          const benign =
+            prop.type === "SliceExpression" ||
+            typeof foldLiteral(prop, 0, env) === "number" ||
+            prop.type === "StringLiteral" ||
+            keyIsRuntime(prop, env);
+          if (!benign) add("dynamic_attribute", "subscript key is neither a literal nor runtime data", prop);
         }
       }
     }

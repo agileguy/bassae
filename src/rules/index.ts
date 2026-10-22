@@ -3,24 +3,29 @@
 // ISC-14.1, ISC-15, ISC-15.1, ISC-16, and ISC-26.1 (every span comes from the
 // pre-lexer).
 //
-// analyzeCodeExec never throws and always returns a RuleResult: any input up to
-// the readers' 16 MiB ceiling is answered (round-1 review item 1). Its result
-// does not depend on stack size (item 2: pre-parse shape caps in parse.ts plus
-// explicit-stack walkers) and is bounded in time (item 3: linear pre-checks, a
-// per-rule finding cap, and a bounded raw-text fallback).
+// analyzeCodeExec never throws and always returns a RuleResult: any input the
+// readers can hand us — up to the 64 MiB per-file limit (hf/sources.ts) — is
+// answered (round-1 review item 1). Its result does not depend on stack size
+// (item 2: pre-parse shape caps in parse.ts plus explicit-stack walkers), is
+// bounded in time (item 3: linear pre-checks, a per-rule finding cap, a bounded
+// raw-text fallback) and in memory (round-2 memory review: over the size cap no full token
+// array or line map is built; the raw-text fallback streams).
 
-import type { AnalysisContext, Finding, RuleId, RuleResult } from "../types.ts";
+import type { AnalysisContext, Finding, RuleId, RuleResult, Severity } from "../types.ts";
+import { SEVERITY_RANK } from "../types.ts";
 import { parseTemplate } from "../parse/parse.ts";
 import { hasDunderName, resolveBindings, type Node } from "../parse/support.ts";
 import { runCodeExec, type RuleCtx } from "./codeexec.ts";
 import { runFold } from "./fold.ts";
-import { runRawText } from "./rawtext.ts";
+import { runRawText, runRawTextStreaming } from "./rawtext.ts";
 import { runUnanalyzable } from "./unanalyzable.ts";
 
+// The finding fields every rule stamps onto its output. Named exactly as on
+// Finding so tsc rejects a stray `sha256` (review item M7).
 interface Base {
   file: string;
   templateName: string;
-  sha256: string;
+  templateSha256: string;
 }
 
 // At most this many findings per rule survive; one summary finding then carries
@@ -33,7 +38,7 @@ const MAX_EXCERPT = 200;
 
 export function analyzeCodeExec(ctx: AnalysisContext): RuleResult {
   const t = ctx.template;
-  const base: Base = { file: t.source.path, templateName: t.source.name, sha256: t.sha256 };
+  const base: Base = { file: t.source.path, templateName: t.source.name, templateSha256: t.sha256 };
   try {
     return analyze(ctx, base);
   } catch (e) {
@@ -66,8 +71,12 @@ function analyze(ctx: AnalysisContext, base: Base): RuleResult {
     pushAll(findings, runCodeExec(ruleCtx)); //                     ISC-13, 13.1, 14.1, 15, 15.1, 16
     pushAll(findings, runFold(ruleCtx)); //                         ISC-14
     pushAll(findings, runStringLiteralDunder(outcome, ctx, base)); // ISC-13 catch-all (item 5)
-  } else {
-    // No AST: the raw-text forms of ISC-13 to ISC-16 still run (ISC-12).
+  } else if (outcome.oversized) {
+    // Over the size cap: no token array or line map was built (round-2 memory review). The
+    // raw-text forms of ISC-13 to ISC-16 still run, as a bounded streaming scan.
+    pushAll(findings, runRawTextStreaming(t.text, base));
+  } else if (outcome.pre && outcome.lines) {
+    // No AST (parse error or a shape cap): the raw-text forms still run (ISC-12).
     pushAll(findings, runRawText(outcome.pre.regions, outcome.lines, t.text, base));
   }
 
@@ -84,6 +93,7 @@ function analyze(ctx: AnalysisContext, base: Base): RuleResult {
 // subscript key, a selectattr argument. The folder handles split fragments.
 function runStringLiteralDunder(outcome: ReturnType<typeof parseTemplate>, ctx: AnalysisContext, base: Base): Finding[] {
   const out: Finding[] = [];
+  if (!outcome.pre || !outcome.lines) return out;
   for (const lit of outcome.pre.stringLiterals) {
     if (!hasDunderName(lit.value) || ctx.scaffolding.has(lit.value)) continue;
     const span = outcome.lines.span(lit.start, lit.end);
@@ -127,10 +137,13 @@ function capPerRule(findings: Finding[], base: Base): Finding[] {
   const kept: Finding[] = [];
   const counts = new Map<RuleId, number>();
   const suppressed = new Map<RuleId, number>();
-  const severity = new Map<RuleId, Finding["severity"]>();
+  const severity = new Map<RuleId, Severity>();
   for (const f of findings) {
+    // The summary carries the HIGHEST severity seen for the rule, not the first
+    // (review item C): a suppressed HIGH must not be summarized as MEDIUM.
+    const prev = severity.get(f.ruleId);
+    if (!prev || SEVERITY_RANK[f.severity] > SEVERITY_RANK[prev]) severity.set(f.ruleId, f.severity);
     const c = counts.get(f.ruleId) ?? 0;
-    if (!severity.has(f.ruleId)) severity.set(f.ruleId, f.severity);
     if (c < FINDING_CAP) {
       kept.push(f);
       counts.set(f.ruleId, c + 1);

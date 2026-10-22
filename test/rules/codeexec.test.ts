@@ -278,3 +278,79 @@ test("T9: clean stock templates produce no HIGH and no dunder_access", () => {
     expect({ file, dunder: fs.some((f) => f.ruleId === "dunder_access") }).toEqual({ file, dunder: false });
   }
 });
+
+// --- Review round 2, wave 2 -------------------------------------------------
+
+// Carve-out (Gemini M1/M2) — a subscript key is exempt ONLY when it is a direct
+// literal index or provably runtime data. A key reached through a binding to a
+// literal, a template-built value, or a macro parameter is not, so calling a
+// value fetched by such a key is HIGH even when it folds to a benign string.
+test("carve-out: a key held in a non-runtime binding is dynamic, not exempt", () => {
+  // s and k are template literals; s[k]() dynamically invokes a method by a name
+  // the template controls.
+  expect(highs("{% set s = 'abc' %}{% set k = 'upper' %}{{ s[k]() }}")).toContain("dynamic_attribute");
+  // A loop item is runtime, but a set-held key is still template-built.
+  expect(highs("{% set k = 'upper' %}{% for m in messages %}{{ m[k]() }}{% endfor %}")).toContain("dynamic_attribute");
+  // A macro parameter is caller-controlled, not runtime: a param key is dynamic.
+  expect(highs("{% macro f(p) %}{{ messages[0][p] }}{% endmacro %}")).toContain("dynamic_attribute");
+  // The exemptions still hold: a direct literal index, a numeric index however
+  // derived, a slice, and a provably-runtime key are all benign.
+  expect(highs("{{ messages[0]['content'] }}")).toHaveLength(0);
+  expect(highs("{% set ns = namespace(i=0) %}{% set ns.i = ns.i + 1 %}{{ messages[ns.i] }}")).toHaveLength(0);
+  expect(highs("{{ messages[::-1] }}")).toHaveLength(0);
+  expect(highs("{% for key in message %}{{ message[key] }}{% endfor %}")).toHaveLength(0);
+});
+
+// Round-2 computed-callee review — a computed callee property is resolved through
+// its binding, never by the variable's own spelling.
+test("computed-callee review: a computed callee key resolves through its binding, not its name", () => {
+  // `k` holds an exec surface: resolving the binding catches it.
+  expect(highs("{% set s = 'x' %}{% set k = 'popen' %}{{ s[k]() }}")).toContain("exec_surface");
+  // `format` is an unbound variable used as a key. It must NOT fire the .format()
+  // rule merely because it is spelled "format"; the subscript is dynamic instead.
+  const fs = scan("{% for m in messages %}{{ m[format]() }}{% endfor %}");
+  expect(fs.some((f) => f.ruleId === "format_traversal")).toBe(false);
+  expect(fs.some((f) => /\.format\(\)/.test(f.message))).toBe(false);
+  // A real str.format() is still caught.
+  expect(highs("{{ payload.format(x) }}")).toContain("dynamic_attribute");
+});
+
+// M3 (wave 2) — a positional attribute argument that is a template-controlled
+// name (not a direct literal) is dynamic; a direct literal exec path is caught.
+test("M3: positional attribute args — variable name is dynamic, literal exec is exec", () => {
+  expect(highs("{% set k = 'x' %}{{ (messages | sort(false, false, k)) | list }}")).toContain("dynamic_attribute");
+  expect(highs("{% set k = 'x' %}{{ (messages | unique(false, k)) | list }}")).toContain("dynamic_attribute");
+  expect(highs("{{ (messages | sort(false, false, 'os.system')) | list }}")).toContain("exec_surface");
+  // A direct literal attribute name stays benign.
+  expect(highs("{{ (messages | sort(false, false, 'role')) | list }}")).toHaveLength(0);
+});
+
+// ISC-14 (wave 2) — folding covers slices, replace, concat escapes, and |reverse.
+test("ISC-14: slice, replace, escape-concat, and |reverse all fold to the dunder", () => {
+  expect(highs("{{ messages[0]['__ssalc__'[::-1]] }}")).toContain("dunder_access");
+  expect(highs("{{ messages[0][('__ssalc__'|reverse)] }}")).toContain("dunder_access");
+  expect(highs("{{ messages[0][('__XYZ__'|replace('XYZ','class'))] }}")).toContain("dunder_access");
+  expect(highs("{{ messages[0][('XX__class__YY'[2:11])] }}")).toContain("dunder_access");
+});
+
+// M7 — every finding stamps `templateSha256`, never a stray `sha256`.
+test("M7: findings carry templateSha256 and never a sha256 key", () => {
+  const dir = join(import.meta.dir, "../../fixtures/malicious/codeexec");
+  const fixtures = readdirSync(dir).filter((f) => f.endsWith(".jinja")).map((f) => readFileSync(join(dir, f), "utf8"));
+  const probes = [
+    "{{ messages[0].__class__ }}",
+    "{% set s = 'abc' %}{% set k = 'upper' %}{{ s[k]() }}",
+    "{{ (messages | sort(false, false, ns.k)) | list }}",
+    "{% with x = 1 %}{{ x }}{% endwith %}", // unanalyzable path
+    "{{ x | unknownfilter }}", // unsupported path
+  ];
+  let checked = 0;
+  for (const src of [...fixtures, ...probes]) {
+    for (const f of findings(src)) {
+      checked++;
+      expect({ src: src.slice(0, 32), has: typeof f.templateSha256 }).toEqual({ src: src.slice(0, 32), has: "string" });
+      expect({ src: src.slice(0, 32), stray: "sha256" in f }).toEqual({ src: src.slice(0, 32), stray: false });
+    }
+  }
+  expect(checked).toBeGreaterThan(0);
+});

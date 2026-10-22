@@ -190,3 +190,28 @@ test("N3: a .join(...) method call is MEDIUM unanalyzable and incomplete", () =>
   // The |join filter is implemented and stays complete.
   expect(scan("{{ parts | join('-') }}").complete).toBe(true);
 });
+
+// Item C — the per-rule cap's summary finding carries the HIGHEST severity seen
+// for that rule, not the first finding's: a MEDIUM finding appearing before many
+// suppressed HIGH ones must not downgrade the summary to MEDIUM.
+test("item C: the cap summary reports the highest severity, not the first finding's", () => {
+  // >100 HIGH findings (filter names that are not jinja2 builtins) and one MEDIUM
+  // (an unimplemented jinja2 builtin), all under the `unanalyzable` rule. The
+  // source-order walk emits the last-written tag first, so the MEDIUM comes out
+  // FIRST — a genuine first-vs-max distinction.
+  const src = Array.from({ length: 110 }, (_, i) => `{{ x | zq${i} }}`).join("") + "{{ x | wordwrap }}";
+  const r = scan(src);
+  expect(r.findings.find((f) => f.ruleId === "unanalyzable")!.severity).toBe("MEDIUM");
+  const summary = r.findings.find((f) => f.ruleId === "unanalyzable" && f.detail?.suppressed !== undefined);
+  expect(summary).toBeDefined();
+  expect(summary!.severity).toBe("HIGH");
+});
+
+// Item D — the unanalyzable finding carries the REAL reason from a size/shape cap
+// (parseError), not a generic "too large" blurb.
+test("item D: a size/shape cap reports its specific reason", () => {
+  const ws = scan(`{{ x }}${" ".repeat(600)}{{ y }}`);
+  expect(ws.findings.find((f) => f.ruleId === "unanalyzable")!.message).toContain("whitespace run of");
+  const deep = scan("{% if a0 %}x" + Array.from({ length: 140 }, (_, i) => `{% elif a${i + 1} %}x`).join("") + "{% endif %}");
+  expect(deep.findings.find((f) => f.ruleId === "unanalyzable")!.message).toContain("block nesting deeper than 128");
+});
