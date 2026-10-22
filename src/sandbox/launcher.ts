@@ -151,7 +151,10 @@ process.on("exit", killLive);
 // time: a host program that lives through one may start more workers. When no one else listens, the
 // listener steps aside and raises the signal again, so it takes its default action as if we had not
 // been here, and cannot come back to us. Nothing runs on SIGKILL or an OOM kill: bwrap's
-// --die-with-parent covers Linux, and the worker's own CPU limit covers macOS.
+// --die-with-parent covers Linux. On macOS the orphaned worker runs on until it next writes to its
+// dead parent, at the end of the step it is in, and dies of the broken pipe. A step that never ends
+// dies at the worker's own CPU limit: timeoutMs and a second, rounded up to a whole second, so an
+// orphan costs less than timeoutMs + 2 s of CPU time.
 let handlingSignals = false;
 function killLiveOnSignals(): void {
   if (handlingSignals) return;
@@ -311,9 +314,10 @@ export async function runWorker(
   // JSON escaping can grow output up to six-fold. Past that, plus room for the envelope and a message,
   // nothing the worker sends between two results is well-formed, whatever kind of line it is.
   const perRequest = limits.maxOutputBytes * 6 + 65536;
-  // The worker's own CPU limit per step. The parent's timer should always fire first, but GC and JIT
-  // threads count towards CPU time too, so it allows twice the timeout and a second more.
-  const cpuMs = limits.timeoutMs * 2 + 1000;
+  // The worker's own CPU limit per step, the backstop for an orphan, so it is kept tight. GC and JIT
+  // threads count towards CPU time too: a render that allocates hard uses about 1.3 s of CPU a second,
+  // so past a timeout of 3 s or so it can reach this limit before the timer. Either way it is a timeout.
+  const cpuMs = limits.timeoutMs + 1000;
 
   return new Promise<WorkerRun>((resolve) => {
     const results: RenderResult[] = [];
@@ -401,7 +405,7 @@ export async function runWorker(
       const code = await proc.exited;
       const detail = await stderr;
       if (settled) return;
-      // SIGXCPU is the worker's own CPU limit, so its parse or render ran far too long. bwrap reports
+      // SIGXCPU is the worker's own CPU limit, so its parse or render ran too long. bwrap reports
       // a child killed by a signal as exit 128 + the signal.
       if (proc.signalCode === "SIGXCPU" || (kind === "bwrap" && code === 128 + constants.signals.SIGXCPU)) {
         return fail("timeout", `worker exceeded its ${cpuMs}ms CPU limit`);

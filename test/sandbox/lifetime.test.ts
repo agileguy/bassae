@@ -178,8 +178,8 @@ test.skipIf(!status.available)(
     const { survivors, ms } = await killMidRender("block", "SIGKILL", 15_000);
     console.log(`[sandbox] worker gone ${ms.toFixed(0)}ms after SIGKILL to its hung parent`);
     expect(survivors).toEqual([]);
-    // The worker's own CPU limit for one render at timeoutMs 1000 is 3 seconds.
-    expect(ms).toBeLessThan(5000);
+    // The worker's own CPU limit for one render at timeoutMs 1000 is 2 seconds, rounded up to a whole second.
+    expect(ms).toBeLessThan(4000);
   },
   30_000,
 );
