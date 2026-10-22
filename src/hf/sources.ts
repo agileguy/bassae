@@ -16,6 +16,16 @@ export const HF_SOURCE_NAMES: ReadonlySet<string> = new Set([
 // Real tokenizer.json files reach ~35 MB; anything past this is refused rather than read into memory.
 export const MAX_SOURCE_BYTES = 64 * 1024 * 1024;
 
+/** What one model may read. Going past either is a finding, never a silent stop. */
+export interface ReadLimits {
+  /** Bytes across every source the model reads, tokenizer.json included. */
+  maxBytes: number;
+  /** additional_chat_templates/*.jinja files read; the directory is the one source with no natural bound. */
+  maxAdditional: number;
+}
+
+export const DEFAULT_READ_LIMITS: ReadLimits = { maxBytes: 128 * 1024 * 1024, maxAdditional: 1000 };
+
 // Fatal and BOM-preserving, so a file Python's json.load would reject is rejected here too.
 const strictUtf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
@@ -69,6 +79,15 @@ async function readAdditional(dir: string, reader: SourceReader): Promise<Extrac
   } catch (e) {
     if (!(await isAbsent(e, dir))) reader.fail("template", dir, "cannot list additional_chat_templates", e);
     return [];
+  }
+  const max = reader.limits.maxAdditional;
+  if (names.length > max) {
+    const rest = names.slice(max);
+    reader.fail("template", dir, `${names.length} .jinja files, over the limit of ${max}; the rest were not read`, undefined, {
+      skipped: rest.slice(0, 20),
+      skippedCount: rest.length,
+    });
+    names = names.slice(0, max);
   }
   const out: ExtractedTemplate[] = [];
   for (const name of names) {
@@ -147,15 +166,28 @@ function fileType(st: Stats): string {
 export class SourceReader {
   readonly findings: Finding[] = [];
   complete = true;
+  readonly limits: ReadLimits;
+  private bytesRead = 0;
+
+  constructor(limits: Partial<ReadLimits> = {}) {
+    this.limits = { ...DEFAULT_READ_LIMITS, ...limits };
+  }
 
   /** An absent file is silently undefined; one that exists but cannot be read is a finding. */
   async file(path: string, role: Role): Promise<Loaded | undefined> {
+    const left = Math.max(0, this.limits.maxBytes - this.bytesRead);
     try {
-      const got = await readRegularFile(path, MAX_SOURCE_BYTES);
-      return got && { path, ...got };
+      const got = await readRegularFile(path, Math.min(MAX_SOURCE_BYTES, left));
+      if (!got) return undefined;
+      this.bytesRead += got.bytes.length;
+      return { path, ...got };
     } catch (e) {
-      if (e instanceof ReadFailure) this.fail(role, path, e.message, undefined, e.size === undefined ? undefined : { size: e.size });
-      else this.fail(role, path, "cannot read", e);
+      if (!(e instanceof ReadFailure)) this.fail(role, path, "cannot read", e);
+      else if (e.size === undefined) this.fail(role, path, e.message);
+      else {
+        const why = e.size > MAX_SOURCE_BYTES ? `over the ${MAX_SOURCE_BYTES}-byte limit for one file` : `over the model's byte budget (${left} of ${this.limits.maxBytes} left)`;
+        this.fail(role, path, `${e.size} bytes, ${why}; not read`, undefined, { size: e.size });
+      }
       return undefined;
     }
   }

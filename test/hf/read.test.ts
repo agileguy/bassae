@@ -315,6 +315,35 @@ describe("no hostile file can hang the read", () => {
   });
 });
 
+describe("per-model read budget", () => {
+  test("sources past the byte budget are findings, not silently dropped", async () => {
+    const root = makeTree({
+      m: {
+        "chat_template.jinja": "x".repeat(60),
+        additional_chat_templates: { "a.jinja": "y".repeat(60) },
+        "tokenizer.json": json({ added_tokens: [], pad: "z".repeat(60) }),
+      },
+    });
+    const r = await readHfModel(join(root, "m"), { maxBytes: 100 });
+    expect(summary(r).map((s) => s.kind)).toEqual(["chat_template_jinja"]);
+    expect(failures(r)).toEqual([
+      ["parse_error", "HIGH", join(root, "m/additional_chat_templates/a.jinja")],
+      ["parse_error", "MEDIUM", join(root, "m/tokenizer.json")],
+    ]);
+    expect(r.findings[0]!.message).toContain("byte budget");
+    expect(r.extractionComplete).toBe(false);
+  });
+
+  test("additional templates past the file budget are reported by name", async () => {
+    const root = makeTree({ m: { additional_chat_templates: { "a.jinja": "A", "b.jinja": "B", "c.jinja": "C" } } });
+    const r = await readHfModel(join(root, "m"), { maxAdditional: 2 });
+    expect(summary(r).map((s) => s.name)).toEqual(["a", "b"]);
+    expect(failures(r)).toEqual([["parse_error", "HIGH", join(root, "m/additional_chat_templates")]]);
+    expect(r.findings[0]!.detail?.skipped).toEqual(["c.jinja"]);
+    expect(r.extractionComplete).toBe(false);
+  });
+});
+
 describe("special tokens", () => {
   test("tokenizer.json added_tokens plus tokenizer_config.json added_tokens_decoder, deduplicated", async () => {
     const root = makeTree({

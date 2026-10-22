@@ -2,13 +2,13 @@ import { realpath, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { ModelRecord } from "../types.ts";
 import { firstHfCacheLocation } from "./cache.ts";
-import { problem, readTemplateSources, SourceReader } from "./sources.ts";
+import { problem, type ReadLimits, readTemplateSources, SourceReader } from "./sources.ts";
 import { specialTokensFrom } from "./tokens.ts";
 
-/** Reads every template source in an HF/MLX model directory. Never throws on bad input. */
-export async function readHfModel(dir: string): Promise<ModelRecord> {
+/** Reads every template source in an HF/MLX model directory, within `limits`. Never throws on bad input. */
+export async function readHfModel(dir: string, limits: Partial<ReadLimits> = {}): Promise<ModelRecord> {
   const path = resolve(dir);
-  const reader = new SourceReader();
+  const reader = new SourceReader(limits);
   const record: ModelRecord = {
     format: "hf",
     id: path,
