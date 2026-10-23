@@ -335,6 +335,5 @@ describe("the real binary", () => {
     for (const f of files) expect(readFileSync(f, "utf8")).not.toMatch(/\bfetch\(|Bun\.connect|node:(net|http|https|dgram|tls)\b|Bun\.spawn|child_process/);
   });
 
-  test.todo("a whole scan of a fixture tree prints the ranked report and exits with its code (needs the scan pipeline)");
-  test.todo("--extract on a real fixture model writes its templates (needs loadModels)");
+  // Whole scans and --extract on real fixture trees: test/e2e.
 });

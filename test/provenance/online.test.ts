@@ -573,9 +573,19 @@ describe("HubClient.range, for GGUF prefixes", () => {
 });
 
 describe("network code stays in online.ts (ISC-36)", () => {
+  const root = join(import.meta.dir, "..", "..");
+  // Network calls and listeners, and any import or require of a network module, with or without node:.
+  const network =
+    /\bfetch\s*\(|=\s*fetch\b|globalThis\.fetch|Bun\.connect|Bun\.listen|WebSocket|(?:from|import\s*\(|require\s*\()\s*["'](?:node:)?(?:net|http|https|http2|tls|dgram|dns)(?:\/promises)?["']/;
+
+  test("the pattern is live: online.ts matches it, and so does every spelling of a network import", () => {
+    expect(network.test(readFileSync(join(root, "src", "provenance", "online.ts"), "utf8"))).toBe(true);
+    for (const line of ['import { connect } from "node:net";', "import http from 'http';", 'await import("node:https")', 'require("tls")', 'import { lookup } from "node:dns/promises";']) {
+      expect({ line, matches: network.test(line) }).toEqual({ line, matches: true });
+    }
+  });
+
   test("no other source file or script reaches the network; build-registry goes through HubClient", () => {
-    const root = join(import.meta.dir, "..", "..");
-    const network = /\bfetch\s*\(|=\s*fetch\b|globalThis\.fetch|Bun\.connect|Bun\.listen|WebSocket|from "node:(net|http|https|http2|tls|dgram)"/;
     const offenders: string[] = [];
     const walk = (dir: string) => {
       for (const e of readdirSync(dir, { withFileTypes: true })) {
