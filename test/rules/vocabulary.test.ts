@@ -269,4 +269,48 @@ test("ISC-18: an equality between two id fields pairs a call with its result and
 
 test("ISC-18: an id against a constant or against any other field is still a content test", () => {
   expectContent(["m.id == 'x'", "m.tool_call_id == 'call_1'", "tc.id == m.content", "m.name == m.tool_call_id", "m.name == 'sudo'", "tc.id < m.tool_call_id", "tc.function.name == m.tool_call_id"]);
+  // An id that may be a constant instead: a branch, a default or `or` puts one
+  // where the join expects only ids.
+  expectContent([
+    "m.id == (tc.id if false else 'sudo')",
+    "m.id == tc.id|default('sudo')",
+    "m.id == (tc.id or 'sudo')",
+    "m.id == (tc.id if tc.type else 'sudo')",
+    "m.id == tc.id|d('sudo')",
+    "(tc.id if false else 'sudo') == m.tool_call_id",
+    "m.id == (tc.id if false else 7)",
+    "m.id == tc.get('id', 'sudo')",
+    "m.tool_call_id == tc.get('id', m.name)",
+    "m.id == (tc if false else {'id': 'sudo'}).id",
+    "m.id == [tc.id, 'sudo']|first",
+  ]);
+});
+
+test("ISC-18: an id variable that may hold a constant is still a content test", () => {
+  const src = (pre: string, t: string) => `{% for m in messages %}{% for tc in m.tool_calls %}${pre}{% if ${t} %}${INJ}{% endif %}{% endfor %}{% endfor %}`;
+  const content: [string, string][] = [
+    ["{% set i = tc.id if false else 'sudo' %}", "m.id == i"],
+    ["{% set i = 'sudo' %}{% if tc.type %}{% set i = tc.id %}{% endif %}", "m.id == i"],
+    ["{% set ns = namespace(i='sudo') %}{% if tc.type %}{% set ns.i = tc.id %}{% endif %}", "m.id == ns.i"],
+  ];
+  for (const [pre, t] of content) expect({ pre, t, cls: cls(src(pre, t)), highs: highs(src(pre, t)) }).toEqual({ pre, t, cls: "content", highs: ["content_trigger"] });
+  const pre = "{% set i = tc.id %}";
+  expect({ cls: cls(src(pre, "m.tool_call_id == i")), highs: highs(src(pre, "m.tool_call_id == i")) }).toEqual({ cls: "presence", highs: [] });
+});
+
+// The same join on a count or a typed field: the constant a branch or default
+// may give is compared too.
+test("ISC-18: a count or a type that may be a constant instead is judged as that constant too", () => {
+  expectContent([
+    "messages|length > (1 if false else 40)",
+    "p.type == (p.type if false else 'xyzzy')",
+    "messages|length > (messages|length if false else 40)",
+    "(messages|length if false else 40) < messages|length",
+    "messages|length > ((messages|length if false else 40) + 0)",
+    "messages|length > messages|length|default(40)",
+    "messages|length > (m.content if false else 'a fixed forty-character threshold text')|length",
+    "(p.type if false else m.name|string) == 'image'",
+  ]);
+  expectPresence(["p.type|default('text') == 'image'", "(p.type if false else 'xyzzy') == 'image'", "(messages|length if false else 40) > 0", "'type' in (p if false else {'type': 'image'})"]);
+  expectContent(["'sudo' in (p if false else m.name|string)"]);
 });
