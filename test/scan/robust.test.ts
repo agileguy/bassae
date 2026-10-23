@@ -151,6 +151,21 @@ describe("contracts SF10: scan-level findings are finalized like every other", (
   });
 });
 
+describe("contracts r2 SF4: differential rendering's own gaps reach the template", () => {
+  test("a gap returned with complete: true still makes the template incomplete, and the scan exits 3", async () => {
+    const root = makeTree({ m: hfModel(CHATML) });
+    const report = await scan(
+      options([root], {
+        diffRender: async () => ({ findings: [], complete: true, probes: { total: 1, rendered: 1, refused: 0, failed: 0 }, gaps: ["the 32 MiB output budget was spent"] }),
+      }),
+    );
+    const t = report.models[0]!.templates[0]!;
+    expect(t.gaps).toContain("differential rendering incomplete: the 32 MiB output budget was spent");
+    expect(t.status).toBe("incomplete");
+    expect(report.exitCode).toBe(3);
+  });
+});
+
 describe("renderer", () => {
   test("runtime 1: an `unavailable` inherited from a polluted Object.prototype does not switch rendering off", async () => {
     const root = makeTree({ m: hfModel(CHATML) });
