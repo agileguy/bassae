@@ -14,12 +14,16 @@
 // from the join of its entry and what the body left on earlier passes, computed
 // to a fixpoint, so a loop-carried value is never missed. Macros are inlined at
 // every call site, so their emissions inherit the call site's conditions
-// (ISC-18).
+// (ISC-18); a call the walk cannot resolve runs every macro the template used
+// as a value. An assignment under a test carries the test onto its literals,
+// except text the test only moves: what the variable already held, and text
+// split out of the value the test reads, when that text is printed another way.
 //
-// The walk is bounded: a work budget over every node visit, a cap on literals
-// per value, a cap on macro inlining depth (a recursive macro is unrolled
-// twice), and explicit-stack walkers for the span helpers. Hitting any bound
-// sets `complete` false rather than throwing (ISC-42.1).
+// The walk is bounded: a work budget over every node visit and every literal
+// copied, a cap on literals per value, a budget on folded constants, a cap on
+// macro inlining depth (a recursive macro is unrolled twice), and explicit-
+// stack walkers for the span helpers. Hitting any bound sets `complete` false
+// rather than throwing (ISC-42.1), and the text between tags is still reported.
 
 import type { InjectedText, Span } from "../types.ts";
 import { WHOLE_TEMPLATE, type ParseOutcome } from "../parse/parse.ts";
