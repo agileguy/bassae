@@ -100,7 +100,10 @@ describe.skipIf(!status.available)("render_divergence (ISC-22)", () => {
       expect(f!.severity).toBe("HIGH");
       const detail = f!.detail as { words: string[]; probes: { probe: string }[] };
       expect(detail.words).toContain("Quillfeather");
-      expect(detail.probes.every((p) => p.probe.startsWith("date:2036"))).toBe(true);
+      // The fixed 2036 probes cross the gate, and so does the probe built from the template's own year candidate (2031).
+      expect(detail.probes.every((p) => p.probe.startsWith("date:"))).toBe(true);
+      expect(detail.probes.some((p) => p.probe.startsWith("date:2036"))).toBe(true);
+      expect(detail.probes.some((p) => p.probe === "date:2031-07-15")).toBe(true);
       expect(text.slice(f!.span!.start, f!.span!.end)).toContain("Quillfeather vendor");
       expect(f!.excerpt).toContain("Quillfeather");
       expect(r.complete).toBe(true);
