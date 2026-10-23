@@ -15,7 +15,7 @@ export { type CandidateHint, upstreamCandidateHints, upstreamCandidates } from "
 // stays in one file.
 export { type FetchOptions, fetchUpstream, UpstreamError } from "./online.ts";
 
-/** The trusted baseline for a template: the registry entry it matches or that is pinned to its repo, else a fetched upstream, else `none` (ISC-41.2). Never a sibling file, never a `general.*` guess. */
+/** The trusted baseline for a template: the registry entry it matches (the caller's own RegistryMatch, the one that set knownGood) or that is pinned to its repo, else a fetched upstream, else `none` (ISC-41.2). Never a sibling file, never a `general.*` guess. */
 export { selectBaseline } from "./baseline.ts";
 
 /** registry_divergence findings against a trusted baseline (ISC-25). Severity is the highest rule that fires on added or changed spans; changed literal text with no rule is MEDIUM; a control-flow-only rewrite whose probe output is identical is LOW. `analyze` runs every static rule on a template; `renderer` compares probe output. */

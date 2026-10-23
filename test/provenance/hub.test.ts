@@ -32,6 +32,15 @@ describe("hub ids", () => {
     }
   });
 
+  test("rejects the hub's own paths as namespaces: datasets/x and spaces/x are not model repos (round-1 review)", () => {
+    for (const id of ["datasets/x", "spaces/x", "Datasets/x", "SPACES/x", "api/x", "models/x", "organizations/x"]) {
+      expect(repoIdProblem(id)).toContain("not a model namespace");
+    }
+    // Only the namespace: a model may be named like a hub path.
+    expect(isRepoId("acme/datasets")).toBe(true);
+    expect(isRepoId("datasets-org/spaces")).toBe(true);
+  });
+
   test("a revision is a full 40-hex commit", () => {
     expect(normalizeRevision("7ae557604adf67be50417f59c2c2f167def9a775")).toBe("7ae557604adf67be50417f59c2c2f167def9a775");
     expect(normalizeRevision("7AE557604ADF67BE50417F59C2C2F167DEF9A775")).toBe("7ae557604adf67be50417f59c2c2f167def9a775");

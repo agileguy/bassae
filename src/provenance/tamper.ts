@@ -12,19 +12,29 @@
 //   as three lines: commit hash, etag, timestamp (_local_folder.py,
 //   write_download_metadata).
 //
+// huggingface_hub writes every snapshot file as a link into its repo's blobs/
+// (file_download.py _create_symlink; it copies only where links are unsupported,
+// as on Windows without developer mode). A covered file in a snapshot that is not
+// such a link, with no download record either, has lost the record that would
+// check it: editing the file in place (sed -i writes a new regular file over the
+// link) leaves exactly that. It is MEDIUM local_tamper, with the reason in detail.
+//
 // By default only the template- and token-bearing files the readers open are
-// hashed: HF_SOURCE_NAMES plus tokenizer.json. Hashing every blob, weights and
-// GGUFs included, is opt-in (hashAll), because ISC-8 bounds a 40 GB GGUF scan at
-// under a second and hashing one takes minutes. Files are opened read-only and
-// streamed; nothing is written, locked or touched. An intact file never yields a
-// finding. A tamperer who rewrites the record as well goes unseen here; that is
-// what the registry and upstream comparisons are for.
+// hashed: HF_SOURCE_NAMES plus tokenizer.json, each up to the readers' own
+// per-file cap (a larger one is a MEDIUM scanner_error, unhashed: the readers
+// refuse it anyway). Hashing every blob, weights and GGUFs included, is opt-in
+// (hashAll), with no size cap, because ISC-8 bounds a 40 GB GGUF scan at under a
+// second and hashing one takes minutes. Files are opened read-only and streamed;
+// nothing is written, locked or touched. An intact file never yields a finding.
+// A tamperer who rewrites the record as well goes unseen here; that is what the
+// registry and upstream comparisons are for.
 
 import { createHash, type Hash } from "node:crypto";
 import { constants } from "node:fs";
 import { type FileHandle, lstat, open, readdir, readlink, realpath, stat } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve } from "node:path";
-import { HF_SOURCE_NAMES } from "../hf/sources.ts";
+import { parseHfCachePath } from "../hf/cache.ts";
+import { HF_SOURCE_NAMES, MAX_SOURCE_BYTES } from "../hf/sources.ts";
 import type { Finding, ModelRecord } from "../types.ts";
 
 export interface TamperOptions {
@@ -32,6 +42,8 @@ export interface TamperOptions {
   hashAll?: boolean;
   /** With hashAll, the most files hashed per model; past it a finding says the rest were not checked. */
   maxFiles?: number;
+  /** The largest file hashed; a larger one is a scanner_error instead. Default the readers' per-file cap, 64 MiB, or no cap with hashAll. */
+  maxBytes?: number;
 }
 
 const DEFAULT_MAX_FILES = 100_000;
@@ -67,11 +79,12 @@ function algorithmOf(etag: string): Algorithm | undefined {
   return undefined;
 }
 
-/** HIGH local_tamper for each covered file whose content no longer matches its HF cache blob name or download metadata record (ISC-40). Never throws. */
+/** HIGH local_tamper for each covered file whose content no longer matches its HF cache blob name or download metadata record, and MEDIUM for one in a cache snapshot left with neither (ISC-40). Never throws. */
 export async function checkLocalTamper(model: ModelRecord, options: TamperOptions = {}): Promise<Finding[]> {
   const findings: Finding[] = [];
   const seen = new Set<string>();
   const metadataRoots = new Map<string, boolean>();
+  const maxBytes = options.maxBytes ?? (options.hashAll ? Number.POSITIVE_INFINITY : MAX_SOURCE_BYTES);
   for (const file of await coveredFiles(model, options, findings)) {
     try {
       const realDir = await realpath(dirname(file));
@@ -79,7 +92,8 @@ export async function checkLocalTamper(model: ModelRecord, options: TamperOption
       if (seen.has(key)) continue;
       seen.add(key);
       const expectations = [...(await blobExpectation(file, realDir)), ...(await metadataExpectation(key, metadataRoots, findings))];
-      if (expectations.length > 0) findings.push(...(await verify(file, expectations)));
+      if (expectations.length > 0) findings.push(...(await verify(file, expectations, maxBytes)));
+      else findings.push(...(await unrecordedSnapshotFile(file, key)));
     } catch (e) {
       if (!isAbsent(e)) findings.push(scannerError(file, "could not check against its download record", e));
     }
@@ -205,11 +219,32 @@ async function readMetadata(path: string): Promise<Metadata | undefined> {
   }
 }
 
-async function verify(file: string, expectations: Expectation[]): Promise<Finding[]> {
+// A covered file inside models--*/snapshots/<commit>/, reached either way, that is no link to a blob and has no download record.
+async function unrecordedSnapshotFile(file: string, realFile: string): Promise<Finding[]> {
+  const loc = [file, realFile].map(parseHfCachePath).find((l) => l !== undefined && SHA1_HEX.test(l.revision) && l.pathInRepo !== "");
+  if (!loc) return [];
+  const st = await lstat(file);
+  let reason: string;
+  if (st.isSymbolicLink()) reason = `it links to ${await readlink(file)}, not to a blob in its repo's blobs/ directory`;
+  else if (st.isFile()) reason = "it is a regular file, not a link to a blob in its repo's blobs/ directory, as huggingface_hub writes snapshot files";
+  else return [];
+  return [
+    {
+      ruleId: "local_tamper",
+      severity: "MEDIUM",
+      message: `${basename(file)} in the HF cache snapshot of ${loc.repo}@${loc.revision.slice(0, 7)} cannot be checked: ${reason}, and no download record covers it`,
+      file,
+      detail: { record: "none", reason, repo: loc.repo, revision: loc.revision, pathInRepo: loc.pathInRepo },
+    },
+  ];
+}
+
+async function verify(file: string, expectations: Expectation[], maxBytes: number): Promise<Finding[]> {
   const algorithms = new Set(expectations.map((e) => e.algorithm));
-  const hashed = await hashFile(file, algorithms);
+  const hashed = await hashFile(file, algorithms, maxBytes);
   if (!hashed) return [];
   if ("changed" in hashed) return [scannerError(file, `changed size while being hashed (${hashed.changed}); not verified`)];
+  if ("tooBig" in hashed) return [scannerError(file, `${hashed.tooBig} bytes, over the ${maxBytes}-byte limit for hashing; not verified against its download record`)];
   const findings: Finding[] = [];
   for (const e of expectations) {
     const actual = hashed[e.algorithm]!;
@@ -226,14 +261,15 @@ async function verify(file: string, expectations: Expectation[]): Promise<Findin
   return findings;
 }
 
-type Hashes = Partial<Record<Algorithm, string>> | { changed: string };
+type Hashes = Partial<Record<Algorithm, string>> | { changed: string } | { tooBig: number };
 
-// Streams the file once into every hash asked for. Undefined when it is not a regular file; the readers report those.
-async function hashFile(file: string, algorithms: Set<Algorithm>): Promise<Hashes | undefined> {
+// Streams the file once into every hash asked for, if it is at most `maxBytes`. Undefined when it is not a regular file; the readers report those.
+async function hashFile(file: string, algorithms: Set<Algorithm>, maxBytes: number): Promise<Hashes | undefined> {
   const fh = await open(file, OPEN_FLAGS);
   try {
     const st = await fh.stat();
     if (!st.isFile()) return undefined;
+    if (st.size > maxBytes) return { tooBig: st.size };
     const hashes = new Map<Algorithm, Hash>();
     if (algorithms.has("git-blob-sha1")) hashes.set("git-blob-sha1", createHash("sha1").update(`blob ${st.size}\0`));
     if (algorithms.has("sha256")) hashes.set("sha256", createHash("sha256"));
@@ -243,6 +279,8 @@ async function hashFile(file: string, algorithms: Set<Algorithm>): Promise<Hashe
       const { bytesRead } = await fh.read(buf, 0, buf.length, total);
       if (bytesRead === 0) break;
       total += bytesRead;
+      // A file that grows past the cap while being read is not finished either.
+      if (total > maxBytes) return { changed: `${st.size} bytes at open, more than ${maxBytes} read` };
       for (const h of hashes.values()) h.update(buf.subarray(0, bytesRead));
     }
     if (total !== st.size) return { changed: `${st.size} bytes at open, ${total} read` };
