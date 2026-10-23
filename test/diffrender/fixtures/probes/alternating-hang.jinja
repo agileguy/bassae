@@ -1,0 +1,5 @@
+{%- set d = dict(a=1) -%}
+{%- set r = range(10000) -%}
+{%- for i in r -%}{%- for j in r -%}{%- endfor -%}{%- endfor -%}
+{%- for m in messages -%}<|{{ m.role }}|>{{ m.content }}<|end|>{%- endfor -%}
+{%- if add_generation_prompt -%}<|assistant|>{%- endif -%}

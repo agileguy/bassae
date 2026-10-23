@@ -1,6 +1,6 @@
-// The renderer the scanner calls: one sandboxed worker per template, respawned after any cap breach.
+// The renderer the scanner calls: one sandboxed worker per template, which stops at the first cap breach.
 
-import { DEFAULT_RENDER_LIMITS, type Renderer, type RenderLimits, type RenderRequest, type RenderResult } from "../types.ts";
+import { CAP_FAILURES, DEFAULT_RENDER_LIMITS, type Renderer, type RenderLimits, type RenderRequest, type RenderResult } from "../types.ts";
 import { runWorker, type WorkerOptions } from "./launcher.ts";
 
 export { sandboxAvailable } from "./launcher.ts";
@@ -15,25 +15,27 @@ function serializable(request: RenderRequest): boolean {
   }
 }
 
-// Each render that times out costs a fresh worker and a full timeout. Two in a row say the template hangs
-// whatever the context, so the rest of the batch fails at once rather than costing a timeout each. Those are
-// `skipped`, not `timeout`: they never ran, so they breached no cap of their own.
-const TIMEOUTS_IN_A_ROW = 2;
+const isBreach = (r: RenderResult) => !r.ok && CAP_FAILURES.has(r.failure);
 
+// After the first cap breach nothing more renders for the template (Decisions 02:58), whatever the renders between
+// would have done: a render that fails at once must not buy a hostile template another timeout. The rest of the
+// batch is `skipped`, not the cap: those requests never ran, so they breached nothing of their own.
 async function renderAll(template: string, requests: RenderRequest[], limits: RenderLimits, options: WorkerOptions): Promise<RenderResult[]> {
   const results: RenderResult[] = [];
-  let timeouts = 0;
   while (results.length < requests.length) {
-    if (timeouts >= TIMEOUTS_IN_A_ROW) {
-      const message = `not attempted: the ${TIMEOUTS_IN_A_ROW} renders before it timed out on this template`;
-      for (const { id } of requests.slice(results.length)) results.push({ id, ok: false, failure: "skipped", message });
-      break;
-    }
     let sandboxError: string | undefined;
     try {
       const run = await runWorker(template, requests.slice(results.length), limits, options);
+      // A breach before the template parsed fails every request the worker had; the first one carries it, as any other breach.
+      const at = run.results.findIndex(isBreach);
+      if (at >= 0) {
+        const hit = run.results[at] as RenderResult & { ok: false };
+        results.push(...run.results.slice(0, at + 1));
+        const message = `not attempted: an earlier render on this template hit the ${hit.failure} cap`;
+        for (const { id } of requests.slice(results.length)) results.push({ id, ok: false, failure: "skipped", message });
+        break;
+      }
       results.push(...run.results);
-      for (const result of run.results) timeouts = !result.ok && result.failure === "timeout" ? timeouts + 1 : 0;
       // Every run answers at least one request or says why it could not; anything else would loop forever.
       sandboxError = run.sandboxError ?? (run.results.length === 0 ? "worker made no progress" : undefined);
     } catch (e) {

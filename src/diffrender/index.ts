@@ -2,8 +2,8 @@
 // sandboxed renderer and reports what the output shows that static analysis cannot.
 //
 // Every probe renders under both environment profiles. The first explain probe goes alone, then the other
-// explain probes, then the vary probes, and after the first cap breach nothing more is sent, so one hostile
-// template costs about one cap plus a batch (Decisions 17:35). What came back is checked four ways:
+// explain probes, then the vary probes. The sandbox stops at the first cap breach and nothing more is sent after
+// it, so one hostile template costs about one cap (Decisions 17:35, 02:58). What came back is checked four ways:
 // - render_divergence: a vary probe prints a word, once its inputs are removed, that no explain probe prints;
 // - env_profile_divergence: one probe renders differently under the two profiles;
 // - content_integrity and tool_integrity: p3-integrity's checks on every output;
@@ -26,7 +26,7 @@ import type {
   RenderResult,
   Renderer,
 } from "../types.ts";
-import { DEFAULT_RENDER_LIMITS } from "../types.ts";
+import { CAP_FAILURES, DEFAULT_RENDER_LIMITS } from "../types.ts";
 import { checkContent } from "./integrity.ts";
 import { buildProbes, readsTools, REFERENCE_DATE } from "./probes.ts";
 import { templateText, unexplainedWords, words } from "./residue.ts";
@@ -40,12 +40,13 @@ const MAX_LISTED_WORDS = 50;
 const MAX_LISTED_ISSUES = 5;
 const SAMPLE_AROUND = 80;
 
-const CAPS: Partial<Record<RenderFailure, string>> = {
-  timeout: `time cap (${DEFAULT_RENDER_LIMITS.timeoutMs} ms)`,
-  memory: `memory cap (${DEFAULT_RENDER_LIMITS.maxRssBytes / 1024 / 1024} MiB)`,
-  output_limit: `output cap (${DEFAULT_RENDER_LIMITS.maxOutputBytes / 1024 / 1024} MiB)`,
-  stack: "stack (unbounded recursion)",
-};
+// What a finding calls each of CAP_FAILURES.
+const CAP_NAMES: ReadonlyMap<RenderFailure, string> = new Map([
+  ["timeout", `time cap (${DEFAULT_RENDER_LIMITS.timeoutMs} ms)`],
+  ["memory", `memory cap (${DEFAULT_RENDER_LIMITS.maxRssBytes / 1024 / 1024} MiB)`],
+  ["output_limit", `output cap (${DEFAULT_RENDER_LIMITS.maxOutputBytes / 1024 / 1024} MiB)`],
+  ["stack", "stack (unbounded recursion)"],
+]);
 
 /** The integrity checks, injectable so their wiring can be tested before their bodies exist. */
 export interface IntegrityChecks {
@@ -86,18 +87,18 @@ function errorText(e: unknown): string {
 /** A probe's results under each profile; absent where nothing was sent. */
 type Outcome = Partial<Record<EnvProfile, RenderResult>>;
 
-const isSkipped = (r: RenderResult) =>
-  // Until the renderer reports `skipped`, a render its fail-fast rule skipped comes back as a timeout that says so.
-  !r.ok && (r.failure === "skipped" || (r.failure === "timeout" && r.message.startsWith("not attempted")));
-const isCapBreach = (r: RenderResult) => !r.ok && r.failure in CAPS && !isSkipped(r);
+// A `skipped` render never ran, so it breached nothing of its own.
+const isCapBreach = (r: RenderResult) => !r.ok && CAP_FAILURES.has(r.failure);
 
 interface Breach {
   probe: number;
   profile: EnvProfile;
   result: RenderResult & { ok: false };
+  /** Probes with a render that came back after it in the same batch: none from the sandbox, which stops at a breach. */
+  after: Set<number>;
 }
 
-/** Sends each batch in turn and stops after the first cap breach, or when the template or the sandbox cannot run at all. */
+/** Sends each batch in turn and stops after the first cap breach, or once the template or the sandbox cannot run at all. */
 async function renderAll(template: string, probes: readonly Probe[], renderer: Renderer): Promise<{ outcomes: Outcome[]; breach?: Breach }> {
   const outcomes: Outcome[] = probes.map(() => ({}));
   const sent = new Map<string, { probe: number; profile: EnvProfile }>();
@@ -128,12 +129,13 @@ async function renderAll(template: string, probes: readonly Probe[], renderer: R
       const result: RenderResult = byId.get(req.id) ?? { id: req.id, ok: false, failure: "sandbox", message: "the renderer returned no result for this probe" };
       const { probe, profile } = sent.get(req.id)!;
       outcomes[probe]![profile] = result;
-      if (!result.ok && !breach && isCapBreach(result)) breach = { probe, profile, result };
+      if (breach && result.ok) breach.after.add(probe);
+      if (!result.ok && !breach && isCapBreach(result)) breach = { probe, profile, result, after: new Set() };
       if (!result.ok && (result.failure === "parse" || result.failure === "sandbox")) fatal = true;
     }
     if (breach) return { outcomes, breach };
     // A template that does not parse, or a sandbox that does not start, fails every later probe the same way.
-    if (fatal && batch.length === 1) break;
+    if (fatal) break;
   }
   return { outcomes };
 }
@@ -176,13 +178,24 @@ async function run(input: DiffRenderInput, renderer: Renderer, transforms: reado
   let internal: string | undefined;
 
   if (breach) {
-    const { probe, profile, result } = breach;
+    const { probe, profile, result, after } = breach;
+    // What did and did not render, as it came back: the sandbox renders nothing after a breach, and no later batch is sent.
+    const told = after.size === 0 ? `${rendered} of ${total} probes rendered before it and none after` : `${rendered} of ${total} probes rendered, ${after.size} of them after it`;
     findings.push({
       ruleId: "render_dos",
       severity: "HIGH",
-      message: `rendering the ${probes[probe]!.label} probe (${profile}) hit the ${CAPS[result.failure]}; no further probes were rendered`,
+      message: `rendering the ${probes[probe]!.label} probe (${profile}) hit the ${CAP_NAMES.get(result.failure) ?? `${result.failure} cap`}; ${told}`,
       ...whole,
-      detail: { probe: probes[probe]!.label, profile, cap: result.failure, limits: { ...DEFAULT_RENDER_LIMITS }, error: result.message },
+      detail: {
+        probe: probes[probe]!.label,
+        profile,
+        cap: result.failure,
+        limits: { ...DEFAULT_RENDER_LIMITS },
+        error: result.message,
+        rendered,
+        total,
+        renderedAfter: after.size,
+      },
     });
   }
 

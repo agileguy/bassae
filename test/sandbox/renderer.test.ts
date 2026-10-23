@@ -30,6 +30,8 @@ const req = (id: string, context: Record<string, unknown> = {}, extra: Partial<R
 
 const ok = (id: string, output: string): RenderResult => ({ id, ok: true, output });
 const failed = (id: string, failure: RenderFailure): RenderResult => ({ id, ok: false, failure, message: expect.any(String) });
+/** Not attempted because an earlier render on the template breached `cap` (Decisions 02:58). */
+const skipped = (id: string, cap: RenderFailure): RenderResult => ({ id, ok: false, failure: "skipped", message: expect.stringContaining(`hit the ${cap} cap`) });
 
 async function timed<T>(fn: () => Promise<T>): Promise<[T, number]> {
   const start = performance.now();
@@ -172,22 +174,22 @@ describe.skipIf(!live)("strftime_now", () => {
 
 describe.skipIf(!live)("caps (ISC-43)", () => {
   test(
-    "range(10**10) hits the memory cap, the child is replaced and the batch carries on",
+    "range(10**10) hits the memory cap, and nothing after it in the batch is attempted",
     async () => {
       const src = "{% if boom %}{% for i in range(10**10) %}{% endfor %}{% endif %}fine";
       const [results, ms] = await timed(() => renderer.renderBatch(src, [req("a"), req("b", { boom: true }), req("c")]));
-      expect(results).toEqual([ok("a", "fine"), failed("b", "memory"), ok("c", "fine")]);
+      expect(results).toEqual([ok("a", "fine"), failed("b", "memory"), skipped("c", "memory")]);
       expect(ms).toBeLessThan(2000 + 1500);
     },
     SLOW,
   );
 
   test(
-    "a self-recursive macro overflows the stack, which is its own failure, and the batch carries on",
+    "a self-recursive macro overflows the stack, which is its own failure, and ends the batch",
     async () => {
       const src = "{% macro f(n) %}{{ f(n + 1) }}{% endmacro %}{% if boom %}{{ f(0) }}{% endif %}fine";
       const [results, ms] = await timed(() => renderer.renderBatch(src, [req("a"), req("b", { boom: true }), req("c")]));
-      expect(results).toEqual([ok("a", "fine"), failed("b", "stack"), ok("c", "fine")]);
+      expect(results).toEqual([ok("a", "fine"), failed("b", "stack"), skipped("c", "stack")]);
       expect((results[1] as { message: string }).message).toContain("call stack");
       expect(ms).toBeLessThan(2000 + 1500);
     },
@@ -198,16 +200,44 @@ describe.skipIf(!live)("caps (ISC-43)", () => {
     // JSC refuses a rope past its length limit in milliseconds; a Python engine would allocate every byte.
     const src = '{% set ns = namespace(s="a") %}{% if boom %}{% for i in range(64) %}{% set ns.s = ns.s ~ ns.s %}{% endfor %}{% endif %}{{ ns.s }}';
     const results = await renderer.renderBatch(src, [req("a"), req("b", { boom: true }), req("c")]);
-    expect(results).toEqual([ok("a", "a"), failed("b", "memory"), ok("c", "a")]);
+    expect(results).toEqual([ok("a", "a"), failed("b", "memory"), skipped("c", "memory")]);
     expect((results[1] as { message: string }).message).toContain("Out of memory");
   });
 
   test(
-    "a stack overflow while parsing fails every request with stack, once",
+    "a memory breach ends the batch as a timeout does: one breach, however many renders would breach",
+    async () => {
+      // Six of these in one batch each grew a fresh worker to the cap before (runtime review, r10gated).
+      const src = "{% if boom %}{% for i in range(10**10) %}x{% endfor %}{% endif %}fine";
+      const requests = [req("a"), ...Array.from({ length: 6 }, (_, i) => req(`b${i}`, { boom: true }))];
+      const [results, ms] = await timed(() => renderer.renderBatch(src, requests));
+      expect(results).toEqual([ok("a", "fine"), failed("b0", "memory"), ...requests.slice(2).map((r) => skipped(r.id, "memory"))]);
+      expect(ms).toBeLessThan(2000 + 1500);
+    },
+    SLOW,
+  );
+
+  test(
+    "a render that fails at once between two that hang does not buy the template another timeout",
+    async () => {
+      // The runtime review's alternating template: `dict` exists only under jinja2-globals, so hf-default fails
+      // at once and jinja2-globals hangs. A rule counting timeouts in a row never fired on it. One range, reused,
+      // keeps the spin's memory flat, so the time cap is the one it meets.
+      const src = "{%- set d = dict(a=1) -%}{%- set r = range(10000) -%}{%- for i in r -%}{%- for j in r -%}{%- endfor -%}{%- endfor -%}done";
+      const requests = Array.from({ length: 8 }, (_, i) => req(`r${i}`, {}, { profile: i % 2 ? "jinja2-globals" : "hf-default" }));
+      const [results, ms] = await timed(() => renderer.renderBatch(src, requests, { timeoutMs: 500 }));
+      expect(results).toEqual([failed("r0", "render_error"), failed("r1", "timeout"), ...requests.slice(2).map((r) => skipped(r.id, "timeout"))]);
+      expect(ms).toBeLessThan(500 + 1500);
+    },
+    SLOW,
+  );
+
+  test(
+    "a stack overflow while parsing is one stack breach, and nothing renders after it",
     async () => {
       const deep = "{{ " + "(".repeat(100_000) + "1" + ")".repeat(100_000) + " }}";
       const results = await renderer.renderBatch(deep, [req("a"), req("b")]);
-      expect(results).toEqual([failed("a", "stack"), failed("b", "stack")]);
+      expect(results).toEqual([failed("a", "stack"), skipped("b", "stack")]);
     },
     SLOW,
   );
@@ -217,7 +247,7 @@ describe.skipIf(!live)("caps (ISC-43)", () => {
     async () => {
       const src = "{% macro f(n) %}{% if n > 0 %}{{ f(n - 1) }}{{ f(n - 1) }}{% endif %}{% endmacro %}{% if boom %}{{ f(60) }}{% endif %}fine";
       const [results, ms] = await timed(() => renderer.renderBatch(src, [req("a"), req("b", { boom: true }), req("c")]));
-      expect(results).toEqual([ok("a", "fine"), failed("b", "timeout"), ok("c", "fine")]);
+      expect(results).toEqual([ok("a", "fine"), failed("b", "timeout"), skipped("c", "timeout")]);
       expect(ms).toBeGreaterThanOrEqual(2000);
       expect(ms).toBeLessThan(2000 + 1500);
     },
@@ -229,7 +259,7 @@ describe.skipIf(!live)("caps (ISC-43)", () => {
     async () => {
       const src = "{% if big %}{% for i in range(120000) %}0123456789{% endfor %}{% endif %}fine";
       const results = await renderer.renderBatch(src, [req("a"), req("b", { big: true }), req("c")]);
-      expect(results).toEqual([ok("a", "fine"), failed("b", "output_limit"), ok("c", "fine")]);
+      expect(results).toEqual([ok("a", "fine"), failed("b", "output_limit"), skipped("c", "output_limit")]);
     },
     SLOW,
   );
@@ -260,24 +290,23 @@ describe.skipIf(!live)("caps (ISC-43)", () => {
       const [all, allMs] = await timed(() => renderer.renderBatch(slow, eight, { timeoutMs: 500 }));
       console.log(`[sandbox] slow parse at timeoutMs 500: 1 request ${oneMs.toFixed(0)}ms, 8 requests ${allMs.toFixed(0)}ms`);
       expect(one).toEqual([failed("a", "timeout")]);
-      expect(all).toEqual(eight.map((r) => failed(r.id, "timeout")));
+      expect(all).toEqual([failed("r0", "timeout"), ...eight.slice(1).map((r) => skipped(r.id, "timeout"))]);
       expect(allMs).toBeLessThan(oneMs + 400);
     },
     SLOW,
   );
 
   test(
-    "after two renders in a row time out, the rest of the batch fails fast as skipped and says it was not attempted",
+    "after the first render times out, the rest of the batch is skipped and says it was not attempted",
     async () => {
       const eight = Array.from({ length: 8 }, (_, i) => req(`r${i}`));
       const [results, ms] = await timed(() => renderer.renderBatch(SPIN, eight, { timeoutMs: 500 }));
       console.log(`[sandbox] 8 hanging renders at timeoutMs 500: ${ms.toFixed(0)}ms`);
-      // Only the two that ran timed out; the rest were never attempted, which is no cap breach of their own.
-      expect(results).toEqual(eight.map((r, i) => failed(r.id, i < 2 ? "timeout" : "skipped")));
-      const messages = results.map((r) => (r as { message: string }).message);
-      expect(messages.map((m) => m.includes("not attempted"))).toEqual([false, false, true, true, true, true, true, true]);
-      // Two timeouts' worth, not eight.
-      expect(ms).toBeLessThan(3 * 500);
+      // Only the one that ran timed out; the rest were never attempted, which is no cap breach of their own.
+      expect(results).toEqual([failed("r0", "timeout"), ...eight.slice(1).map((r) => skipped(r.id, "timeout"))]);
+      expect(results.slice(1).every((r) => (r as { message: string }).message.startsWith("not attempted"))).toBe(true);
+      // One timeout's worth and a spawn, not eight.
+      expect(ms).toBeLessThan(500 + 1000);
     },
     SLOW,
   );
@@ -308,10 +337,11 @@ describe.skipIf(!live)("caps (ISC-43)", () => {
     async () => {
       const src = "{% if spin %}{% for i in range(100000) %}{% for j in range(100000) %}{% endfor %}{% endfor %}{% endif %}done";
       const [results, ms] = await timed(() =>
-        renderer.renderBatch(src, [req("a", { spin: true }), req("b"), req("c", { spin: true })], { timeoutMs: 300 }),
+        renderer.renderBatch(src, [req("a"), req("b", { spin: true }), req("c")], { timeoutMs: 300 }),
       );
-      expect(results).toEqual([failed("a", "timeout"), ok("b", "done"), failed("c", "timeout")]);
-      expect(ms).toBeLessThan(600 + 1500);
+      expect(results).toEqual([ok("a", "done"), failed("b", "timeout"), skipped("c", "timeout")]);
+      expect(ms).toBeGreaterThanOrEqual(300);
+      expect(ms).toBeLessThan(300 + 1500);
     },
     SLOW,
   );
@@ -346,7 +376,7 @@ describe.skipIf(!live)("the memory cap fails closed (ISC-43)", () => {
       const src = "{% if boom %}{% set xs = range(10**7) %}{% endif %}fine";
       const cap = 128 * 2 ** 20;
       const [results, ms] = await timed(() => blind.renderBatch(src, [req("a"), req("b", { boom: true }), req("c")], { timeoutMs: 10_000, maxRssBytes: cap }));
-      expect(results).toEqual([ok("a", "fine"), failed("b", "memory"), ok("c", "fine")]);
+      expect(results).toEqual([ok("a", "fine"), failed("b", "memory"), skipped("c", "memory")]);
       expect((results[1] as { message: string }).message).toBe("worker resident memory exceeded the 128MiB cap, by its own reading");
       expect(ms).toBeLessThan(5000);
     },
@@ -388,7 +418,7 @@ describe.skipIf(!live)("the parent does not trust the worker", () => {
   const two = [req("a"), req("b")];
 
   test("a worker that never answers is timed out", async () => {
-    expect(await rogue("stall").renderBatch("", two, { timeoutMs: 200 })).toEqual([failed("a", "timeout"), failed("b", "timeout")]);
+    expect(await rogue("stall").renderBatch("", two, { timeoutMs: 200 })).toEqual([failed("a", "timeout"), skipped("b", "timeout")]);
   });
 
   test("a result for the wrong request is a protocol error", async () => {
@@ -401,13 +431,13 @@ describe.skipIf(!live)("the parent does not trust the worker", () => {
 
   test("an oversized line is cut off at the output cap", async () => {
     const results = await rogue("huge").renderBatch("", two, { maxOutputBytes: 1000 });
-    expect(results).toEqual([failed("a", "output_limit"), failed("b", "output_limit")]);
+    expect(results).toEqual([failed("a", "output_limit"), skipped("b", "output_limit")]);
   });
 
   test("a worker killed by its own CPU limit timed out, however the sandbox reports the death", async () => {
     const start = performance.now();
     // The parent's own timer is far off, so only the exit path can call these timeouts this soon.
-    expect(await rogue("xcpu").renderBatch("", two, { timeoutMs: 10_000 })).toEqual([failed("a", "timeout"), failed("b", "timeout")]);
+    expect(await rogue("xcpu").renderBatch("", two, { timeoutMs: 10_000 })).toEqual([failed("a", "timeout"), skipped("b", "timeout")]);
     expect(performance.now() - start).toBeLessThan(5000);
   }, 30_000);
 
@@ -439,14 +469,14 @@ describe.skipIf(!live)("the parent does not trust the worker", () => {
     // 6 x 1000 + 64 KiB is the bound here; the message is 90,000 bytes but only 30,000 characters.
     expect(await rogue("wide-error").renderBatch("", two, { maxOutputBytes: 1000 })).toEqual([
       failed("a", "output_limit"),
-      failed("b", "output_limit"),
+      skipped("b", "output_limit"),
     ]);
   });
 
-  test("an oversized line before the template has parsed fails the whole batch once", async () => {
+  test("an oversized line before the template has parsed is one breach, and nothing renders after it", async () => {
     expect(await rogue("fat-parsed").renderBatch("", two, { maxOutputBytes: 1000 })).toEqual([
       failed("a", "output_limit"),
-      failed("b", "output_limit"),
+      skipped("b", "output_limit"),
     ]);
   });
 });

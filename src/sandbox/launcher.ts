@@ -5,7 +5,7 @@ import { dlopen, FFIType, ptr } from "bun:ffi";
 import { existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { constants } from "node:os";
 import { dirname, join } from "node:path";
-import type { RenderFailure, RenderLimits, RenderRequest, RenderResult } from "../types.ts";
+import { CAP_FAILURES, type RenderFailure, type RenderLimits, type RenderRequest, type RenderResult } from "../types.ts";
 import { clip, decodeChild, encode, MEMORY_EXIT_CODE } from "./protocol.ts";
 
 export type SandboxKind = "sandbox-exec" | "bwrap";
@@ -314,8 +314,9 @@ async function keepHead(stream: ReadableStream<Uint8Array>): Promise<string> {
 }
 
 /**
- * Runs one sandboxed worker over the requests until they are all answered or one of them breaks a cap.
- * On a breach the worker is killed and the in-flight request fails; the caller starts a fresh worker for the rest.
+ * Runs one sandboxed worker over the requests until they are all answered, one of them breaks a cap, or the
+ * worker dies. On a breach the worker is killed and the in-flight request fails, and the caller renders nothing
+ * more for the template; after any other death the caller starts a fresh worker for the rest.
  * A breach before the template has parsed fails every request at once, since no fresh worker would parse it faster.
  */
 export async function runWorker(
@@ -396,7 +397,9 @@ export async function runWorker(
           : result,
       );
       budget.left = perRequest;
-      if (results.length === requests.length) settle();
+      const last = results[results.length - 1]!;
+      // The first cap breach ends the run, so the worker renders nothing after it.
+      if (results.length === requests.length || (!last.ok && CAP_FAILURES.has(last.failure))) settle();
       else arm();
     };
 

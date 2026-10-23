@@ -8,7 +8,7 @@ import { diffRender } from "../../src/diffrender/index.ts";
 import { buildProbes } from "../../src/diffrender/probes.ts";
 import { createRenderer, sandboxAvailable } from "../../src/sandbox/index.ts";
 import { makeTemplateFromString } from "../../src/template.ts";
-import type { DiffRenderInput, RenderRequest, RenderResult, Renderer } from "../../src/types.ts";
+import { CAP_FAILURES, type DiffRenderInput, type RenderRequest, type RenderResult, type Renderer } from "../../src/types.ts";
 
 const FIXTURES = join(import.meta.dir, "fixtures", "probes");
 const fixture = (name: string) => Bun.file(join(FIXTURES, `${name}.jinja`)).text();
@@ -53,11 +53,14 @@ describe("render_dos (ISC-43)", () => {
     expect(r.probes).toEqual({ total: TOTAL, rendered: 0, refused: 0, failed: TOTAL });
   });
 
-  for (const cap of ["memory", "output_limit", "stack"] as const) {
-    test(`a ${cap} breach is render_dos too`, async () => {
+  // Every failure in the shared set, so a cap added there cannot reach a finding without a name.
+  for (const cap of CAP_FAILURES) {
+    test(`a ${cap} breach is render_dos, and its message names the cap`, async () => {
       const { renderer } = scripted((r) => fail(r.id, cap));
       const r = await diffRender(input("{{ x }}"), renderer, []);
       expect(r.findings.map((f) => [f.ruleId, (f.detail as { cap?: string }).cap])).toEqual([["render_dos", cap]]);
+      expect(r.findings[0]!.message).toMatch(/hit the (time|memory|output) cap \(|hit the stack/);
+      expect(r.findings[0]!.message).not.toContain("undefined");
     });
   }
 
@@ -72,6 +75,43 @@ describe("render_dos (ISC-43)", () => {
     expect(r.complete).toBe(false);
   });
 
+  test("the finding says how many probes rendered and whether any rendered after the breach", async () => {
+    // As the sandbox does: the first breach ends the batch, and what follows is skipped.
+    const stopping = scripted((r, label) => (label === "count:50" ? fail(r.id, "memory") : undefined));
+    const inner = stopping.renderer.renderBatch;
+    stopping.renderer.renderBatch = async (template, requests) => {
+      const results = await inner(template, requests);
+      const at = results.findIndex((x) => !x.ok && x.failure === "memory");
+      return at < 0 ? results : results.map((x, i) => (i <= at ? x : fail(x.id, "skipped", "not attempted")));
+    };
+    const r = await diffRender(input("{{ x }}"), stopping.renderer, []);
+    const dos = r.findings.find((f) => f.ruleId === "render_dos")!;
+    expect(dos.message).toContain(`${r.probes.rendered} of ${TOTAL} probes rendered before it and none after`);
+    expect(dos.detail).toMatchObject({ rendered: r.probes.rendered, total: TOTAL, renderedAfter: 0 });
+    expect(r.probes.rendered).toBeLessThan(TOTAL - 1);
+
+    // A renderer that carries on past the breach is reported as it behaved, never as if it had stopped.
+    const carrying = await diffRender(input("{{ x }}"), scripted((x, label) => (label === "count:50" ? fail(x.id, "memory") : undefined)).renderer, []);
+    const after = carrying.findings.find((f) => f.ruleId === "render_dos")!;
+    const renderedAfter = (after.detail as { renderedAfter: number }).renderedAfter;
+    expect(renderedAfter).toBeGreaterThan(0);
+    expect(after.message).toContain(`${TOTAL - 1} of ${TOTAL} probes rendered, ${renderedAfter} of them after it`);
+  });
+
+  test("a sandbox failure in the second batch stops the third (fatal, whatever the batch size)", async () => {
+    const { renderer, batches } = scripted((r, label) => (label === "one/system/no-tools/no-gen" ? fail(r.id, "sandbox", "worker did not start") : undefined));
+    const r = await diffRender(input("{{ x }}"), renderer, []);
+    expect(batches).toHaveLength(2);
+    expect(r.findings).toEqual([]);
+    expect(r.complete).toBe(false);
+  });
+
+  test("a parse failure in the second batch stops the third", async () => {
+    const { renderer, batches } = scripted((r, label) => (label === "one/system/no-tools/no-gen" ? fail(r.id, "parse", "SyntaxError") : undefined));
+    await diffRender(input("{{ x }}"), renderer, []);
+    expect(batches).toHaveLength(2);
+  });
+
   test("explain probes go before vary probes, the first one alone", async () => {
     const { renderer, batches } = scripted();
     await diffRender(input("{{ x }}"), renderer, []);
@@ -83,13 +123,7 @@ describe("render_dos (ISC-43)", () => {
     expect(batches.flat().map((r) => r.profile).filter((p) => p === "jinja2-globals")).toHaveLength(TOTAL);
   });
 
-  test("renders the fail-fast rule skipped are failures but not a breach of their own", async () => {
-    const { renderer } = scripted((r) =>
-      r.profile === "jinja2-globals" ? fail(r.id, "timeout", "not attempted: the 2 renders before it timed out on this template") : undefined,
-    );
-    const r = await diffRender(input("{{ x }}"), renderer, []);
-    expect(r.findings).toEqual([]);
-    expect(r.probes.rendered).toBe(TOTAL);
+  test("renders the sandbox skipped after a breach are failures but not a breach of their own", async () => {
     const skipped = await diffRender(input("{{ x }}"), scripted((r) => fail(r.id, "skipped")).renderer, []);
     expect(skipped.findings).toEqual([]);
     expect(skipped.probes.failed).toBe(TOTAL);
@@ -191,6 +225,13 @@ describe.skipIf(!status.available)("render_dos through the sandboxed renderer", 
     ["endless-range", ["memory", "timeout"]],
     ["endless-loop", ["timeout"]],
     ["recursive-macro", ["stack", "timeout"]],
+    // The runtime review's templates. `dict` exists only under jinja2-globals, so the hf-default render fails at
+    // once and the jinja2-globals one hangs: a fail-fast rule that an error in between resets let 16 and 32
+    // timeouts through, 32 s and 65 s.
+    ["alternating-hang", ["timeout"]],
+    ["alternating-hang-tools", ["timeout"]],
+    // Ordinary until the 50-message probe, which runs range(10**10): six memory breaches in one batch before.
+    ["count-gated-range", ["memory", "timeout"]],
   ] as const) {
     test(
       `${name}: one HIGH render_dos, about one cap of wall time, and the next template still renders`,
@@ -202,6 +243,7 @@ describe.skipIf(!status.available)("render_dos through the sandboxed renderer", 
         expect(dos).toHaveLength(1);
         expect(dos[0]!.severity).toBe("HIGH");
         expect(caps as readonly string[]).toContain((dos[0]!.detail as { cap: string }).cap);
+        expect(dos[0]!.message).toContain("none after");
         expect(r.complete).toBe(false);
         // One 2 s cap plus a spawn, never one cap per probe.
         expect(elapsed).toBeLessThan(5_000);
