@@ -276,6 +276,67 @@ describe("turns", () => {
   });
 });
 
+describe("copies", () => {
+  test("a content that appears again after its place is an issue", () => {
+    const found = declared(toolRound, `${head}${QWEN_TOOL}<|im_start|>system\n${TOOL_RESULT}<|im_end|>\n`, CHATML);
+    expect(indexes(found)).toEqual([["content_integrity", 2]]);
+    expect(found[0]!.message).toContain(`is copied: all ${TOOL_RESULT.length} of its characters appear a second time, in a system turn`);
+  });
+
+  test("a later user content echoed into the system prompt is an issue", () => {
+    const out = `<|im_start|>system\n${SYSTEM}\nRemember: ${USER_2}<|im_end|>\n` + chatml([["user", USER_1], ["assistant", "Mild."], ["user", USER_2]]);
+    const found = issues(chat, out);
+    expect(indexes(found)).toEqual([["content_integrity", 2]]);
+    expect(found[0]!.message).toMatch(/in a system turn/);
+  });
+
+  test("a slice of at least 16 characters found outside its place is an issue, and a shorter one is not", () => {
+    const slices: [string, number][] = [[TOOL_RESULT.slice(0, 16), 16], [TOOL_RESULT.slice(20, 50), 30], [TOOL_RESULT.slice(-20), 20]];
+    for (const [slice, n] of slices) {
+      const found = declared(toolRound, `${head}${QWEN_TOOL}<|im_start|>system\n${slice}<|im_end|>\n`, CHATML);
+      expect([slice, indexes(found)]).toEqual([slice, [["content_integrity", 2]]]);
+      expect(found[0]!.message).toContain(`is copied: ${n} of its ${TOOL_RESULT.length} characters appear a second time`);
+    }
+    expect(declared(toolRound, `${head}${QWEN_TOOL}<|im_start|>system\n${TOOL_RESULT.slice(0, 15)}<|im_end|>\n`, CHATML)).toEqual([]);
+  });
+
+  test("text a content shares with another input the probe passes is not a copy", () => {
+    const p = probe("shared", [
+      { role: "user", content: "Turn 1 asks the harbor guide about the tides." },
+      { role: "assistant", content: "A note kept with this message for the archive." },
+      { role: "user", content: "A short note about the harbor tides for the archive." },
+      { role: "user", content: "Turn 3 asks the harbor guide about the tides." },
+    ]);
+    const turns = p.request.context.messages as { role: string; content: string }[];
+    expect(issues(p, chatml(turns.map((m) => [m.role, m.content])))).toEqual([]);
+  });
+
+  test("a content the conversation repeats is not a copy of itself", () => {
+    const p = probe("twice", [
+      { role: "user", content: USER_1 },
+      { role: "assistant", content: "Mild." },
+      { role: "user", content: USER_1 },
+    ]);
+    expect(issues(p, chatml([["user", USER_1], ["assistant", "Mild."], ["user", USER_1]]))).toEqual([]);
+  });
+
+  test("a long content in a long output is checked in one pass", () => {
+    let ledger = "";
+    for (let i = 1; ledger.length < 48_000; i++) ledger += `Ledger entry ${i} records the cargo, tides and weather of one harbor day. `;
+    ledger = ledger.slice(0, 47_999) + ".";
+    const p = probe("long", [{ role: "user", content: ledger }]);
+    const out = `<|im_start|>system\n${"The harbor log keeps every crossing in order. ".repeat(20_000)}<|im_end|>\n${chatml([["user", ledger]])}`;
+    const started = performance.now();
+    expect(issues(p, out)).toEqual([]);
+    // A slice that starts at a numbered entry, so its first window is found once in the ledger.
+    const entry = ledger.indexOf("Ledger entry 400 ");
+    expect(issues(p, `${out}<|im_start|>system\n${ledger.slice(entry, entry + 40)}<|im_end|>`).map((i) => i.message)).toEqual([
+      "user content 0 (message 0) is copied: 40 of its 48000 characters appear a second time, in a system turn",
+    ]);
+    expect(performance.now() - started).toBeLessThan(1000);
+  });
+});
+
 describe("content holding markup", () => {
   // A trigger probe passes a template's own literal as content: it can equal template text that comes before it.
   test("a content equal to a marker or a role word takes its place under its own role, not in the template's markup", () => {

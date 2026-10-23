@@ -1,5 +1,5 @@
 // Content integrity (ISC-22.3): every system, user and tool content a probe passes reaches the output verbatim,
-// in order, inside a turn of its own role, unless a transform on the allowlist explains the difference.
+// once, in order, inside a turn of its own role, unless a transform on the allowlist explains the difference.
 //
 // Turns (Decisions 02:58). A turn opens where a role word follows a turn-opening token the model declares, as in
 // `<|im_start|>user` or `<|start|>developer`, or at a declared token that names its role itself, as GLM-4.5's
@@ -23,6 +23,14 @@
 // passing on the copy that follows. A short or one-word content may equal the template's own text (a trigger probe
 // passes a template literal such as `<|im_start|>` or `system`), so it takes the first place it appears under its
 // own role.
+//
+// Copies (Decisions 02:58). Once every content is placed, a distinctive one that appears again outside every placed
+// content, whole or as a slice of at least TRUNCATION_MIN characters, fails: no transform on the allowlist copies a
+// content, and a copy is how a template lifts one into a more privileged turn after its own, as a tool result or the
+// last message echoed into a system turn. A slice the content shares with another input the probe passes, such as a
+// phrase two turns repeat, says nothing and is not counted. A short content is not checked for copies, since the
+// template's own text may hold it. A distinctive slice that is also the template's own text, as when a trigger
+// probe's sentence holds a long literal the template prints, still counts: integrity fails closed (Decisions 02:28).
 
 import type { Transform } from "../registry/index.ts";
 import type { IntegrityIssue, Probe, ProbeContent } from "../types.ts";
@@ -230,7 +238,7 @@ export function placeOf(output: string, text: string, role: Role, from: number, 
   return placement(output, text, role, from, limit, carried, turns)?.at ?? -1;
 }
 
-// Below this many characters a matching prefix says nothing: short runs of common words recur anywhere.
+// Below this many characters a matching prefix, or a copied slice, says nothing: short runs of common words recur anywhere.
 const TRUNCATION_MIN = 16;
 
 /** The longest prefix of `text` found at or after `from`. A prefix found implies every shorter one is, so it bisects. */
@@ -253,6 +261,73 @@ const RANK: Readonly<Record<Role, number>> = { system: 3, user: 2, tool: 1, assi
 function misplaced(t: Turn, role: Role): string {
   if (t.turn && t.turn !== "assistant" && RANK[t.turn] > RANK[role]) return `sits in a ${t.turn} turn, more privileged than its own ${role} role`;
   return `sits under ${t.role ? `${an(t.role)} role marker` : "no role marker"}, not ${an(role)} one`;
+}
+
+/** Where the output shows one or more inputs, and the turn in effect at its start. */
+interface Span {
+  start: number;
+  end: number;
+  turn: Turn;
+  inputs: number[];
+}
+
+/**
+ * Each distinctive content in `spans`, outside `skip`, that appears again outside every span, whole or as a slice
+ * of at least TRUNCATION_MIN characters, with what to say about it. Spans are in output order and do not overlap.
+ */
+function copies(probe: Probe, output: string, inputs: readonly ScanInput[], spans: readonly Span[], skip: ReadonlySet<number>, turns: Turns): [number, string][] {
+  const W = TRUNCATION_MIN;
+  // Each distinctive window of a checked content, with the content and where in it the window starts.
+  const owner = new Map<string, [number, number]>();
+  for (const i of spans.flatMap((s) => s.inputs)) {
+    const text = inputs[i]!.text;
+    if (skip.has(i) || !distinctive(text)) continue;
+    for (let k = 0; k + W <= text.length; k++) {
+      const w = text.slice(k, k + W);
+      if (!owner.has(w) && distinctive(w)) owner.set(w, [i, k]);
+    }
+  }
+  if (owner.size === 0) return [];
+  // A window two of the probe's inputs hold is theirs to repeat.
+  const holders = new Map<string, number>();
+  for (const s of new Set([...probe.inputs, ...inputs.map((x) => x.text)])) {
+    const seen = new Set<string>();
+    for (let k = 0; k + W <= s.length; k++) {
+      const w = s.slice(k, k + W);
+      if (owner.has(w) && !seen.has(w)) {
+        seen.add(w);
+        holders.set(w, (holders.get(w) ?? 0) + 1);
+      }
+    }
+  }
+  for (const [w, n] of holders) if (n > 1) owner.delete(w);
+
+  const found: [number, string][] = [];
+  const reported = new Set<number>();
+  let s = 0; // the first span that ends after p
+  for (let p = 0; p + W <= output.length; p++) {
+    while (s < spans.length && spans[s]!.end <= p) s++;
+    if (s < spans.length && spans[s]!.start <= p) {
+      p = spans[s]!.end - 1;
+      continue;
+    }
+    const hit = owner.get(output.slice(p, p + W));
+    if (!hit || reported.has(hit[0])) continue;
+    const [i, k] = hit;
+    const text = inputs[i]!.text;
+    let before = 0;
+    while (before < k && output[p - before - 1] === text[k - before - 1]) before++;
+    let after = W;
+    while (k + after < text.length && output[p + after] === text[k + after]) after++;
+    const n = before + after;
+    // The turn the copy sits in, read on from the span before it.
+    const prev = spans[s - 1];
+    const t = turnScan(output, prev?.end ?? 0, prev?.turn ?? {}, turns)(p - before);
+    reported.add(i);
+    found.push([i, `is copied: ${n === text.length ? `all ${n} of its` : `${n} of its ${text.length}`} characters appear a second time, ${t.turn ? `in a ${t.turn} turn` : "outside any turn"}`]);
+    p += after - 1;
+  }
+  return found;
 }
 
 /** The content_integrity issues in one rendered probe's output. Empty when every content arrived intact. */
@@ -283,10 +358,16 @@ export function checkContent(probe: Probe, output: string, transforms: readonly 
   };
 
   const issues: IntegrityIssue[] = [];
-  const flag = (i: number, what: string) => issues.push({ ruleId: "content_integrity", index: i, message: `${label(probe.contents[i]!, i)} ${what}` });
+  const flagged = new Set<number>();
+  const flag = (i: number, what: string) => {
+    flagged.add(i);
+    issues.push({ ruleId: "content_integrity", index: i, message: `${label(probe.contents[i]!, i)} ${what}` });
+  };
   let cursor = 0;
   // The turn in effect at the cursor: the one the last content placed sat in.
   let carried: Turn = {};
+  // Where the output shows each content, for the copy check.
+  const spans: Span[] = [];
   for (let i = 0; i < inputs.length; i++) {
     const { role, text } = inputs[i]!;
     // Whitespace alone has no place to find, and a template that drops or trims it loses nothing.
@@ -296,6 +377,7 @@ export function checkContent(probe: Probe, output: string, transforms: readonly 
     const place = (t: string, r: Role, from: number) => placeOf(output, t, r, from, limit, from === cursor ? carried : {}, turns);
     const found = placement(output, text, role, cursor, limit, carried, turns);
     if (found) {
+      spans.push({ start: found.at, end: found.at + text.length, turn: found.turn, inputs: [i] });
       cursor = found.at + text.length;
       carried = found.turn;
       continue;
@@ -305,7 +387,10 @@ export function checkContent(probe: Probe, output: string, transforms: readonly 
     for (const m of allowed) if ((explained = m.match(scan))) break;
     if (explained) {
       // A drop places nothing, so the turn in effect stays; anything placed sits in the turn at its start.
-      if (explained.end > explained.start) carried = turnScan(output, cursor, carried, turns)(explained.start);
+      if (explained.end > explained.start) {
+        carried = turnScan(output, cursor, carried, turns)(explained.start);
+        spans.push({ start: explained.start, end: explained.end, turn: carried, inputs: Array.from({ length: explained.covers }, (_, j) => i + j) });
+      }
       cursor = explained.end;
       i += explained.covers - 1;
       continue;
@@ -320,6 +405,7 @@ export function checkContent(probe: Probe, output: string, transforms: readonly 
       flag(i, misplaced(turn, role));
       // Where a short content shows may be the template's own text, so the next content is sought from here.
       if (distinctive(text)) {
+        spans.push({ start: shown.at, end: shown.at + shown.r.length, turn, inputs: [i] });
         cursor = shown.at + shown.r.length;
         carried = turn;
       }
@@ -331,5 +417,6 @@ export function checkContent(probe: Probe, output: string, transforms: readonly 
       else flag(i, "is missing: it was dropped or rewritten");
     }
   }
+  for (const [i, what] of copies(probe, output, inputs, spans, flagged, turns)) flag(i, what);
   return issues;
 }
