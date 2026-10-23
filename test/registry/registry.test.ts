@@ -144,8 +144,8 @@ describe("matching (ISC-24, ISC-24.2)", () => {
       expect(registry.match(tpl(known.text.replace(" ", ch))).kind).toBe("none");
       expect(registry.match(tpl(`${ch}${known.text}`)).kind).toBe("none");
     }
-    expect(whitespaceKey(" a\t\tb \r\n c\n")).toBe("a b c");
-    expect(whitespaceKey("a b")).toBe("a b");
+    expect(whitespaceKey(" a\t\tb \r\n c\n")).toBe(whitespaceKey("a b c"));
+    expect(whitespaceKey("a\u00a0b")).not.toBe(whitespaceKey("a b"));
   });
 
   test("bytes that are not UTF-8 never match as a variant", () => {

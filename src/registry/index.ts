@@ -10,7 +10,7 @@ import { unifiedDiff } from "../diff.ts";
 import { cKey, viewKey } from "../gguf/templates.ts";
 import { parseHfCachePath } from "../hf/cache.ts";
 import { clip } from "../rules/finalize.ts";
-import { whitespaceKey } from "../whitespace.ts";
+import { sameIgnoringWhitespace, whitespaceKey } from "../whitespace.ts";
 import type {
   ExtractedTemplate,
   Finding,
@@ -85,6 +85,8 @@ function parseEntry(raw: unknown, i: number): RegistryEntry {
 // ISC-24.2's variant key; one definition with divergence and the local comparison.
 export { whitespaceKey };
 
+const BLANK_KEY = whitespaceKey("");
+
 /** Loads registry/known-good.json and the template text each entry pins. Throws when a pinned text does not hash to its entry's sha256. */
 export function loadRegistry(dir: string = REGISTRY_DIR): Registry {
   const file = readJson(join(dir, "known-good.json"));
@@ -102,7 +104,7 @@ export function loadRegistry(dir: string = REGISTRY_DIR): Registry {
       const actual = sha256(bytes);
       if (actual !== entry.sha256) throw new Error(`registry template ${entry.sha256}.jinja hashes to ${actual}, not its entry's sha256`);
       text = strictUtf8.decode(bytes); // a pinned text that is not UTF-8 throws here
-      if (whitespaceKey(text) === "") throw new Error(`registry template ${entry.sha256}.jinja is empty or all whitespace`);
+      if (whitespaceKey(text) === BLANK_KEY) throw new Error(`registry template ${entry.sha256}.jinja is empty or all whitespace`);
       texts.set(entry.sha256, text);
     }
     return Object.freeze({ entry: Object.freeze(entry), text });
@@ -129,8 +131,9 @@ export function createRegistry(known: readonly KnownGoodTemplate[]): Registry {
       if (exact) return { kind: "exact", known: preferred(exact, template) };
       // Bytes that are not UTF-8 decode lossily, so their text proves nothing about the bytes.
       if (!template.validUtf8) return { kind: "none" };
-      const variant = byKey.get(whitespaceKey(template.text));
-      if (variant) return { kind: "whitespace", known: preferred(variant, template) };
+      // The key is a hash, so a hit is confirmed against the text itself.
+      const variant = byKey.get(whitespaceKey(template.text))?.filter((k) => sameIgnoringWhitespace(k.text, template.text));
+      if (variant?.length) return { kind: "whitespace", known: preferred(variant, template) };
       return { kind: "none" };
     },
     forRepo(repo: string): readonly KnownGoodTemplate[] {
