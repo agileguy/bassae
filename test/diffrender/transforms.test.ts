@@ -235,6 +235,27 @@ describe("tool renderings", () => {
     expect(gemma4.sites(`<|turn>system\n<|tool>${gemmaText}<tool|><turn|>`).map((s) => s.name)).toEqual(["get_weather"]);
     expect(gptOss.sites(`// x\ntype f = () => any;\n\n`)).toEqual([]);
   });
+
+  test("each rendering's sites stop at the limit given", () => {
+    const outputs: [ToolMatcher, string][] = [
+      [gptOss, `namespace functions {\n\n${gptOss.render(WEATHER_TOOL)!.repeat(10)}} // namespace functions`],
+      [gemma4, `<|tool>${gemma4.render(WEATHER_TOOL)}<tool|>`.repeat(10)],
+      [functionGemma, `<start_function_declaration>${functionGemma.render(WEATHER_TOOL)}<end_function_declaration>`.repeat(10)],
+      [qwenXml, `<tools>\n${`${qwenXml.render(WEATHER_TOOL)}\n`.repeat(5)}</tools>`.repeat(2)],
+    ];
+    for (const [m, out] of outputs) {
+      expect(m.sites(out).length).toBe(10);
+      for (const limit of [0, 3, 7]) expect(m.sites(out, limit).length).toBe(limit);
+    }
+  });
+
+  test("gpt-oss: entries that never close are found in one pass", () => {
+    // Each `type` line once searched the rest of the body for its closer: quadratic in the entries.
+    const out = `namespace functions {\n\n${"type a = \n".repeat(300_000)}} // namespace functions`;
+    const sites = gptOss.sites(out);
+    expect(sites.length).toBe(300_000);
+    expect(sites[0]!.end).toBe(sites.at(-1)!.end);
+  }, 5000);
 });
 
 // ---- standard JSON Schema, and the keys each template reads ----
