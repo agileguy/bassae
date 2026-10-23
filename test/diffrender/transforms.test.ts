@@ -418,7 +418,8 @@ describe("tool renderings over standard JSON Schema", () => {
 
   test("each documented loss prints exactly as the stock template prints it", async () => {
     // gpt-oss: integer as number, null as any, scalar items as the bare element type, a nested description and
-    // default unprinted, an element type longer than 50 characters as any[]; nullable as `| null` where it is read.
+    // default unprinted, an element type longer than 50 characters as any[], a non-string default beside an enum as
+    // the renderer concatenates it; nullable as `| null` where it is read.
     const gptOss = TOOL_MATCHERS["gpt-oss-typescript-tools"]!;
     const lossy = fn("lossy", "Every shape gpt-oss prints in part.", {
       type: "object",
@@ -431,6 +432,9 @@ describe("tool renderings over standard JSON Schema", () => {
         gone: { type: "string", default: null },
         maybe: { type: "string", nullable: true },
         maybes: { type: "array", items: { type: "array", items: { type: "number" }, nullable: true }, nullable: true },
+        rank: { type: "string", enum: ["low", "high"], default: 2 },
+        picks: { type: "string", enum: ["a"], default: ["a", null, [1, "x"], { k: true }] },
+        place: { type: "string", enum: ["north"], default: { row: 1 } },
       },
       required: ["count"],
     });
@@ -444,6 +448,9 @@ describe("tool renderings over standard JSON Schema", () => {
       "gone?: string, // default: null,\n" +
       "maybe?: string | null,\n" +
       "maybes?: number[] | null[] | null,\n" +
+      'rank?: "low" | "high", // default: 2,\n' +
+      'picks?: "a", // default: a,undefined,[1, "x"],{"k": true},\n' +
+      'place?: "north", // default: [object Map],\n' +
       "}) => any;\n\n";
     expect(gptOss.render(lossy)).toBe(gptText);
 
@@ -604,6 +611,8 @@ describe("tool renderings over standard JSON Schema", () => {
       ["additionalProperties", tool({ type: "object", properties: {}, additionalProperties: false }), [QWEN]],
       ["required naming no property", tool({ type: "object", properties: { b: { type: "string" } }, required: ["c"] }), [QWEN]],
       ["none default", tool({ type: "string", default: null }), [GPT_OSS, GEMMA4, FUNCTIONGEMMA]],
+      ["non-string default beside an enum", tool({ type: "string", enum: ["a"], default: 1 }), [GPT_OSS, GEMMA4, FUNCTIONGEMMA, QWEN]],
+      ["none default beside an enum", tool({ type: "string", enum: ["a"], default: null }), [GEMMA4, FUNCTIONGEMMA]],
       ["non-JSON default", tool({ type: "number", default: Number.NaN }), []],
       ["nesting past the depth bound", tool(deep), []],
       ["root description", tool({ type: "string" }, { description: "Settings." }), []],

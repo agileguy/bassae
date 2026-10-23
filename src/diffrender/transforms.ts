@@ -301,6 +301,18 @@ function tsType(s: Schema): string | undefined {
   }
 }
 
+/**
+ * Line 129: beside an enum the default is concatenated raw. The renderer prints a number or boolean as JavaScript
+ * writes it, a list as its items joined by commas (none as `undefined`, a nested list or mapping as JSON), and a
+ * mapping as `[object Map]`: a listed loss. None raises there, so it is not ported.
+ */
+function rawDefault(v: unknown): string | undefined {
+  if (v === null) return undefined;
+  if (isObj(v)) return "[object Map]";
+  if (Array.isArray(v)) return v.map((x) => (x === null ? "undefined" : typeof x === "object" ? toJson(x) : String(x))).join(",");
+  return String(v);
+}
+
 // gpt-oss lines 108-148 and 250-253: a TypeScript namespace. Each tool is `// <description>` and
 // `type <name> = (_: {...}) => any;`, each parameter `// <description>` when it has one, then
 // `<name>?: <type>,` with the `?` when it is not required and its default after the type when it has one.
@@ -321,9 +333,9 @@ const gptOssTools: ToolMatcher = {
       if (truthy(spec.description)) out += `// ${spec.description}\n`;
       out += `${name}${required.includes(name) ? "" : "?"}: ${type}`;
       if (spec.default !== undefined) {
-        // Lines 129-136: beside an enum the default is concatenated raw, which only a string survives.
-        if (spec.enum && !isStr(spec.default)) return undefined;
-        out += `, // default: ${spec.enum ? spec.default : toJson(spec.default)}`;
+        const text = spec.enum ? rawDefault(spec.default) : toJson(spec.default);
+        if (text === undefined) return undefined;
+        out += `, // default: ${text}`;
       }
       out += ",\n";
     }
