@@ -36,7 +36,7 @@ export type RuleId =
   // baseline and provenance
   | "local_comparison" //           GGUF template differs from a sibling HF source (ISC-23)
   | "registry_divergence" //        template differs from its known-good registry entry (ISC-25)
-  | "local_tamper" //               HF-cache blob content does not match its git blob hash (ISC-40)
+  | "local_tamper" //               HF-cache blob content does not match its git blob hash, or a snapshot file is not a blob link and has no download record (ISC-40)
   | "scanner_error"; //             the scanner itself failed on this input
 
 /** A location in a template's decoded text. Offsets are UTF-16 code units into `ExtractedTemplate.text`; line and col are 1-based, col counted in code points. */

@@ -3,7 +3,7 @@
 // comparison (ISC-23). Whitespace is ASCII only: tab, line feed, vertical tab,
 // form feed, carriage return and space. An inserted U+FEFF, U+00A0, U+2028 or
 // U+3000 is a real change, never a variant, so an edit made of them is always
-// reported and explained (round-2 review: Gemini 1, Codex R2).
+// reported and explained (review round 1: Gemini 1, Codex R2).
 
 import { createHash } from "node:crypto";
 
