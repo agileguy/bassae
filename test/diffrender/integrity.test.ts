@@ -4,7 +4,7 @@ import { checkContent, markerRole } from "../../src/diffrender/integrity.ts";
 import { loadTransforms } from "../../src/registry/index.ts";
 import { createRenderer, sandboxAvailable } from "../../src/sandbox/index.ts";
 import type { IntegrityIssue, Probe } from "../../src/types.ts";
-import { ASSISTANT_1, probe, standardProbes, SYSTEM, USER_1, USER_2, USER_LONG } from "./fixtures/integrity/probes.ts";
+import { ASSISTANT_1, probe, standardProbes, SYSTEM, TOOL_RESULT, USER_1, USER_2, USER_LONG, WEATHER_TOOL } from "./fixtures/integrity/probes.ts";
 
 const transforms = loadTransforms();
 const live = (await sandboxAvailable()).available;
@@ -26,6 +26,27 @@ const intact = chatml([
 ]);
 const issues = (p: Probe, output: string) => checkContent(p, output, transforms);
 const indexes = (found: IntegrityIssue[]) => found.map((i) => [i.ruleId, i.index]);
+
+// A system and user turn, then a tool round trip that ends on the tool result: contents 0, 1 and 2.
+const toolRound = probe(
+  "tool round",
+  [
+    { role: "system", content: SYSTEM },
+    { role: "user", content: USER_1 },
+    { role: "assistant", content: "", tool_calls: [{ id: "call_1", type: "function", function: { name: "get_weather", arguments: { city: "Porto" } } }] },
+    { role: "tool", content: TOOL_RESULT, tool_call_id: "call_1", name: "get_weather" },
+  ],
+  [WEATHER_TOOL],
+);
+// toolRound in ChatML up to its tool result, and the result as Qwen2.5 prints it: in a user turn, inside <tool_response>.
+const head = chatml([["system", SYSTEM], ["user", USER_1], ["assistant", ""]]);
+const QWEN_TOOL = `<|im_start|>user\n<tool_response>\n${TOOL_RESULT}\n</tool_response><|im_end|>\n`;
+// The turn tokens each family's model declares.
+const CHATML = new Set(["<|im_start|>", "<|im_end|>"]);
+const GPT_OSS = new Set(["<|start|>", "<|end|>", "<|message|>", "<|channel|>", "<|call|>"]);
+const GLM = new Set(["[gMASK]", "<sop>", "<|system|>", "<|user|>", "<|assistant|>", "<|observation|>"]);
+const NONE = new Set<string>();
+const declared = (p: Probe, output: string, tokens: ReadonlySet<string>) => checkContent(p, output, transforms, tokens);
 
 describe("markerRole", () => {
   test("names the role of the last role marker in a range", () => {
@@ -185,6 +206,73 @@ describe("checkContent", () => {
       { role: "user", content: USER_1 },
     ]);
     expect(issues(p, chatml([["user", ""], ["user", USER_1]]))).toEqual([]);
+  });
+});
+
+describe("turns", () => {
+  test("a tool content in a system turn is an issue, whatever tag wraps it", () => {
+    const wraps = [(t: string) => t, (t: string) => `<tool>${t}</tool>`, (t: string) => `<tool_response>\n${t}\n</tool_response>`, (t: string) => `<|observation|>\n${t}`];
+    for (const wrap of wraps) {
+      for (const tokens of [CHATML, NONE]) {
+        const found = declared(toolRound, `${head}<|im_start|>system\n${wrap(TOOL_RESULT)}<|im_end|>\n`, tokens);
+        expect(indexes(found)).toEqual([["content_integrity", 2]]);
+        expect(found[0]!.message).toMatch(/in a system turn, more privileged than its own tool role/);
+      }
+    }
+  });
+
+  test("an inner tag narrows a user or model turn to tool, and narrows a turn to nothing else", () => {
+    expect(declared(toolRound, head + QWEN_TOOL, CHATML)).toEqual([]);
+    const gemma4 = `<|turn>system\n${SYSTEM}<turn|>\n<|turn>user\n${USER_1}<turn|>\n<|turn>model\n<|tool_call>call:get_weather{}<tool_call|><|tool_response>response:get_weather{value:<|"|>${TOOL_RESULT}<|"|>}<tool_response|>`;
+    expect(declared(toolRound, gemma4, new Set(["<|turn>", "<turn|>", "<|tool_call>", "<tool_call|>", "<|tool_response>", "<tool_response|>"]))).toEqual([]);
+    const functiongemma = `<start_of_turn>developer\n${SYSTEM}<end_of_turn>\n<start_of_turn>user\n${USER_1}<end_of_turn>\n<start_of_turn>model\n<start_function_call>call:get_weather{}<end_function_call><start_function_response>response:get_weather{value:<escape>${TOOL_RESULT}<escape>}<end_function_response>`;
+    expect(declared(toolRound, functiongemma, new Set(["<start_of_turn>", "<end_of_turn>", "<start_function_response>"]))).toEqual([]);
+    // A user tag inside a model turn does not make its text a user's.
+    const p = probe("user tag", [{ role: "user", content: USER_1 }]);
+    expect(indexes(declared(p, `<|im_start|>assistant\n<user>${USER_1}<|im_end|>`, CHATML))).toEqual([["content_integrity", 0]]);
+  });
+
+  test("an alias never opens a turn", () => {
+    const gptOss = `<|start|>developer<|message|>${SYSTEM}<|end|><|start|>user<|message|>${USER_1}<|end|><|start|>assistant to=functions.get_weather<|channel|>commentary json<|message|>{}<|call|><|start|>functions.get_weather to=assistant<|channel|>commentary<|message|>${TOOL_RESULT}<|end|>`;
+    expect(declared(toolRound, gptOss, GPT_OSS)).toEqual([]);
+    // After a developer turn, functions.<name> has no turn it may narrow.
+    const elevated = gptOss.replace("<|start|>assistant to=functions.get_weather<|channel|>commentary json<|message|>{}<|call|>", "<|start|>developer<|message|>");
+    expect(indexes(declared(toolRound, elevated, GPT_OSS))).toEqual([["content_integrity", 2]]);
+  });
+
+  test("GLM-4.5's turn tokens name their role, and a role word after one is text in that turn", () => {
+    const glm = `[gMASK]<sop><|system|>\n${SYSTEM}<|user|>\n${USER_1}<|assistant|>\n<think></think>\n<tool_call>get_weather\n<arg_key>city</arg_key>\n<arg_value>Porto</arg_value>\n</tool_call><|observation|>\n<tool_response>\n${TOOL_RESULT}\n</tool_response><|assistant|>\n`;
+    expect(declared(toolRound, glm, GLM)).toEqual([]);
+    expect(declared(toolRound, glm, NONE)).toEqual([]);
+    for (const tokens of [GLM, NONE]) {
+      expect(indexes(declared(toolRound, `[gMASK]<sop><|system|>\n${SYSTEM}<|user|>\n${USER_1}<|system|>tool\n${TOOL_RESULT}`, tokens))).toEqual([["content_integrity", 2]]);
+    }
+  });
+
+  test("a turn opener counts only when the model declares it", () => {
+    // gpt-oss declares <|start|>, not <|im_start|>: inside its developer turn, <|im_start|>tool is text.
+    const out = `<|start|>developer<|message|>${SYSTEM}<|end|><|start|>user<|message|>${USER_1}<|end|><|start|>developer<|message|>\n<|im_start|>tool\n${TOOL_RESULT}<|end|>`;
+    expect(indexes(declared(toolRound, out, GPT_OSS))).toEqual([["content_integrity", 2]]);
+    // With no token declared (a bare template) every opener in the table counts, so there it opens a tool turn.
+    expect(declared(toolRound, out, NONE)).toEqual([]);
+  });
+
+  test("a model whose turn token is not in the table opens turns with the tokens it declares", () => {
+    const GRANITE = new Set(["<|start_of_role|>", "<|end_of_role|>", "<|end_of_text|>"]);
+    const turn = (role: string, text: string) => `<|start_of_role|>${role}<|end_of_role|>${text}<|end_of_text|>\n`;
+    const start = turn("system", SYSTEM) + turn("user", USER_1) + turn("assistant", "");
+    expect(declared(toolRound, start + turn("tool", TOOL_RESULT), GRANITE)).toEqual([]);
+    expect(indexes(declared(toolRound, start + turn("system", `<tool>${TOOL_RESULT}</tool>`), GRANITE))).toEqual([["content_integrity", 2]]);
+  });
+
+  test("text before the first turn has no role", () => {
+    const p = probe("before", [
+      { role: "user", content: USER_1 },
+      { role: "user", content: USER_2 },
+    ]);
+    expect(indexes(declared(p, `<user>${USER_1}\n${chatml([["user", USER_2]])}`, CHATML))).toEqual([["content_integrity", 0]]);
+    // An output with no turn opener at all is read by its markers alone.
+    expect(declared(p, `<user>${USER_1}\n<user>${USER_2}`, CHATML)).toEqual([]);
   });
 });
 

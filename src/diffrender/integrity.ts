@@ -1,22 +1,36 @@
 // Content integrity (ISC-22.3): every system, user and tool content a probe passes reaches the output verbatim,
-// in order, under its own role, unless a transform on the allowlist explains the difference.
+// in order, inside a turn of its own role, unless a transform on the allowlist explains the difference.
 //
-// Contents are placed left to right. Each must appear at or after the end of the one before it, under its own role:
-// the role of the last role marker between the two, read only from the output between them and never from a
-// content itself. With no marker between them the role in effect is still the one the content before it sat
-// under, as when two text parts of one message print side by side. A distinctive content (several words, long enough not to recur by chance) counts
-// at the first place it appears, so a template that echoes user text into the system prompt ahead of the user turn
-// fails here rather than passing on the copy that follows. A short or one-word content may equal the template's
-// own text (a trigger probe passes a template literal such as `<|im_start|>` or `system`), so it takes the first
-// place it appears under its own role.
+// Turns (Decisions 02:58). A turn opens where a role word follows a turn-opening token the model declares, as in
+// `<|im_start|>user` or `<|start|>developer`, or at a declared token that names its role itself, as GLM-4.5's
+// `<|user|>`. The model's tokens come in the template's scaffolding. When it declares an opener the tables below
+// list, only the declared ones open turns. When it declares none, as with a bare template, which has no model and
+// so no tokens, every opener in the tables counts, and so does any other token the model declares: a template then
+// cannot hide a content behind an inner tag, but it can open a turn with an opener its real model lacks, or with a
+// token of an unlisted family that is not an opener there. Inner tags and aliases (`<tool_response>`,
+// `<|observation|>`, `functions.<name>`, `<tool>`) never open a turn. They narrow the turn they sit in, to its own
+// role or, in a user or model turn, to tool: Qwen prints a tool result in a user turn, and gemma-4, functiongemma,
+// gpt-oss and GLM-4.5 in a model turn. Nothing narrows a system turn. A content's role is its turn's role, narrowed,
+// and must be the content's own, so a content in a turn more privileged than its role fails whatever tag wraps it
+// (system and developer, then user, then tool; assistant stands apart). Text before the first turn has no role. An
+// output in which no turn opens at all is read by its markers alone, each naming the role until the next.
+//
+// Placement. Contents are placed left to right. Each must appear at or after the end of the one before it, inside
+// a turn of its own role, read only from the output between them and never from a content itself. With no marker
+// between them the turn the content before it sat in still holds, as when two text parts of one message print side
+// by side. A distinctive content (several words, long enough not to recur by chance) counts at the first place it
+// appears, so a template that echoes user text into the system prompt ahead of the user turn fails here rather than
+// passing on the copy that follows. A short or one-word content may equal the template's own text (a trigger probe
+// passes a template literal such as `<|im_start|>` or `system`), so it takes the first place it appears under its
+// own role.
 
 import type { Transform } from "../registry/index.ts";
 import type { IntegrityIssue, Probe, ProbeContent } from "../types.ts";
 import { CONTENT_MATCHERS, type ContentMatch, type ContentScan, type Role, type ScanInput } from "./transforms.ts";
 
-// The role each marker word names. A role passes as itself; the aliases are the words the pinned templates print
-// in its place, each with the lines that print it.
-const ROLE_WORDS: ReadonlyMap<string, Role> = new Map(Object.entries({
+// The role each turn word opens. A role passes as itself; the others are the words the pinned templates print in
+// its place, each with the lines that print it.
+const TURN_WORDS: ReadonlyMap<string, Role> = new Map(Object.entries({
   system: "system",
   // gpt-oss lines 234-244 put the system message in a developer message; functiongemma line 130 likewise.
   developer: "system",
@@ -28,15 +42,35 @@ const ROLE_WORDS: ReadonlyMap<string, Role> = new Map(Object.entries({
   model: "assistant",
   // LFM2 line 4 and xLAM-2 line 29 print the message's own role.
   tool: "tool",
+  // The Llama 3.x tool role, named in the phase brief. No pinned template prints it.
+  ipython: "tool",
+}) as [string, Role][]);
+
+// The words a pinned template prints for a tool result inside another turn. They narrow a turn and never open one.
+const ALIASES: ReadonlyMap<string, Role> = new Map(Object.entries({
   // Qwen2.5 line 44, Qwen3 line 72, GLM-4.5 line 86; gemma-4 (36e3a42e) line 161 prints <|tool_response>.
   tool_response: "tool",
   // GLM-4.5 line 84.
   observation: "tool",
-  // The Llama 3.x tool role, named in the phase brief. No pinned template prints it.
-  ipython: "tool",
   // functiongemma line 202.
   start_function_response: "tool",
 }) as [string, Role][]);
+
+// Tokens a role word right after opens a turn, each with the lines that print it before one.
+const PREFIX_OPENERS = [
+  // Qwen2.5 (d5495a1e) lines 2 and 42, Qwen3 (87a2728c) lines 2 and 70, LFM2 line 4, xLAM-2 lines 2, 29 and 60.
+  "<|im_start|>",
+  // gemma-3 lines 26 and 45, gemma-3n lines 26 and 47, functiongemma lines 130, 162 and 277.
+  "<start_of_turn>",
+  // gemma-4 (36e3a42e) lines 180, 220 and 234.
+  "<|turn>",
+  // gpt-oss lines 229, 244, 292 and 324.
+  "<|start|>",
+  // Llama 3.x, named in the phase brief. No pinned template prints it.
+  "<|start_header_id|>",
+];
+// Tokens that open a turn of the role they name: GLM-4.5 lines 3, 45 and 49. A role word after one is its text.
+const WHOLE_OPENERS = ["<|system|>", "<|user|>", "<|assistant|>"];
 
 // A marker is a role word right after `<`, `>` or `|`, as a whole word: so `<|im_start|>user` and `<|observation|>`
 // count, but a role in prose, a closing tag (`</tool_response>`, or gemma-4's `<tool_response|>`) or a JSON value
@@ -46,35 +80,107 @@ const MARKER = /(<\|?|>|\|)(functions\.[A-Za-z0-9_.-]+|[A-Za-z][A-Za-z0-9_]*)(?=
 /** The role a marker match names, or undefined for another word or a closer. */
 function roleOf(m: RegExpMatchArray): Role | undefined {
   if (m[1] === "<" && m[3]) return undefined; // <name|> closes a gemma-4 block
-  return m[2]!.startsWith("functions.") ? "tool" : ROLE_WORDS.get(m[2]!);
+  const word = m[2]!;
+  return word.startsWith("functions.") ? "tool" : (TURN_WORDS.get(word) ?? ALIASES.get(word));
+}
+
+/** The tokens that open turns, and whether one opens anywhere in the output at hand. */
+interface Turns {
+  prefix: readonly string[];
+  whole: readonly string[];
+  /** False when no turn opens anywhere: each marker then names the role until the next, as before turns. */
+  structured: boolean;
+}
+type Openers = Omit<Turns, "structured">;
+
+/** The turn in effect at a point: the role its opener named, narrowed by the inner markers after it. */
+interface Turn {
+  turn?: Role;
+  role?: Role;
+}
+
+// A declared token an unlisted family may open turns with: markup at both ends and a word inside, but not a tag
+// that names a role or an alias, which never opens one.
+const TOKEN = /^[^\sA-Za-z0-9]\S{0,62}[^\sA-Za-z0-9]$/;
+const TAG = /^<\/?\|?([A-Za-z][A-Za-z0-9_]*)\|?>$/;
+const namesRole = (t: string) => {
+  const word = TAG.exec(t)?.[1];
+  return word !== undefined && (TURN_WORDS.has(word) || ALIASES.has(word));
+};
+
+const OPENERS = new WeakMap<ReadonlySet<string>, Openers>();
+
+/** The openers a template's scaffolding gives: the listed ones its model declares, else every listed and declared one. */
+function openersOf(scaffolding: ReadonlySet<string>): Openers {
+  let o = OPENERS.get(scaffolding);
+  if (!o) {
+    const prefix = PREFIX_OPENERS.filter((t) => scaffolding.has(t));
+    const whole = WHOLE_OPENERS.filter((t) => scaffolding.has(t));
+    const declared = [...scaffolding].filter((t) => TOKEN.test(t) && /[A-Za-z]/.test(t) && !namesRole(t));
+    o = prefix.length + whole.length > 0 ? { prefix, whole } : { prefix: [...PREFIX_OPENERS, ...declared], whole: WHOLE_OPENERS };
+    OPENERS.set(scaffolding, o);
+  }
+  return o;
+}
+
+const FALLBACK = openersOf(new Set());
+// No openers: every marker names the role, as markerRole reads them.
+const RAW: Turns = { prefix: [], whole: [], structured: false };
+
+/** The role of the turn a marker match opens, or undefined when it opens none. Openers before `a` are not read. */
+function opens(output: string, m: RegExpMatchArray, at: number, a: number, o: Openers): Role | undefined {
+  const open = m[1]!;
+  const name = m[2]!;
+  const close = m[3];
+  const role = TURN_WORDS.get(name);
+  if (!role || (open === "<" && close)) return undefined;
+  if (o.whole.includes(open + name + (close ?? ""))) return role;
+  const word = at + open.length;
+  return o.prefix.some((t) => word - t.length >= a && output.startsWith(t, word - t.length)) ? role : undefined;
+}
+
+/** `openers` for one output: whether a turn opens anywhere in it. */
+function turnsIn(output: string, openers: Openers): Turns {
+  for (const m of output.matchAll(MARKER)) if (opens(output, m, m.index!, 0, openers)) return { ...openers, structured: true };
+  return { ...openers, structured: false };
+}
+
+/** The turn after the marker match at `at`, for a scan from `a`. */
+function step(output: string, turns: Turns, a: number, t: Turn, m: RegExpMatchArray, at: number): Turn {
+  const opened = opens(output, m, at, a, turns);
+  if (opened) return { turn: opened, role: opened };
+  const role = roleOf(m);
+  if (!role) return t;
+  if (t.turn) return role === t.turn || (role === "tool" && t.turn !== "system") ? { turn: t.turn, role } : t;
+  return turns.structured ? t : { role };
 }
 
 /**
- * markerRole(output, a, b) for each b in turn, b never decreasing, reading the output from `a` once: a content
- * that recurs a thousand times costs one pass, not a thousand. `initial` is the role in effect at `a`.
+ * The turn in effect at each b in turn, b never decreasing, reading the output from `a` once: a content that recurs
+ * a thousand times costs one pass, not a thousand. `initial` is the turn in effect at `a`.
  */
-function markerScan(output: string, a: number, initial?: Role): (b: number) => Role | undefined {
+function turnScan(output: string, a: number, initial: Turn, turns: Turns): (b: number) => Turn {
   const re = new RegExp(MARKER.source, "g");
   re.lastIndex = a;
-  let role = initial;
+  let turn = initial;
   let next = re.exec(output);
   return (b) => {
     // A match is settled once b is past it and the two characters its closer test looks at.
     while (next && next.index + next[0].length + 2 <= b) {
-      role = roleOf(next) ?? role;
+      turn = step(output, turns, a, turn, next, next.index);
       next = re.exec(output);
     }
-    if (!next || next.index >= b) return role;
+    if (!next || next.index >= b) return turn;
     // b cuts the next match or its closer test: read it as a scan of output[a, b) would.
-    let cut = role;
-    for (const m of output.slice(next.index, b).matchAll(MARKER)) cut = roleOf(m) ?? cut;
+    let cut = turn;
+    for (const m of output.slice(next.index, b).matchAll(MARKER)) cut = step(output, turns, a, cut, m, next.index + m.index!);
     return cut;
   };
 }
 
-/** The role the last role marker in output[a, b) names, or undefined when there is none. */
+/** The role the last role marker in output[a, b) names, or undefined when there is none. Turns play no part. */
 export function markerRole(output: string, a: number, b: number): Role | undefined {
-  return markerScan(output, a)(b);
+  return turnScan(output, a, {}, RAW)(b).role;
 }
 
 // A content this long with a space inside is distinctive: the template's own text does not hold it by chance.
@@ -99,22 +205,29 @@ function endsInMarker(output: string, at: number, end: number): boolean {
   return false;
 }
 
+/** Where `text` takes its place at or after `from` under `role`, with the turn it sits in, as placeOf decides. */
+function placement(output: string, text: string, role: Role, from: number, limit: number, carried: Turn, turns: Turns): { at: number; turn: Turn } | undefined {
+  if (text === "") return undefined;
+  const turnBefore = turnScan(output, from, carried, turns);
+  const first = distinctive(text);
+  for (let at = output.indexOf(text, from); at >= 0; at = output.indexOf(text, at + 1)) {
+    if (!first && at + text.length > limit) return undefined;
+    if (endsInMarker(output, at, at + text.length)) continue;
+    const turn = turnBefore(at);
+    if (turn.role === role) return { at, turn };
+    if (first) return undefined;
+  }
+  return undefined;
+}
+
 /**
  * Where `text` takes its place at or after `from` under `role`, or -1: its first place when it is distinctive,
  * otherwise its first place under that role that ends by `limit`. A place that ends in a marker is markup, not a
- * place. `carried` is the role in effect at `from`, which holds until a marker after it names another.
+ * place. `carried` is the turn in effect at `from`, which holds until a marker after it changes it. `turns` defaults
+ * to every listed opener, as for a template whose model declares none.
  */
-export function placeOf(output: string, text: string, role: Role, from: number, limit = output.length, carried?: Role): number {
-  if (text === "") return -1;
-  const roleBefore = markerScan(output, from, carried);
-  const first = distinctive(text);
-  for (let at = output.indexOf(text, from); at >= 0; at = output.indexOf(text, at + 1)) {
-    if (!first && at + text.length > limit) return -1;
-    if (endsInMarker(output, at, at + text.length)) continue;
-    if (roleBefore(at) === role) return at;
-    if (first) return -1;
-  }
-  return -1;
+export function placeOf(output: string, text: string, role: Role, from: number, limit = output.length, carried: Turn = {}, turns = turnsIn(output, FALLBACK)): number {
+  return placement(output, text, role, from, limit, carried, turns)?.at ?? -1;
 }
 
 // Below this many characters a matching prefix says nothing: short runs of common words recur anywhere.
@@ -133,13 +246,22 @@ function longestPrefix(output: string, text: string, from: number): number {
 }
 
 const label = (c: ProbeContent, i: number) => `${c.role} content ${i} (message ${c.message})`;
+const an = (r: Role) => (r === "assistant" ? `an ${r}` : `a ${r}`);
+const RANK: Readonly<Record<Role, number>> = { system: 3, user: 2, tool: 1, assistant: 0 };
+
+/** What is wrong with a content of `role` found in turn `t`. */
+function misplaced(t: Turn, role: Role): string {
+  if (t.turn && t.turn !== "assistant" && RANK[t.turn] > RANK[role]) return `sits in a ${t.turn} turn, more privileged than its own ${role} role`;
+  return `sits under ${t.role ? `${an(t.role)} role marker` : "no role marker"}, not ${an(role)} one`;
+}
 
 /** The content_integrity issues in one rendered probe's output. Empty when every content arrived intact. */
 // `scaffolding` is the template's scaffolding set: the turn-opening tokens its model declares are among it.
-export function checkContent(probe: Probe, output: string, transforms: readonly Transform[], _scaffolding: ReadonlySet<string> = new Set()): IntegrityIssue[] {
+export function checkContent(probe: Probe, output: string, transforms: readonly Transform[], scaffolding: ReadonlySet<string> = new Set()): IntegrityIssue[] {
   const allowed = transforms.flatMap((t) => (CONTENT_MATCHERS[t.id] ? [CONTENT_MATCHERS[t.id]!] : []));
   const context = (probe.request.context ?? {}) as Record<string, unknown>;
   const inputs: ScanInput[] = probe.contents.map((c) => ({ role: c.role, message: c.message, field: "content", text: c.text }));
+  const turns = turnsIn(output, openersOf(scaffolding));
   const roleAt = (a: number, b: number) => markerRole(output, a, b);
   // What each input may render as: verbatim, then each allowlisted rewrite of it.
   const renderings = (i: number) => [
@@ -163,27 +285,27 @@ export function checkContent(probe: Probe, output: string, transforms: readonly 
   const issues: IntegrityIssue[] = [];
   const flag = (i: number, what: string) => issues.push({ ruleId: "content_integrity", index: i, message: `${label(probe.contents[i]!, i)} ${what}` });
   let cursor = 0;
-  // The role in effect at the cursor: the role the last content placed sat under.
-  let carried: Role | undefined;
+  // The turn in effect at the cursor: the one the last content placed sat in.
+  let carried: Turn = {};
   for (let i = 0; i < inputs.length; i++) {
     const { role, text } = inputs[i]!;
     // Whitespace alone has no place to find, and a template that drops or trims it loses nothing.
     if (text.trim() === "") continue;
 
     const limit = distinctive(text) ? output.length : limitAfter(i, cursor);
-    const place = (t: string, r: Role, from: number) => placeOf(output, t, r, from, limit, from === cursor ? carried : undefined);
-    const at = place(text, role, cursor);
-    if (at >= 0) {
-      cursor = at + text.length;
-      carried = role;
+    const place = (t: string, r: Role, from: number) => placeOf(output, t, r, from, limit, from === cursor ? carried : {}, turns);
+    const found = placement(output, text, role, cursor, limit, carried, turns);
+    if (found) {
+      cursor = found.at + text.length;
+      carried = found.turn;
       continue;
     }
     const scan: ContentScan = { output, from: cursor, inputs, index: i, context, markerRole: roleAt, place, renderings };
     let explained: ContentMatch | undefined;
     for (const m of allowed) if ((explained = m.match(scan))) break;
     if (explained) {
-      // A drop places nothing, so the role in effect stays; anything placed sat under its last input's role.
-      if (explained.end > explained.start) carried = inputs[i + explained.covers - 1]!.role;
+      // A drop places nothing, so the turn in effect stays; anything placed sits in the turn at its start.
+      if (explained.end > explained.start) carried = turnScan(output, cursor, carried, turns)(explained.start);
       cursor = explained.end;
       i += explained.covers - 1;
       continue;
@@ -194,12 +316,12 @@ export function checkContent(probe: Probe, output: string, transforms: readonly 
       .map((r) => ({ r, at: output.indexOf(r, cursor) }))
       .find((x) => x.at >= 0);
     if (shown) {
-      const under = roleAt(cursor, shown.at) ?? carried;
-      flag(i, `sits under ${under ? `a ${under} role marker` : "no role marker"}, not a ${role} one`);
+      const turn = turnScan(output, cursor, carried, turns)(shown.at);
+      flag(i, misplaced(turn, role));
       // Where a short content shows may be the template's own text, so the next content is sought from here.
       if (distinctive(text)) {
         cursor = shown.at + shown.r.length;
-        carried = under;
+        carried = turn;
       }
     } else if (output.includes(text)) {
       flag(i, "arrives out of order, before content that precedes it in the conversation");
