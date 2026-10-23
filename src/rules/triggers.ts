@@ -745,6 +745,19 @@ function vocabIn(a: Node, b: Node, vb: Val, env: TestEnv, facts: Facts): TestCla
   return withRest(vocabClass(fs, k), vb.rest);
 }
 
+/**
+ * `list.count(k)` for a constant `k` and a list of vocabulary values: each
+ * element is compared with `k`, as `k in list` compares them, so
+ * `roles.count('user')` is a presence test. Undefined for anything else,
+ * joined text among them, where a substring count passes for a value outside
+ * the vocabulary (review round 2, ruling c).
+ */
+export function countedIn(list: Val, arg: Val | undefined): TestClass | undefined {
+  const k = arg ? constOf(arg) : undefined;
+  if (k === undefined || !list.fields?.length || !list.fields.every((f) => f.kind === "list")) return undefined;
+  return withRest(vocabClass(mapFields(list.fields, elementField), k), list.rest);
+}
+
 // `x` compared with the constant `other`, when `x` has a vocabulary. Case and
 // whitespace filters are looked through and applied to the vocabulary:
 // `p.type|upper == 'IMAGE'` passes for 'image', `p.type|trim == 'IMAGE'` for

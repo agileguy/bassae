@@ -40,6 +40,7 @@ import {
   condOf,
   countArith,
   countField,
+  countedIn,
   countPick,
   countsOf,
   eitherRest,
@@ -1102,8 +1103,10 @@ class Interp {
       case "count": {
         // How often a value occurs in runtime text or a runtime list grows with
         // it, as its length does: past 1 a test on it is a threshold. Compared
-        // with 0 or 1 it is as telling as `x in s` (review round 2, Codex N2).
-        const d = maxData(r, a);
+        // with 0 or 1 it is as telling as `x in s` (review round 2, runtime
+        // N2). A constant counted in a list of vocabulary values is judged
+        // against the vocabulary.
+        const d = (a.length === 1 ? countedIn(r, a[0]) : undefined) ?? maxData(r, a);
         if (!isRuntime(r) || countsOf(r)) return { ...base, lits: [], data: d, truth: d };
         return { ...base, lits: [], data: d, truth: d, fields: [countField(0, d === "nondeterministic" ? "nondeterministic" : "content")] };
       }

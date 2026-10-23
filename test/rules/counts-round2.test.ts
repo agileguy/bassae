@@ -86,9 +86,20 @@ test("ISC-18: loop.cycle chooses by the loop position modulo its length (review 
   expectPresence([L(`{{ loop.cycle('', '${I}') }}`), L(W("loop.cycle('a', 'b') == 'a'")), L(W("loop.index is odd")), W("messages|length is even")]);
 });
 
-test("ISC-18: `.count` counts what it is called on (review round 2, Codex N2)", () => {
-  expectContent([W("(messages|map(attribute='role')|join(',')).count('user') > 20"), L(W("m.content.count('x') > 20")), L(W("'abc'.count(m.content) > 0"))]);
-  expectPresence([W("(messages|map(attribute='role')|join(',')).count('user') > 0"), W("(messages|map(attribute='role')|join(',')).count('user') == 1")]);
+test("ISC-18: `.count` counts what it is called on (review round 2, runtime N2)", () => {
+  expectContent([W("(messages|map(attribute='role')|list).count('user') > 20"), L(W("m.content.count('x') > 20")), L(W("'abc'.count(m.content) > 0"))]);
+  expectPresence([W("(messages|map(attribute='role')|list).count('user') > 0"), W("(messages|map(attribute='role')|list).count('user') == 1")]);
+});
+
+// Joined, the roles are text: 'user' is counted in 'superuser' too, so even a
+// presence-sized count is a content test. Counted in the list, an element
+// outside the vocabulary is content (ruling c).
+test("ISC-18: a role counted in joined text, or a word outside the vocabulary, is content (ruling c)", () => {
+  expectContent([
+    W("(messages|map(attribute='role')|join(',')).count('user') > 0"),
+    W("(messages|map(attribute='role')|join(',')).count('user') == 1"),
+    W("(messages|map(attribute='role')|list).count('sudo') > 0"),
+  ]);
 });
 
 // ---- item 2: `.get` truthiness keeps its key's test ----
