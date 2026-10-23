@@ -52,7 +52,8 @@ export function clip(message: string): string {
 }
 
 // The worker can only report what it can see. Timeouts are the parent's call, from the time a step took or from how
-// the worker ended; so are sandbox failures, and memory, except when the engine itself refuses an allocation.
+// the worker ended; so are sandbox failures, and memory, except when the engine itself refuses an allocation or the
+// worker finds itself over the cap as a render ends.
 const CHILD_FAILURES: ReadonlySet<string> = new Set<RenderFailure>(["parse", "render_error", "output_limit", "stack", "memory"]);
 
 function isObject(value: unknown): value is Record<string, unknown> {

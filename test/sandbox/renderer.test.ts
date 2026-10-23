@@ -495,6 +495,22 @@ describe.skipIf(!live)("the memory cap fails closed (ISC-43)", () => {
   );
 
   test(
+    "a render that ends over the memory cap fails with memory, though neither sampler caught it in time",
+    async () => {
+      // The last copy takes this render from near 245 MiB to near 307 MiB. Against a 272 MiB cap it is over only for
+      // the end of that copy, and in 17 of 20 renders the worker sent its result and ended before either 10 ms sampler
+      // saw it (review round 3, SHOULD FIX 1). This parent's reader never trips, so only the worker can catch it.
+      const blind = createRenderer({ residentMemory: () => 1 });
+      const cap = 272 * 2 ** 20;
+      const spike =
+        "{%- set ns = namespace(s='ab') -%}{%- for i in range(25) -%}{%- set ns.s = ns.s ~ ns.s -%}{%- endfor -%}" +
+        "{%- set y = ns.s|upper -%}{%- set z1 = y|lower -%}{%- set z2 = y|title -%}done";
+      for (let i = 0; i < 5; i++) expect(await blind.renderBatch(spike, [req(`r${i}`)], { maxRssBytes: cap })).toEqual([failed(`r${i}`, "memory")]);
+    },
+    SLOW,
+  );
+
+  test(
     "a batch is split by size, so no worker has to hold more than 16 MiB of requests",
     async () => {
       // 49 MiB of requests, which one worker cannot hold under a 128 MiB cap; 16 MiB at a time, it can. A worker

@@ -48,6 +48,7 @@ if (process.platform === "linux") {
 }
 
 const min = (a: bigint, b: bigint) => (a < b ? a : b);
+const mib = (bytes: number) => `${(bytes / 2 ** 20).toFixed(0)}MiB`;
 
 /**
  * Lets the process use `ms` more CPU time before SIGXCPU, and lowers the hard limit to `totalMs` more when given.
@@ -201,6 +202,9 @@ const [template, parseMs] = timed((): Template | undefined => {
 });
 await send({ t: "parsed", ms: parseMs });
 
+// The worker reads its own memory as each render ends, before it sends the result, and a render that ended over the cap
+// fails with memory. The watchdog and the parent each sample every 10 ms, and a render that went over in its last few
+// ms could otherwise have its result sent, and the worker end, before either saw it.
 // The memory cap is on each render, but what earlier renders leave behind stays resident and counts against the next.
 // A full collection does not stop that: it frees the garbage but not the pages it sat in, and the next render still
 // grows past them. A render that peaked at 215 MiB alone peaked near 250 MiB as the sixth of six with a full collection
@@ -211,7 +215,12 @@ await send({ t: "parsed", ms: parseMs });
 const fresh = process.memoryUsage.rss();
 for (const [i, request] of requests.entries()) {
   limitCpu(init.cpuMs);
-  const [result, ms] = timed((): RenderResult => (template ? render(template, request, init.maxOutputBytes) : { id: request.id, ok: false, ...parseFailure }));
+  const [rendered, ms] = timed((): RenderResult => (template ? render(template, request, init.maxOutputBytes) : { id: request.id, ok: false, ...parseFailure }));
+  const bytes = process.memoryUsage.rss();
+  const result: RenderResult =
+    bytes > init.maxRssBytes
+      ? { id: request.id, ok: false, failure: "memory", message: `worker resident memory ${mib(bytes)} exceeded the ${mib(init.maxRssBytes)} cap as the render ended, by its own reading` }
+      : rendered;
   await send({ t: "res", result, ms });
-  if (i + 1 < requests.length && process.memoryUsage.rss() - fresh > init.maxRssBytes / 4) process.exit(SPENT_EXIT_CODE);
+  if (i + 1 < requests.length && bytes - fresh > init.maxRssBytes / 4) process.exit(SPENT_EXIT_CODE);
 }
