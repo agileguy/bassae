@@ -490,9 +490,15 @@ export async function runWorker(
     });
 
     // The worker reads everything before its ready line. A worker that dies early is reported by the exit path above.
+    // Once the pipe is full a write returns a promise, which rejects when the worker dies before reading it. The
+    // exit path reports that too, and a rejection left unhandled would end the whole scan, so each one is caught.
+    const write = (line: string) => {
+      const pending = proc.stdin.write(line);
+      if (pending instanceof Promise) pending.catch(() => {});
+    };
     try {
-      proc.stdin.write(encode({ t: "init", template, maxOutputBytes: limits.maxOutputBytes, timeoutMs: limits.timeoutMs, cpuMs, maxRssBytes: limits.maxRssBytes }));
-      for (const request of requests) proc.stdin.write(encode({ t: "req", request }));
+      write(encode({ t: "init", template, maxOutputBytes: limits.maxOutputBytes, timeoutMs: limits.timeoutMs, cpuMs, maxRssBytes: limits.maxRssBytes }));
+      for (const request of requests) write(encode({ t: "req", request }));
       Promise.resolve(proc.stdin.end()).catch(() => {});
     } catch {
       // Same: the exit path reports it.

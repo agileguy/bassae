@@ -17,6 +17,7 @@ const BUN = process.execPath;
 const ROGUE = join(import.meta.dir, "rogue-worker.ts");
 const PROBE = join(import.meta.dir, "render-probe.ts");
 const POLLUTED = join(import.meta.dir, "polluted-parent.ts");
+const DEAD = join(import.meta.dir, "dead-worker.ts");
 const BUSY = join(import.meta.dir, "busy-worker.ts");
 const SLOW = 30_000;
 // Spins for hours on small ranges, staying near 100 MiB for its first seconds, so only a timeout or a kill ends it.
@@ -96,6 +97,21 @@ describe.skipIf(!live || process.platform !== "darwin")("a polluted scanner", ()
       const proc = Bun.spawn([BUN, POLLUTED], { stdout: "pipe", stderr: "pipe" });
       const [out] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
       expect(JSON.parse(out)).toEqual([ok("a", "hi")]);
+    },
+    SLOW,
+  );
+});
+
+describe.skipIf(!live)("a worker that dies before reading its batch", () => {
+  // The batch outruns the pipe, so the writes still pending when the worker dies reject. Unhandled, any one of them
+  // ends the whole scan with exit 3. A fresh process, so that what it counts is only its own.
+  test(
+    "fails each of its requests as `sandbox` and leaves no rejection unhandled",
+    async () => {
+      const proc = Bun.spawn([BUN, DEAD], { stdout: "pipe", stderr: "pipe" });
+      const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+      expect({ code, err: err.slice(0, 2000) }).toEqual({ code: 0, err: "" });
+      expect(JSON.parse(out)).toEqual({ unhandled: 0, failures: [Array(80).fill("sandbox"), Array(80).fill("sandbox")] });
     },
     SLOW,
   );
