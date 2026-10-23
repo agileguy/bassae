@@ -5,19 +5,24 @@
 //   none              reads template constants only
 //   presence          reads only whether runtime data is there and what shape it
 //                     has: definedness, none, truthiness and emptiness (a length
-//                     or loop position compared with 0 or 1), a message's role,
-//                     a `type` or a kwarg compared with its documented vocabulary
-//                     (`part.type == 'image'`, `reasoning_effort == 'high'`), an
-//                     id compared for equality with another id (a call paired
-//                     with its result), the keys of a record, and a tool's
+//                     or loop position compared with 0 or 1), a role, a `type`
+//                     or a kwarg compared with its documented vocabulary
+//                     (`m.role == 'user'`, `part.type == 'image'`,
+//                     `reasoning_effort == 'high'`), an id compared for equality
+//                     with another id (a call paired with its result) and a role
+//                     with another role, the keys of a record, and a tool's
 //                     parameter schema
 //   content           reads what a user, a tool or a caller wrote: message
 //                     content and reasoning, a message's name, id or
 //                     tool_call_id, a tool's or tool call's function name,
-//                     description or arguments, documents, a `type` or a kwarg
-//                     compared with a value outside its vocabulary, a length or
+//                     description or arguments, documents, a role, `type` or
+//                     kwarg compared with a value outside its vocabulary or
+//                     transformed first (`m.role.startswith('x')`), a length or
 //                     loop threshold further than 1 from 0, anything serialized
-//                     from these, or an unknown runtime variable
+//                     from these, and any test at all, even `is defined`, on a
+//                     kwarg no runtime or stock template documents or on a
+//                     message, tool-call or content-part field outside the
+//                     schema
 //   nondeterministic  reads the clock (strftime_now(), date_string, today) or a
 //                     random choice
 //
@@ -30,7 +35,9 @@
 // Which runtime data is content and which is presence is a fixed schema of the
 // chat-template inputs (ROOTS below), and the vocabularies are the values the
 // runtimes and stock templates use, never names taken from the template under
-// scan (Decisions 19:15).
+// scan (Decisions 19:15). A vocabulary is matched exactly, case and type
+// included, the way Jinja's `==` matches: a caller can send `'IMAGE'` or
+// `'True'`, and no stock client does (review round 2, security N9).
 
 import type { Span } from "../types.ts";
 import type { Node } from "../parse/support.ts";
@@ -74,8 +81,10 @@ export interface Field {
   fields?: Readonly<Record<string, Field>>;
   /** Any member not in `fields`. */
   other?: Field;
-  /** The values a comparison may name and stay a presence test, in lower case: a `type`'s kinds, a kwarg's documented settings. */
-  vocab?: ReadonlySet<string>;
+  /** The values a comparison may name and stay a presence test, exactly as a runtime sends them: a role, a `type`'s kinds, a kwarg's documented settings. */
+  vocab?: ReadonlySet<Word>;
+  /** Whether it is there at all is the caller's choice: a kwarg no runtime or stock template documents, a message field outside the schema. vLLM and llama-server take `chat_template_kwargs` per request, so even `is defined` on it is a content test (review round 2, ruling d). */
+  undocumented?: true;
   /** A count's constant shift: `messages|length - 1` is the count of messages at -1. */
   off?: number;
   /** The class of a test that compares a count with a threshold more than 1 away from it. */
@@ -84,7 +93,10 @@ export interface Field {
   ident?: true;
 }
 
-function vocab(...words: string[]): ReadonlySet<string> {
+/** A constant a comparison names: Jinja's string, number, boolean or none. */
+export type Word = string | number | boolean | null;
+
+function vocab(...words: Word[]): ReadonlySet<Word> {
   return new Set(words);
 }
 
@@ -94,10 +106,16 @@ const TYPES = vocab(
   "text", "image", "image_url", "input_image", "audio", "input_audio", "video", "video_url", "file", "refusal",
   "function", "tool_call", "tool_use", "tool_result", "thinking", "reasoning", "message", "function_call", "function_call_output",
 );
-// A boolean kwarg, in Jinja and Python spellings.
-const FLAGS = vocab("true", "false", "none", "0", "1");
+// A boolean kwarg. Jinja's `True == 1` holds, so 1 and 0 name the flag too;
+// the string `'true'` does not.
+const FLAGS = vocab(true, false, 0, 1);
 const EFFORTS = vocab("none", "minimal", "low", "medium", "high");
 const TOOL_CHOICES = vocab("auto", "none", "required", "any");
+// The roles a runtime sends and the stock templates name: system, user,
+// assistant and tool (the registry families), developer (gpt-oss, Gemma 4,
+// FunctionGemma), model (Gemma 4), ipython (Llama 3.1 tool results) and
+// function (the OpenAI legacy function-result role).
+const ROLES = vocab("system", "user", "assistant", "tool", "developer", "model", "ipython", "function");
 // Llama 3.1's and gpt-oss's built-in tools.
 const BUILTIN_NAMES = vocab("browser", "python", "brave_search", "wolfram_alpha", "code_interpreter");
 
@@ -117,6 +135,12 @@ const ANY_CONTENT: Field = { cls: "content", kind: "any" };
 (ANY_CONTENT as { elem?: Field; other?: Field }).elem = ANY_CONTENT;
 (ANY_CONTENT as { elem?: Field; other?: Field }).other = ANY_CONTENT;
 
+// A kwarg or message field nothing documents, and everything under it: the
+// caller decides whether it is there, so its presence is content too.
+const UNDOCUMENTED: Field = { cls: "content", kind: "any", undocumented: true };
+(UNDOCUMENTED as { elem?: Field; other?: Field }).elem = UNDOCUMENTED;
+(UNDOCUMENTED as { elem?: Field; other?: Field }).other = UNDOCUMENTED;
+
 // A tool's parameter schema, and the special tokens: the deployment's own
 // structure. Every member and element is schema as well, so tests deep inside
 // it (`param.type == 'string'`, gpt-oss's `inner_type|length > 50` on the type
@@ -128,22 +152,43 @@ const SCHEMA: Field = { cls: "presence", kind: "any" };
 // Tool-call arguments: a mapping (or its JSON string). Key tests on it are
 // presence tests; its values are content.
 const ARGS: Field = { cls: "content", kind: "record", other: ANY_CONTENT };
-const FUNCTION: Field = { cls: "content", kind: "record", fields: { name: TEXT, arguments: ARGS }, other: ANY_CONTENT };
-const TOOL_CALL: Field = { cls: "content", kind: "record", fields: { type: TYPE, id: ID, name: TEXT, function: FUNCTION, arguments: ARGS }, other: ANY_CONTENT };
+// A field outside these lists is undocumented (review round 2, ruling d).
+// `content_type` is gpt-oss's (read from the call or, once it has swapped
+// the call for its function, from that), `call_id` the OpenAI Responses
+// form's and `input` Anthropic's.
+const FUNCTION: Field = { cls: "content", kind: "record", fields: { name: TEXT, arguments: ARGS, content_type: ANY_CONTENT }, other: UNDOCUMENTED };
+const TOOL_CALL: Field = {
+  cls: "content",
+  kind: "record",
+  fields: { type: TYPE, id: ID, name: TEXT, function: FUNCTION, arguments: ARGS, content_type: ANY_CONTENT, call_id: ANY_CONTENT, input: ANY_CONTENT },
+  other: UNDOCUMENTED,
+};
 const TOOL_CALLS: Field = { cls: "content", kind: "list", elem: TOOL_CALL };
 
 // A content part: `{'type': 'text', 'text': ...}`, `{'type': 'image', ...}`.
-const PART: Field = { cls: "content", kind: "record", fields: { type: TYPE }, other: ANY_CONTENT };
+// Its fields are the OpenAI, Anthropic and Hugging Face formats' and the
+// stock templates' (Gemma 4's `name` and `response`, a tool result's
+// `output`); any other is undocumented (review round 2, ruling d).
+const PART_FIELDS = [
+  "image", "image_url", "video", "video_url", "audio", "input_audio", "file", "url", "path", "base64", "refusal",
+  "source", "id", "name", "input", "tool_use_id", "content", "is_error", "thinking", "signature",
+  "call_id", "arguments", "output", "response",
+];
+const PART: Field = { cls: "content", kind: "record", fields: { type: TYPE, text: TEXT, ...Object.fromEntries(PART_FIELDS.map((k) => [k, ANY_CONTENT])) }, other: UNDOCUMENTED };
 const MESSAGE_CONTENT: Field = { cls: "content", kind: "mixed", elem: PART, other: ANY_CONTENT };
 
-// Role routes a message: a role test is a presence test whatever it names. A
-// name, id or tool_call_id is a string the caller chose, so a value test on it
-// can select one conversation out of many.
+// Role routes a message: compared with a role from ROLES, or with another
+// role, it is a presence test. Compared with anything else, or after a
+// transform such as `startswith` or `replace`, it can wait for a role no
+// client sends (review round 2, ruling c). A name, id or tool_call_id is a
+// string the caller chose, so a value test on it can select one conversation
+// out of many. A field outside this list is undocumented (ruling d).
+const ROLE: Field = { cls: "content", kind: "string", vocab: ROLES };
 const MESSAGE: Field = {
   cls: "content",
   kind: "record",
   fields: {
-    role: PRESENCE,
+    role: ROLE,
     type: TYPE,
     name: TEXT,
     id: ID,
@@ -153,8 +198,11 @@ const MESSAGE: Field = {
     reasoning_content: TEXT,
     reasoning: TEXT,
     thinking: TEXT,
+    // Gemma 4's tool results, and the OpenAI legacy function call.
+    tool_responses: { cls: "content", kind: "list", elem: ANY_CONTENT },
+    function_call: FUNCTION,
   },
-  other: ANY_CONTENT,
+  other: UNDOCUMENTED,
 };
 const MESSAGES: Field = { cls: "content", kind: "list", elem: MESSAGE };
 const DOCUMENTS: Field = { cls: "content", kind: "list", elem: ANY_CONTENT };
@@ -231,6 +279,9 @@ const ROOTS: Readonly<Record<string, Field>> = {
   add_generation_prompt: FLAG,
   continue_final_message: FLAG,
   enable_thinking: FLAG,
+  // Gemma 4 and Qwen 3.6; Qwen 3.5's and 3.6's image and video numbering.
+  preserve_thinking: FLAG,
+  add_vision_id: FLAG,
   tool_choice: TOOL_CHOICE,
   reasoning_effort: EFFORT,
   model_identity: TEXT,
@@ -243,14 +294,14 @@ const ROOTS: Readonly<Record<string, Field>> = {
   loop: LOOP,
 };
 
-/** The schema node for a runtime variable the template does not bind. An unknown variable is content: the strict reading of "any runtime input". */
+/** The schema node for a runtime variable the template does not bind. An unknown variable is an undocumented kwarg: a caller can set it per request, so every test on it is content (review round 2, ruling d). */
 export function rootField(name: string): Field {
-  return Object.hasOwn(ROOTS, name) ? ROOTS[name]! : ANY_CONTENT;
+  return Object.hasOwn(ROOTS, name) ? ROOTS[name]! : UNDOCUMENTED;
 }
 
 /** The schema node for one member of `f`, by name, or for an element when `key` is not a string. */
 export function memberField(f: Field, key: string | undefined): Field {
-  if (key === undefined) return f.elem ?? f.other ?? f;
+  if (key === undefined) return unnamed(f, f.elem ?? f.other ?? f);
   return (f.fields && Object.hasOwn(f.fields, key) ? f.fields[key] : undefined) ?? f.other ?? f;
 }
 
@@ -317,27 +368,106 @@ export function elementField(f: Field): Field {
 
 /** A record's values, for `.items()` and `|dictsort` pairs. */
 export function valueField(f: Field): Field {
-  return f.other ?? f;
+  return unnamed(f, f.other ?? f);
+}
+
+// A member reached by a computed key, or as one of a record's values, is not
+// one the template names: it is undocumented only inside an undocumented value
+// (`for k, v in p|dictsort` serializes whatever the part holds).
+function unnamed(f: Field, g: Field): Field {
+  return g.undocumented && !f.undocumented ? ANY_CONTENT : g;
 }
 
 /**
  * The class of comparing a value that may be any of `fs` with the constant
  * `value`: presence for a field whose vocabulary has it, the field's own class
- * otherwise. Undefined when no field has a vocabulary.
+ * otherwise. Undefined when no field has a vocabulary. `maps` are the case and
+ * whitespace transforms applied to the field first, innermost first
+ * (`p.type|upper == 'IMAGE'`), and the vocabulary is mapped the same way.
+ * Comparing with none is a none test, and a comparison no value can pass
+ * (`p.type|lower == 'IMAGE'`) selects nothing: both are presence.
  */
-export function vocabClass(fs: Fields, value: unknown): TestClass | undefined {
+export function vocabClass(fs: Fields, value: unknown, maps: readonly string[] = []): TestClass | undefined {
   if (!fs.some((f) => f.vocab)) return undefined;
   const word = vocabWord(value);
+  if (word !== undefined && word !== null && never(word, maps)) return "presence";
   let c: TestClass = "presence";
-  for (const f of fs) c = stronger(c, word !== undefined && f.vocab?.has(word) ? "presence" : f.cls);
+  for (const f of fs) c = stronger(c, f.vocab && word !== undefined && (word === null || inVocab(f.vocab, word, maps)) ? "presence" : f.cls);
   return c;
 }
 
-function vocabWord(v: unknown): string | undefined {
-  if (v === null) return "none";
-  if (typeof v === "string") return v.trim().toLowerCase();
-  if (typeof v === "boolean" || typeof v === "number") return String(v);
-  return undefined;
+/**
+ * The key `key` as it looks up `dict`: a dict whose keys are all constants,
+ * looked up by a field with a vocabulary, compares the field with each key
+ * (`{'user': '<|user|>'}[m.role]` is a presence test, `{'sudo': x}[m.role]`
+ * a content one; review round 2, ruling c). Otherwise `key` itself.
+ */
+export function keyed(key: Val, dict: Val): Val {
+  if (!dict.konstKeys?.length || dict.fields || !key.fields?.length || !key.fields.every((f) => f.vocab)) return key;
+  let c: TestClass = key.rest ?? "none";
+  for (const k of dict.konstKeys) c = stronger(c, vocabClass(key.fields, k) ?? "content");
+  return { ...key, data: c };
+}
+
+function vocabWord(v: unknown): Word | undefined {
+  return v === null || typeof v === "string" || typeof v === "number" || typeof v === "boolean" ? v : undefined;
+}
+
+function inVocab(vocab: ReadonlySet<Word>, word: Word, maps: readonly string[]): boolean {
+  if (maps.length === 0) return vocab.has(word);
+  for (const w of vocab) if (maps.reduce(mapWord, pyStr(w)) === word) return true;
+  return false;
+}
+
+// `T(x) == k` holds for no x when the last transform T changes k: each one maps
+// its own output to itself, and a string never equals a non-string. `|string`
+// changes no string, so the last one before it decides. Judged on printable
+// ASCII only, where these transforms act the same in Python.
+function never(word: Exclude<Word, null>, maps: readonly string[]): boolean {
+  if (maps.length === 0) return false;
+  if (typeof word !== "string") return true;
+  const last = maps.findLast((m) => m !== "string");
+  return last !== undefined && /^[\x20-\x7e]*$/.test(word) && mapWord(word, last) !== word;
+}
+
+// Python's str() of a constant, as the case filters see it.
+function pyStr(w: Word): string {
+  if (typeof w === "string") return w;
+  if (w === null) return "None";
+  if (typeof w === "boolean") return w ? "True" : "False";
+  return String(w);
+}
+
+// One transform on printable ASCII. A name with a leading dot is a str method,
+// otherwise a Jinja filter: Jinja's `title` splits words only at spaces,
+// hyphens and opening brackets, and Python's `str.title` at any non-letter.
+function mapWord(s: string, m: string): string {
+  const cap = (w: string) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase();
+  switch (m) {
+    case "lower":
+    case ".lower":
+    case ".casefold":
+      return s.toLowerCase();
+    case "upper":
+    case ".upper":
+      return s.toUpperCase();
+    case "trim":
+    case ".strip":
+      return s.replace(/^[\t-\r\x1c-\x1f ]+|[\t-\r\x1c-\x1f ]+$/g, "");
+    case ".lstrip":
+      return s.replace(/^[\t-\r\x1c-\x1f ]+/, "");
+    case ".rstrip":
+      return s.replace(/[\t-\r\x1c-\x1f ]+$/, "");
+    case "capitalize":
+    case ".capitalize":
+      return cap(s);
+    case "title":
+      return s.split(/([-\s({[<]+)/).filter(Boolean).map(cap).join("");
+    case ".title":
+      return s.replace(/[A-Za-z]+/g, cap);
+    default:
+      return s;
+  }
 }
 
 export const KEY_FIELD: Field = PRESENCE;
@@ -395,6 +525,8 @@ export interface Val {
   konst?: string | number | boolean | null;
   /** A list of compile-time strings, for a folded `|join`. */
   konstList?: string[];
+  /** A dict literal's keys, when every one is a compile-time string. */
+  konstKeys?: string[];
   /** A namespace: the env key its attributes hang off. */
   ns?: string;
   /** namespace(...) arguments, until the result is bound to a name. */
@@ -441,7 +573,7 @@ function gateOf(v: Val): TestClass {
  * What `v` may be besides its fields, for a join: all of it when it has none.
  * An empty list or dict (`|default([])`, `or {}`) equals no string or number
  * and has no element or member to read, so it adds nothing (review round 2,
- * Codex N5).
+ * runtime N5).
  */
 export function restOf(v: Val): TestClass | undefined {
   if (v.fields) return v.rest;
@@ -475,7 +607,17 @@ export function readOf(v: Val): TestClass {
 
 /** The strength of a test on the value's truthiness or length. */
 export function truthOf(v: Val): TestClass {
-  return stronger(v.truth, gateOf(v));
+  return stronger(stronger(v.truth, gateOf(v)), thereOf(v));
+}
+
+/** What the truthiness of a raw field reveals: whether an undocumented one is there at all is the caller's choice (review round 2, ruling d). */
+export function presenceOf(fs: Fields): TestClass {
+  return fs.some((f) => f.undocumented) ? "content" : "presence";
+}
+
+// The same for a value that may be no raw field at all.
+function thereOf(v: Val): TestClass {
+  return v.fields && presenceOf(v.fields) === "content" ? "content" : "none";
 }
 
 /** The strength of `n` used as a condition. Never throws on any AST shape. */
@@ -505,7 +647,7 @@ export function classifyTest(n: Node, env: TestEnv, facts: Facts): TestClass {
     case "TestExpression": {
       const name = testName(n);
       const v = env.value(n.operand as Node, facts);
-      if (SHAPE_TESTS.has(name)) return stronger(isRuntime(v) ? "presence" : "none", gateOf(v));
+      if (SHAPE_TESTS.has(name)) return stronger(stronger(isRuntime(v) ? "presence" : "none", thereOf(v)), gateOf(v));
       if (TRUTH_TESTS.has(name)) return truthOf(v);
       return readOf(v); // odd, even, lower, upper, ...: the value itself
     }
@@ -528,13 +670,13 @@ function truthiness(n: Node, env: TestEnv, facts: Facts): TestClass {
 }
 
 // `a == b`, `a < b`, ...: a count against a threshold, a field with a
-// vocabulary against a constant, an id against an id, or else both values read
-// whole.
+// vocabulary against a constant, an id against an id or a role against a role,
+// or else both values read whole.
 function comparison(a: Node, b: Node, o: string, env: TestEnv, facts: Facts): TestClass {
   const va = operand(a, env, facts, 0);
   const vb = operand(b, env, facts, 0);
   const gates = stronger(gateOf(va), gateOf(vb));
-  const join = (o === "==" || o === "!=") && identOnly(va) && identOnly(vb) ? "presence" : undefined;
+  const join = (o === "==" || o === "!=") && ((identOnly(va) && identOnly(vb)) || sameVocab(va, vb)) ? "presence" : undefined;
   const cls = countTest(va, vb) ?? countTest(vb, va) ?? vocabTest(a, vb, env, facts) ?? vocabTest(b, va, env, facts) ?? join ?? stronger(readOf(va), readOf(vb));
   return stronger(cls, gates);
 }
@@ -562,7 +704,7 @@ function membership(a: Node, b: Node, env: TestEnv, facts: Facts): TestClass {
 // A count in a list or range: `messages|length in [41, 42]`, `loop.index in
 // range(40, 1000)`, `40 in range(messages|length)`. It is the count compared
 // with each value it may equal, and a list or range whose values are not known
-// may hold any threshold (review round 2, Codex N2, Gemini N1).
+// may hold any threshold (review round 2, runtime N2, contracts N1).
 function countIn(a: Node, b: Node, vb: Val, env: TestEnv, facts: Facts): TestClass | undefined {
   const elems = vb.fields && vb.fields.length > 0 && vb.fields.every((f) => f.kind === "list" && f.elem?.kind === "count") ? elemsOf(vb) : undefined;
   if (!elems && isRuntime(vb)) return undefined;
@@ -584,12 +726,13 @@ function vocabIn(a: Node, b: Node, vb: Val, env: TestEnv, facts: Facts): TestCla
   const list = constList(b, vb, env, facts);
   if (list) {
     // The field against each value of a constant list.
-    const va = env.value(uncased(a), facts);
+    const [inner, maps] = cased(a);
+    const va = env.value(inner, facts);
     const fs = va.fields;
     if (!fs) return undefined;
     let cls: TestClass = "presence";
     for (const k of list) {
-      const c = vocabClass(fs, k);
+      const c = vocabClass(fs, k, maps);
       if (c === undefined) return undefined;
       cls = stronger(cls, c);
     }
@@ -603,25 +746,36 @@ function vocabIn(a: Node, b: Node, vb: Val, env: TestEnv, facts: Facts): TestCla
 }
 
 // `x` compared with the constant `other`, when `x` has a vocabulary. Case and
-// whitespace filters are looked through: `p.type|lower == 'image'`.
+// whitespace filters are looked through and applied to the vocabulary:
+// `p.type|upper == 'IMAGE'` passes for 'image', `p.type|trim == 'IMAGE'` for
+// no value a client sends.
 function vocabTest(x: Node, other: Val, env: TestEnv, facts: Facts): TestClass | undefined {
   const k = constOf(other);
   if (k === undefined) return undefined;
-  const v = env.value(uncased(x), facts);
-  return v.fields ? withRest(vocabClass(v.fields, k), v.rest) : undefined;
+  const [inner, maps] = cased(x);
+  const v = env.value(inner, facts);
+  return v.fields ? withRest(vocabClass(v.fields, k, maps), v.rest) : undefined;
 }
 
 const CASE_FILTERS = new Set(["lower", "upper", "trim", "string", "capitalize", "title"]);
 const CASE_METHODS = new Set(["lower", "upper", "strip", "lstrip", "rstrip", "capitalize", "title", "casefold"]);
 
-// The operand under `|lower`, `|trim`, `.upper()` and the like.
-function uncased(n: Node): Node {
+// The operand under `|lower`, `|trim`, `.upper()` and the like, and those
+// transforms, innermost first (methods with a leading dot). A transform with
+// arguments (`|trim('z')`) is not looked through: it is no case change.
+function cased(n: Node): [Node, string[]] {
+  const maps: string[] = [];
   for (let i = 0; i < 8 && n && typeof n === "object"; i++) {
-    if (n.type === "FilterExpression" && CASE_FILTERS.has(filterName(n.filter as Node))) n = n.operand as Node;
-    else if (n.type === "CallExpression" && ((n.args as Node[] | undefined) ?? []).length === 0 && isCaseMethod(n.callee as Node)) n = (n.callee as Node).object as Node;
-    else break;
+    const f = n.type === "FilterExpression" ? (n.filter as Node) : undefined;
+    if (f && CASE_FILTERS.has(filterName(f)) && (f.type === "Identifier" || ((f.args as Node[] | undefined) ?? []).length === 0)) {
+      maps.push(filterName(f));
+      n = n.operand as Node;
+    } else if (n.type === "CallExpression" && ((n.args as Node[] | undefined) ?? []).length === 0 && isCaseMethod(n.callee as Node)) {
+      maps.push("." + String(((n.callee as Node).property as Node).value));
+      n = (n.callee as Node).object as Node;
+    } else break;
   }
-  return n;
+  return [n, maps.reverse()];
 }
 
 function isCaseMethod(callee: Node): boolean {
@@ -695,6 +849,14 @@ function operand(n: Node, env: TestEnv, facts: Facts, depth: number): Val {
 // that constant, so it is no join.
 function identOnly(v: Val): boolean {
   return v.rest === undefined && !!v.fields && v.fields.length > 0 && v.fields.every((f) => f.ident === true);
+}
+
+// Two values from one vocabulary, compared with each other: `m.role ==
+// loop.previtem.role`. As with two ids, no template constant names a trigger
+// value (review round 2, ruling c).
+function sameVocab(a: Val, b: Val): boolean {
+  const v = a.fields?.[0]?.vocab;
+  return v !== undefined && a.rest === undefined && b.rest === undefined && [...a.fields!, ...(b.fields ?? [])].every((f) => f.vocab === v) && (b.fields?.length ?? 0) > 0;
 }
 
 /** The counts a value may be, when every field it may be is a count (`rest` says what else it may be). */
@@ -795,6 +957,7 @@ export function lengthOf(o: Val, gate?: Cond): Val {
     const t = stronger(o.data, thresholdOf(cs));
     return { ...v, data: t, truth: t };
   }
+  if (thereOf(o) === "content") return v; // a value nothing documents is not a count (ruling d)
   const d = o.fields ? clsOf(o.fields) : o.data;
   return d === "content" || d === "nondeterministic" ? { ...v, fields: [countField(0, d)], rest: o.rest } : v;
 }

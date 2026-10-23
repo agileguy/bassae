@@ -123,8 +123,23 @@ test("classifyTest: an equality between two id fields is presence; an id against
 });
 
 test("classifyTest: a field with a vocabulary is presence against it and content against anything else", () => {
-  expectAll("presence", ["message.type == 'text'", "message.type|lower == 'IMAGE'", "message.type.upper() == 'IMAGE'", "message.type in ['image', 'video']", "'image' in message.type", "enable_thinking == false", "enable_thinking != none", "add_generation_prompt == 1", "reasoning_effort == 'High'", "tool_choice == 'auto'", "'python' in builtin_tools"]);
+  expectAll("presence", ["message.type == 'text'", "message.type|lower == 'IMAGE'", "message.type.upper() == 'IMAGE'", "message.type in ['image', 'video']", "'image' in message.type", "enable_thinking == false", "enable_thinking != none", "add_generation_prompt == 1", "reasoning_effort == 'high'", "tool_choice == 'auto'", "'python' in builtin_tools"]);
   expectAll("content", ["message.type == 'zz'", "message.type in ['image', 'zz']", "enable_thinking == 'xyzzy'", "reasoning_effort == 'xyzzy'", "tool_choice == 'send_email'", "'send_email' in builtin_tools", "message.type == message.role"]);
+});
+
+test("classifyTest: a vocabulary matches exactly, case and type included (review round 2, security N9)", () => {
+  expectAll("presence", ["message.type|upper == 'IMAGE'", "enable_thinking == true", "enable_thinking|string == 'True'"]);
+  expectAll("content", ["message.type == 'IMAGE'", "message.type == ' image'", "message.type|trim == 'IMAGE'", "reasoning_effort == 'High'", "enable_thinking == 'true'", "message.role == 'User'"]);
+});
+
+test("classifyTest: a role is presence against the role vocabulary or another role, content otherwise (review round 2, ruling c)", () => {
+  expectAll("presence", ["message.role == 'tool'", "message.role != 'developer'", "message.role == loop.previtem.role"]);
+  expectAll("content", ["message.role == 'sudo'", "message.role in ['user', 'sudo']", "message.role.startswith('u')", "message.role in 'useradmin'", "message.role == message.name"]);
+});
+
+test("classifyTest: any test on an undocumented kwarg or message field is content (review round 2, ruling d)", () => {
+  expectAll("content", ["unknown_kwarg is defined", "unknown_kwarg", "not unknown_kwarg", "message.xyzzy is defined", "message.xyzzy"]);
+  expectAll("presence", ["preserve_thinking is defined", "add_vision_id", "message.tool_responses", "message.reasoning_content is defined"]);
 });
 
 test("classifyTest: a count within 1 of a constant or another count is presence; further away it is content", () => {
@@ -190,7 +205,14 @@ test("lengthOf, countArith and vocabClass: counts carry their shift and threshol
   // Offsets saturate, so a loop that keeps adding converges.
   expect(countField(9, "content")).toBe(countField(1000, "content"));
   const type = memberField(elementField(rootField("messages")), "type");
-  expect(vocabClass([type], "IMAGE")).toBe("presence");
+  expect(vocabClass([type], "image")).toBe("presence");
+  expect(vocabClass([type], "IMAGE")).toBe("content");
+  expect(vocabClass([type], "IMAGE", ["upper"])).toBe("presence");
+  expect(vocabClass([type], "IMAGE", ["trim"])).toBe("content");
+  expect(vocabClass([type], "IMAGE", ["lower"])).toBe("presence");
+  expect(vocabClass([type], "IMAGE", ["lower", "string"])).toBe("presence");
+  expect(vocabClass([type], "IMAGE", ["string"])).toBe("content");
+  expect(vocabClass([type], null)).toBe("presence");
   expect(vocabClass([type], "zz")).toBe("content");
   expect(vocabClass([memberField(elementField(rootField("messages")), "name")], "x")).toBeUndefined();
 });
