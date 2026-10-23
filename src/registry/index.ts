@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { unifiedDiff } from "../diff.ts";
 import { cKey, viewKey } from "../gguf/templates.ts";
 import { parseHfCachePath } from "../hf/cache.ts";
+import { WHOLE_TEMPLATE } from "../parse/parse.ts";
 import { clip } from "../rules/finalize.ts";
 import { sameIgnoringWhitespace, whitespaceKey } from "../whitespace.ts";
 import type {
@@ -421,7 +422,7 @@ export function checkIntraModel(model: ModelRecord, table: PrecedenceTable): Fin
       severity: "MEDIUM",
       message: `${skipped} more pairs of differing same-name templates not compared`,
       file: model.id,
-      span: { start: 0, end: 0, line: 1, col: 1 },
+      span: { ...WHOLE_TEMPLATE },
       detail: { suppressed: skipped },
     });
   }

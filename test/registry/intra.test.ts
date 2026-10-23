@@ -6,6 +6,7 @@ import { readBareTemplate } from "../../src/bare.ts";
 import { unifiedDiff } from "../../src/diff.ts";
 import { bytesSource, readGgufSource } from "../../src/gguf/index.ts";
 import { readHfModel } from "../../src/hf/index.ts";
+import { WHOLE_TEMPLATE } from "../../src/parse/parse.ts";
 import { checkIntraModel, DIFF_BUDGET, loadPrecedence, loadRegistry, MAX_DIVERGENCE_PAIRS, MAX_PAIR_DIFF_INPUT, MAX_STORED_DIFF, resolveProfiles } from "../../src/registry/index.ts";
 import { makeTemplateFromString } from "../../src/template.ts";
 import type { ExtractedTemplate, Finding, ModelRecord, TemplateSource } from "../../src/types.ts";
@@ -140,6 +141,7 @@ describe("ISC-7.5 edge cases", () => {
     const total = (n * n - 200 * 4) / 2;
     const summary = findings.at(-1)! as Finding;
     expect(summary.detail).toEqual({ suppressed: total - MAX_DIVERGENCE_PAIRS });
+    expect(summary.span).toEqual(WHOLE_TEMPLATE);
     expect(model.templates.filter((t) => !t.shadowed)).toHaveLength(1);
   });
 });
