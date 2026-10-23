@@ -2,9 +2,11 @@
 //
 // `explain` probes are ordinary use: each conversation shape with and without a system message, tools present and
 // absent, add_generation_prompt both ways, at the reference date. A trigger candidate the injection rules class as
-// presence is a documented vocabulary value, so it is ordinary use too. `vary` probes each change one thing a
-// trigger could wait for: the date, the number of messages, the length of a content, or a trigger candidate's
-// value placed where the template reads it.
+// presence is a documented vocabulary value, so it is ordinary use too. Sent as a vary probe instead, such a value
+// opens stock text no other probe prints (image and audio parts, thinking blocks, built-in tools) in 9 of the 21
+// pinned templates, so a payload gated on one is left to the static rules (Decisions 02:58). `vary` probes each
+// change one thing a trigger could wait for: the date, the number of messages, the length of a content, or a
+// trigger candidate's value placed where the template reads it.
 //
 // Every content is a distinct, benign, multi-word ASCII sentence and none holds another, so a verbatim search for
 // one is unambiguous (ISC-22.3). Probe.inputs lists every string a probe passes, which is what removing input from
@@ -28,11 +30,14 @@ const MAX_COUNT = 200;
 const MAX_LENGTH = 200_000;
 
 type Message = { role: string; content: unknown; [field: string]: unknown };
+// A threshold probe's conversation, built only once the cap keeps the probe: `count` messages, or one user content
+// `length` characters long. A template can list a thousand thresholds near MAX_LENGTH.
+type Sized = { count: number } | { length: number };
 
 interface Spec {
   label: string;
   role: Probe["role"];
-  messages: Message[];
+  messages: Message[] | Sized;
   tools?: unknown[];
   gen?: boolean;
   now?: string;
@@ -192,11 +197,10 @@ function varySpecs(withTools: boolean): Spec[] {
     }
   }
   // Fifty messages with a system turn first, and forty-nine without for templates that refuse one.
-  out.push({ label: "count:50", role: "vary", messages: conversation(50) });
-  out.push({ label: "count:49", role: "vary", messages: conversation(49) });
-  const long = longText(48_000);
-  out.push({ label: "long:user", role: "vary", messages: [{ role: "user", content: long }] });
-  out.push({ label: "long:system", role: "vary", messages: [{ role: "system", content: long }, TALK[0]!] });
+  out.push({ label: "count:50", role: "vary", messages: { count: 50 } });
+  out.push({ label: "count:49", role: "vary", messages: { count: 49 } });
+  out.push({ label: "long:user", role: "vary", messages: { length: 48_000 } });
+  out.push({ label: "long:system", role: "vary", messages: [{ role: "system", content: longText(48_000) }, TALK[0]!] });
   return out;
 }
 
@@ -224,6 +228,11 @@ type Token = string | number | typeof ANY; // a field name, an element index (-1
 const isIndex = (t: Token | undefined): t is number | typeof ANY => typeof t === "number" || t === ANY;
 // OpenAI's function-name rule; a value that is a key or a name anywhere in a probe must pass it.
 const NAME = /^[A-Za-z0-9_-]{1,64}$/;
+// A key a probe adds. `__proto__` passes NAME, but assigning it replaces an object's prototype.
+const isKey = (k: string) => NAME.test(k) && k !== "__proto__";
+// The value an object holds under `key` itself. Plain indexing or `in` would find `toString` or `constructor` on
+// every object, through Object.prototype.
+const own = (node: object, key: string): unknown => (Object.hasOwn(node, key) ? (node as Record<string, unknown>)[key] : undefined);
 
 function parsePath(input: string): Token[] {
   const path = (input.match(/\[[^\]]*\]|[^.[\]]+/g) ?? []).map((t): Token => {
@@ -231,9 +240,9 @@ function parsePath(input: string): Token[] {
     const n = Number(t.slice(1, -1));
     return t !== "[]" && Number.isInteger(n) ? n : ANY;
   });
-  // Writing along a path through `__proto__` would change Object.prototype in the scanner itself, so such a path
-  // has no place and its value is sent as plain content.
-  return path.includes("__proto__") ? [] : path;
+  // A path through `__proto__`, `constructor` or `prototype` can reach Object.prototype in the scanner itself
+  // (`constructor.prototype` from any object), so such a path has no place and its value is sent as plain content.
+  return path.some((t) => t === "__proto__" || t === "constructor" || t === "prototype") ? [] : path;
 }
 
 // What the template's read paths show it reading under each node, so a key a probe adds holds the shape the
@@ -291,7 +300,8 @@ function setAt(root: Record<string, unknown>, path: Token[], value: unknown): vo
       if (last) obj[token] = value;
       else {
         const wantArray = isIndex(path[i + 1]);
-        if (wantArray ? !Array.isArray(obj[token]) : typeof obj[token] !== "object" || obj[token] === null) obj[token] = wantArray ? [] : {};
+        const held = own(obj, token);
+        if (wantArray ? !Array.isArray(held) : typeof held !== "object" || held === null) obj[token] = wantArray ? [] : {};
         node = obj[token] as Record<string, unknown>;
       }
     }
@@ -303,7 +313,7 @@ function nodeAt(root: unknown, path: Token[]): unknown {
   let node = root;
   for (const token of path) {
     if (Array.isArray(node) && isIndex(token)) node = node.at(token === ANY ? 0 : token);
-    else if (typeof node === "object" && node !== null && typeof token === "string") node = (node as Record<string, unknown>)[token];
+    else if (typeof node === "object" && node !== null && typeof token === "string") node = own(node, token);
     else return undefined;
   }
   return node;
@@ -323,8 +333,8 @@ function putAt(target: Record<string, unknown>, path: Token[], value: string | n
   const node = nodeAt(target, path);
   if (Array.isArray(node)) return false;
   if (typeof node === "object" && node !== null) {
-    if (typeof value !== "string" || !NAME.test(value)) return false;
-    if (!(value in node)) (node as Record<string, unknown>)[value] = filled(reads, [...at, ...path, value], KEY_NOTE);
+    if (typeof value !== "string" || !isKey(value)) return false;
+    if (!Object.hasOwn(node, value)) (node as Record<string, unknown>)[value] = filled(reads, [...at, ...path, value], KEY_NOTE);
     return true;
   }
   setAt(target, path, value);
@@ -350,8 +360,8 @@ function place(path: Token[], value: string | number, reads: Reads): Omit<Spec, 
   const message: Token[] = ["messages", ANY];
   if (root === "messages" && path.length === 2) {
     // A message tested for a key: the shape whose messages have it, else the assistant turn of a chat with it added.
-    if (typeof value !== "string" || !NAME.test(value)) return fallback;
-    for (const shape of Object.values(SHAPES)) if (shape.some((m) => value in m)) return { messages: shape };
+    if (typeof value !== "string" || !isKey(value)) return fallback;
+    for (const shape of Object.values(SHAPES)) if (shape.some((m) => Object.hasOwn(m, value))) return { messages: shape };
     const messages = clone(SHAPES.chat3!);
     messages[1]![value] = filled(reads, [...message, value], KEY_NOTE);
     return { messages };
@@ -411,8 +421,8 @@ function schemaOf(type: string, description: string | undefined): Schema {
 
 /** The property `name` of an object schema, made a described string when it is new and `create` allows it. */
 function property(node: Schema, name: string, create: boolean): Schema | undefined {
-  if (node.type !== "object" || !NAME.test(name)) return undefined;
-  const existing = node.properties?.[name];
+  if (node.type !== "object" || !isKey(name)) return undefined;
+  const existing = node.properties ? (own(node.properties, name) as Schema | undefined) : undefined;
   if (existing || !create) return existing;
   node.properties = { ...node.properties, [name]: { type: "string", description: `The ${name} setting for this request.` } };
   return node.properties[name];
@@ -423,8 +433,8 @@ function property(node: Schema, name: string, create: boolean): Schema | undefin
  * allows, holding what the template reads under it or, for a schema keyword, a legal value of its kind.
  */
 function addKey(node: Record<string, unknown>, key: string, create: boolean, schema: boolean, reads: Reads, at: Token[]): boolean {
-  if (!NAME.test(key)) return false;
-  if (key in node) return true;
+  if (!isKey(key)) return false;
+  if (Object.hasOwn(node, key)) return true;
   if (!create) return false;
   if (schema && SCHEMA_KEYS.has(key)) {
     const s = node as Schema;
@@ -446,10 +456,11 @@ function addKey(node: Record<string, unknown>, key: string, create: boolean, sch
 function setNamed(node: Record<string, unknown>, path: Token[], value: string, create: boolean, reads: Reads, at: Token[]): boolean {
   const [key, next] = path;
   if (typeof key !== "string" || SCHEMA_KEYS.has(key)) return false;
-  if (!(key in node) && !create) return false;
+  if (!Object.hasOwn(node, key) && !create) return false;
   if (path.length === 1) node[key] = value;
   else {
-    if (typeof node[key] !== "object" || node[key] === null) {
+    const current = own(node, key);
+    if (typeof current !== "object" || current === null) {
       const held = filled(reads, [...at, key], TOOL_NOTE);
       node[key] = typeof held === "object" ? held : isIndex(next) ? [] : {};
     }
@@ -581,7 +592,7 @@ function triggerSpecs(t: TriggerCandidate, i: number, text: string | undefined, 
       // A loop counter (`loop.index0 == 3`, `loop.length > 3`): most loops walk the messages, so a conversation that reaches it.
       const count = path[1] === "index0" || path[1] === "revindex0" ? n + 1 : n;
       if (role === "explain") return { specs: [], cut: 0 };
-      return count >= 1 && count <= MAX_COUNT ? { specs: [{ label: `count:${count}`, role, messages: conversation(count) }], cut: 0 } : { specs: [], cut: 1 };
+      return count >= 1 && count <= MAX_COUNT ? { specs: [{ label: `count:${count}`, role, messages: { count } }], cut: 0 } : { specs: [], cut: 1 };
     }
     if (path.length > 0) return { specs: [{ label, role, ...place(path, n, reads) }], cut: 0 };
     // A threshold on a computed value: most likely a message count or a content length, so both are sent. A number
@@ -591,9 +602,9 @@ function triggerSpecs(t: TriggerCandidate, i: number, text: string | undefined, 
     if (written !== undefined && !/\|\s*(?:length|count)\b|\blength\s*\(/.test(written)) return { specs: [], cut: 0 };
     const specs: Spec[] = [];
     let cut = 0;
-    if (n >= 1 && n <= MAX_COUNT) specs.push({ label: `count:${n}`, role, messages: conversation(n) });
+    if (n >= 1 && n <= MAX_COUNT) specs.push({ label: `count:${n}`, role, messages: { count: n } });
     else cut++;
-    if (n >= 1 && n <= MAX_LENGTH) specs.push({ label: `length:${n}`, role, messages: [{ role: "user", content: longText(n) }] });
+    if (n >= 1 && n <= MAX_LENGTH) specs.push({ label: `length:${n}`, role, messages: { length: n } });
     else cut++;
     return { specs, cut };
   }
@@ -642,7 +653,15 @@ function contentsOf(messages: readonly Message[]): ProbeContent[] {
   return out;
 }
 
+/** The conversation a spec sends, building a threshold's now that the cap has kept it. */
+function messagesOf(spec: Spec): Message[] {
+  const m = spec.messages;
+  if (Array.isArray(m)) return m;
+  return "count" in m ? conversation(m.count) : [{ role: "user", content: longText(m.length) }];
+}
+
 function toProbe(spec: Spec): Probe {
+  const messages = messagesOf(spec);
   // transformers' apply_chat_template always passes tools and documents, None when there are none, and templates
   // written for it test `tools is not none`; leaving them undefined would make ordinary use fail to render.
   const context: Record<string, unknown> = {
@@ -650,7 +669,7 @@ function toProbe(spec: Spec): Probe {
     eos_token: EOS,
     documents: null,
     ...spec.extra,
-    messages: spec.messages,
+    messages,
     add_generation_prompt: spec.gen ?? true,
     tools: spec.tools ?? null,
   };
@@ -660,7 +679,7 @@ function toProbe(spec: Spec): Probe {
     request: { id: spec.label, context, profile: "hf-default", now: spec.now ?? REFERENCE_DATE },
     role: spec.role,
     label: spec.label,
-    contents: contentsOf(spec.messages),
+    contents: contentsOf(messages),
     tools: spec.tools ?? [],
     inputs: [...inputs],
   };
@@ -682,13 +701,22 @@ export interface ProbeOptions {
   reads?: readonly string[];
 }
 
-/** The fixed matrix plus each trigger candidate's probes, deduplicated and capped at MAX_PROBES. */
+/**
+ * The fixed matrix plus each trigger candidate's probes, deduplicated and capped at MAX_PROBES. A threshold's
+ * conversation is built only for a probe the cap keeps, so a template that lists a thousand thresholds costs
+ * the scanner a thousand small specs, not a thousand long contents.
+ */
 export function buildProbes(triggers: readonly TriggerCandidate[], options: ProbeOptions = {}): ProbeMatrix {
   const withTools = options.tools !== false;
   const specs = [...explainSpecs(withTools), ...varySpecs(withTools)];
   const reads = readsOf([...triggers.map((t) => t.input), ...(options.reads ?? [])]);
   let cut = 0;
+  // A candidate alike in everything its probes are built from adds nothing; the first keeps its index.
+  const alike = new Set<string>();
   triggers.forEach((t, i) => {
+    const key = JSON.stringify([t.test, t.value, t.op, t.input, options.text?.slice(t.span.start, t.span.end)]);
+    if (alike.has(key)) return;
+    alike.add(key);
     const r = triggerSpecs(t, i, options.text, reads);
     specs.push(...(withTools ? r.specs : r.specs.map((s) => ({ ...s, tools: undefined }))));
     cut += r.cut;

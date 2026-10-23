@@ -3,11 +3,13 @@
 // what removing input from output (render_divergence) and the integrity checks (ISC-22.3, ISC-22.4) rely on.
 
 import { describe, expect, test } from "bun:test";
+import { join } from "node:path";
 import { diffRender } from "../../src/diffrender/index.ts";
 import { BOS, buildProbes, EOS, MAX_PROBES, readsTools, REFERENCE_DATE, VARY_DATES } from "../../src/diffrender/probes.ts";
 import { loadRegistry } from "../../src/registry/index.ts";
+import { analyzeInjection, buildScaffolding } from "../../src/rules/injection.ts";
 import { makeTemplateFromString } from "../../src/template.ts";
-import type { Probe, ProbeContent, Renderer, Span, TriggerCandidate } from "../../src/types.ts";
+import type { ModelRecord, Probe, ProbeContent, Renderer, Span, TriggerCandidate } from "../../src/types.ts";
 
 const SPAN: Span = { start: 0, end: 0, line: 1, col: 1 };
 const trigger = (value: string | number, extra: Partial<TriggerCandidate> = {}): TriggerCandidate => ({
@@ -238,6 +240,51 @@ describe("trigger candidates", () => {
     expect(({} as Record<string, unknown>).polluted).toBeUndefined();
     expect(probes.length).toBeGreaterThan(0);
     for (const p of probes) expect(messages(p)).toHaveLength(1);
+  });
+
+  test("a path through constructor or prototype writes nothing into Object.prototype and is sent as plain content", () => {
+    const before = Object.getOwnPropertyNames(Object.prototype);
+    try {
+      const inputs = [
+        "tools[].function.parameters.properties.constructor.prototype.unavailable",
+        "tools[].function.constructor.prototype.unavailable",
+        "messages[].constructor.prototype.unavailable",
+        "constructor.prototype.unavailable",
+        "documents[].prototype.unavailable",
+      ];
+      const probes = triggerProbes(inputs.map((input) => trigger("pwned", { input })));
+      expect(Object.getOwnPropertyNames(Object.prototype)).toEqual(before);
+      expect(probes.length).toBeGreaterThan(0);
+      for (const p of probes) expect(messages(p)).toHaveLength(1);
+    } finally {
+      for (const name of Object.getOwnPropertyNames(Object.prototype)) if (!before.includes(name)) delete (Object.prototype as Record<string, unknown>)[name];
+    }
+  });
+
+  test("the reviewer's template that reads tools through constructor.prototype leaves Object.prototype as it was", async () => {
+    // runtime review 1: one template's probes set `({}).unavailable`, which turned off differential rendering for every later template.
+    const text = await Bun.file(join(import.meta.dir, "fixtures", "probes", "proto-pollute.jinja")).text();
+    const template = makeTemplateFromString({ kind: "bare", path: "/t.jinja", realPath: "/t.jinja", name: "default" }, text);
+    const a = analyzeInjection({ template, scaffolding: buildScaffolding({ specialTokens: [] } as unknown as ModelRecord), knownGood: false });
+    expect(a.triggers.some((t) => t.input?.includes("constructor.prototype"))).toBe(true);
+    const before = Object.getOwnPropertyNames(Object.prototype);
+    try {
+      buildProbes(a.triggers, { text, reads: a.reads });
+      expect(Object.getOwnPropertyNames(Object.prototype)).toEqual(before);
+      expect(({} as Record<string, unknown>).unavailable).toBeUndefined();
+    } finally {
+      for (const name of Object.getOwnPropertyNames(Object.prototype)) if (!before.includes(name)) delete (Object.prototype as Record<string, unknown>)[name];
+    }
+  });
+
+  test("a key named like an inherited member (toString, valueOf, hasOwnProperty) is added as the conversation's own", () => {
+    const [message] = triggerProbes([trigger("toString", { op: "in", input: "messages[]", test: "presence" })]);
+    expect(Object.hasOwn(messages(message!)[1]!, "toString")).toBe(true);
+    const [fn] = triggerProbes([trigger("valueOf", { op: "in", input: "tools[].function", test: "presence" })]);
+    expect(Object.hasOwn((fn!.tools[0] as { function: object }).function, "valueOf")).toBe(true);
+    const [schema] = triggerProbes([trigger("hasOwnProperty", { op: "in", input: "tools[].function.parameters.properties" })]);
+    const properties = (schema!.tools[0] as { function: { parameters: { properties: object } } }).function.parameters.properties;
+    expect(Object.hasOwn(properties, "hasOwnProperty")).toBe(true);
   });
 
   test("every message-field trigger probe keeps the conversation's shape", () => {
@@ -618,5 +665,39 @@ describe("the per-template cap", () => {
 
   test("a stock-sized trigger list fits", () => {
     expect(buildProbes(Array.from({ length: 40 }, (_, i) => trigger(`value ${i}`))).cut).toBe(0);
+  });
+
+  // runtime review SF5: a template with 1,101 `|length >` thresholds near 198,000 (trig/len.jinja).
+  const LENGTHS = 1101;
+  const lengthText = Array.from({ length: LENGTHS }, (_, i) => `{%- if messages[-1].content|length > ${198_000 + i} -%}{%- endif -%}`).join("\n");
+  const lengthTriggers = Array.from({ length: LENGTHS }, (_, i) => {
+    const written = `messages[-1].content|length > ${198_000 + i}`;
+    const start = lengthText.indexOf(written);
+    return trigger(198_000 + i, { op: ">", span: { start, end: start + written.length, line: i + 1, col: 1 } });
+  });
+
+  test("thresholds past the cap are counted, not sent; the ones kept are the first, in order, each content as long as it says", () => {
+    const { probes, cut } = buildProbes([...lengthTriggers, lengthTriggers[0]!], { text: lengthText });
+    expect(probes).toHaveLength(MAX_PROBES);
+    const kept = probes.filter((p) => p.label.startsWith("length:"));
+    expect(kept.map((p) => p.label)).toEqual(kept.map((_, i) => `length:${198_001 + i}`));
+    for (const p of kept) expect(p.contents[0]!.text).toHaveLength(Number(p.label.slice("length:".length)));
+    // Every count is past MAX_COUNT; every length the cap leaves out is counted once, the repeated candidate not at all.
+    expect(cut).toBe(LENGTHS + LENGTHS - kept.length);
+  });
+
+  test("the content of a threshold the cap cuts is never built, so 1,101 of them cost the scanner little memory", () => {
+    const script = `
+      const { buildProbes } = await import(${JSON.stringify(join(import.meta.dir, "../../src/diffrender/probes.ts"))});
+      const { text, triggers } = JSON.parse(await Bun.stdin.text());
+      Bun.gc(true);
+      const base = process.resourceUsage().maxRSS;
+      buildProbes(triggers, { text });
+      console.log(JSON.stringify({ base, peak: process.resourceUsage().maxRSS }));`;
+    const run = Bun.spawnSync([process.execPath, "-e", script], { stdin: Buffer.from(JSON.stringify({ text: lengthText, triggers: lengthTriggers })) });
+    expect(run.exitCode).toBe(0);
+    const { base, peak } = JSON.parse(run.stdout.toString()) as { base: number; peak: number };
+    // Building every content and keying on it took about 20 times the baseline; the probes kept need far less.
+    expect(peak / base).toBeLessThan(4);
   });
 });
