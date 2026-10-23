@@ -271,15 +271,18 @@ interface ModelIndex {
 
 function indexModel(model: ModelRecord): ModelIndex {
   const gguf = model.templates.filter((t) => t.source.kind === "gguf" && t.source.key !== undefined);
-  const byKey = new Map<string, ExtractedTemplate[]>();
-  for (const t of gguf) byKey.set(t.source.key!, [...(byKey.get(t.source.key!) ?? []), t]);
+  // The last template under each key and byte length. A view is shorter than the value it is cut
+  // from, so it is never that value; one lookup replaces a scan of every same-key template, which
+  // was quadratic in a record repeating one key (review round 2, Codex N1).
+  const lastByKeyLength = new Map<string, ExtractedTemplate>();
+  for (const t of gguf) lastByKeyLength.set(`${t.bytes.length}\0${t.source.key}`, t);
   const viewOf = new Map<ExtractedTemplate, ExtractedTemplate>();
   const views = new Set<ExtractedTemplate>();
   for (const t of gguf) {
     const n = t.bytes.indexOf(0);
     if (n < 0) continue;
     // Views follow the stored values in a record, so the last candidate is the view even when a stored key is spelled like one.
-    const view = (byKey.get(viewKey(t.source.key!, n)) ?? []).findLast((v) => v !== t && v.bytes.length === n);
+    const view = lastByKeyLength.get(`${n}\0${viewKey(t.source.key!, n)}`);
     if (view) {
       viewOf.set(t, view);
       views.add(view);
@@ -394,24 +397,41 @@ export function checkIntraModel(model: ModelRecord, table: PrecedenceTable): Fin
   }
 
   const byName = new Map<string, ExtractedTemplate[]>();
-  for (const t of model.templates) byName.set(t.source.name, [...(byName.get(t.source.name) ?? []), t]);
+  for (const t of model.templates) {
+    const group = byName.get(t.source.name);
+    if (group) group.push(t);
+    else byName.set(t.source.name, [t]);
+  }
 
   const findings: Finding[] = [];
   const budget = { left: DIFF_BUDGET };
   let skipped = 0;
   for (const [name, group] of byName) {
+    // Copies with equal bytes are bucketed first, so only pairs across buckets are visited and
+    // each one visited is a finding: 65,000 identical keys cost one pass, not 2 billion skipped
+    // pairs (review round 2, Codex N1).
+    const order = new Map(group.map((t, i) => [t, i]));
+    const buckets = new Map<string, ExtractedTemplate[]>();
+    for (const t of group) {
+      const bucket = buckets.get(t.sha256);
+      if (bucket) bucket.push(t);
+      else buckets.set(t.sha256, [t]);
+    }
+    const distinct = [...buckets.values()];
     // Pairs whose bytes differ, counted without visiting them: (n^2 - sum of squared same-hash counts) / 2.
-    const counts = new Map<string, number>();
-    for (const t of group) counts.set(t.sha256, (counts.get(t.sha256) ?? 0) + 1);
-    let differing = (group.length ** 2 - [...counts.values()].reduce((s, c) => s + c * c, 0)) / 2;
-    for (let i = 0; i < group.length && findings.length < MAX_DIVERGENCE_PAIRS; i++) {
-      for (let j = i + 1; j < group.length && findings.length < MAX_DIVERGENCE_PAIRS; j++) {
-        let [a, b] = [group[i]!, group[j]!];
-        if (a.sha256 === b.sha256) continue;
-        // The diff's baseline is the template more runtimes load; ties keep reader order.
-        if (loaded.get(b)!.length > loaded.get(a)!.length) [a, b] = [b, a];
-        findings.push(divergence(model, name, a, b, loaded, budget));
-        differing--;
+    let differing = (group.length ** 2 - distinct.reduce((s, c) => s + c.length ** 2, 0)) / 2;
+    pairs: for (let x = 0; x < distinct.length; x++) {
+      for (let y = x + 1; y < distinct.length; y++) {
+        for (const p of distinct[x]!) {
+          for (const q of distinct[y]!) {
+            if (findings.length >= MAX_DIVERGENCE_PAIRS) break pairs;
+            let [a, b] = order.get(p)! < order.get(q)! ? [p, q] : [q, p];
+            // The diff's baseline is the template more runtimes load; ties keep reader order.
+            if (loaded.get(b)!.length > loaded.get(a)!.length) [a, b] = [b, a];
+            findings.push(divergence(model, name, a, b, loaded, budget));
+            differing--;
+          }
+        }
       }
     }
     skipped += differing;

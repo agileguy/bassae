@@ -48,6 +48,14 @@ export interface Extraction {
 export function extractTemplates(raw: RawTemplate[], path: string, realPath: string): Extraction {
   const templates = raw.map((r) => makeTemplate({ kind: "gguf", path, realPath, name: templateName(r.key), key: r.key }, r.bytes));
   const out: Extraction = { templates, views: [], findings: [] };
+  // The first template under each name and each key, so finding a view's clash is a lookup, not a
+  // scan per NUL-holding value (review round 2, Codex N1).
+  const firstByName = new Map<string, number>();
+  const firstByKey = new Map<string, number>();
+  templates.forEach((s, i) => {
+    if (!firstByName.has(s.source.name)) firstByName.set(s.source.name, i);
+    if (s.source.key !== undefined && !firstByKey.has(s.source.key)) firstByKey.set(s.source.key, i);
+  });
   raw.forEach((r, i) => {
     const t = templates[i]!;
     const n = r.bytes.indexOf(0);
@@ -69,7 +77,8 @@ export function extractTemplates(raw: RawTemplate[], path: string, realPath: str
       detail: { key: r.key, byteOffset: n, fileOffset: r.offset + n, viewSha256: view.sha256 },
     });
     // A stored key can be spelled like a view, e.g. tokenizer.chat_template.x[:3], and then the two share a name or key.
-    const clash = templates.find((s) => s.source.name === view.source.name || s.source.key === view.source.key);
+    const hits = [firstByName.get(view.source.name), firstByKey.get(view.source.key!)].filter((k) => k !== undefined);
+    const clash = hits.length > 0 ? templates[Math.min(...hits)] : undefined;
     if (!clash) return;
     out.findings.push({
       ruleId: "parse_error",

@@ -144,6 +144,29 @@ describe("ISC-7.5 edge cases", () => {
     expect(summary.span).toEqual(WHOLE_TEMPLATE);
     expect(model.templates.filter((t) => !t.shadowed)).toHaveLength(1);
   });
+
+  test("65,000 identical copies of one key cost one pass, and one odd copy among them is still capped (review round 2, Codex N1)", () => {
+    const n = 65_000;
+    const same = Array.from({ length: n }, () => ["tokenizer.chat_template", str(chatml("same"))] as [string, ReturnType<typeof str>]);
+    const identical = readGgufSource(bytesSource(buildGguf(same).bytes), "/m/x.gguf");
+    let started = performance.now();
+    expect(checkIntraModel(identical, table)).toEqual([]);
+    expect(performance.now() - started).toBeLessThan(1000);
+
+    const odd = readGgufSource(bytesSource(buildGguf([...same.slice(1), ["tokenizer.chat_template", str(chatml("odd"))]]).bytes), "/m/x.gguf");
+    started = performance.now();
+    const findings = checkIntraModel(odd, table);
+    expect(performance.now() - started).toBeLessThan(1000);
+    expect(findings).toHaveLength(MAX_DIVERGENCE_PAIRS + 1);
+    expect(findings.at(-1)!.detail).toEqual({ suppressed: n - 1 - MAX_DIVERGENCE_PAIRS });
+
+    // Every value holds a NUL, so every one has a llama.cpp view to find.
+    const nul = readGgufSource(bytesSource(buildGguf(Array.from({ length: n }, () => ["tokenizer.chat_template", str(`${chatml("same")}\0tail`)] as [string, ReturnType<typeof str>])).bytes), "/m/x.gguf");
+    started = performance.now();
+    resolveProfiles(nul, table);
+    checkIntraModel(nul, table);
+    expect(performance.now() - started).toBeLessThan(1000);
+  }, 30_000);
 });
 
 describe("ISC-7.5 memory bound (review round 1, C5)", () => {
