@@ -14,6 +14,8 @@ import { preLex } from "../parse/prelexer.ts";
 import { extract, rawItems, Scaffold } from "./injected.ts";
 import { findEncodedBlobs, findEncodedBlobsIn, findInvisibleChars, findUrls, findUrlsRaw } from "./textscan.ts";
 import { capPerRule, clip, dedupe, pushAll } from "./finalize.ts";
+import { forEachLiteral } from "./literals.ts";
+import { whitespaceKey } from "../whitespace.ts";
 
 // Role and channel names a template writes between special tokens. A channel
 // (gpt-oss `analysis`, Gemma `thought`) is routing, not instruction, so it is
@@ -136,11 +138,23 @@ function analyze(ctx: AnalysisContext, base: FindingBase): RuleResult {
   // No AST: a parse error, a shape cap, or over the size cap (no token array or
   // line map). The raw-text forms of ISC-19 to ISC-21 still run (ISC-12), and the
   // text between tags is still unbaselined text when it can be located.
-  pushAll(findings, findUrlsRaw(outcome, t.text, base));
+  pushAll(findings, findUrlsRaw(outcome, t.text, base, baselinedLiteral(ctx)));
   pushAll(findings, findEncodedBlobs(outcome, t.text, base));
   pushAll(findings, findInvisibleChars(t.text, base, outcome));
   if (!outcome.oversized) pushAll(findings, itemFindings(rawItems(outcome, new Scaffold(scaffolding)), ctx, base, t.text));
   return { findings: capPerRule(dedupe(findings), base), complete: false };
+}
+
+// ISC-17.1 on the raw path: a literal equal to one of the registry entry's, up
+// to ASCII whitespace, is the baseline's, so a URL in it is not reported. The
+// AST path gets this from the scaffolding; with no AST there is none to match.
+function baselinedLiteral(ctx: AnalysisContext): ((from: number, to: number) => boolean) | undefined {
+  const known = ctx.known;
+  if (!known) return undefined;
+  const keys = new Set<string>();
+  forEachLiteral(known.text, (_kind, start, end) => keys.add(whitespaceKey(known.text.slice(start, end))));
+  const text = ctx.template.text;
+  return (from, to) => keys.has(whitespaceKey(text.slice(from, to)));
 }
 
 // A URL or blob found across literals is reported once, whole: a finding on
