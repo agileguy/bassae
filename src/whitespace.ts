@@ -5,6 +5,8 @@
 // U+3000 is a real change, never a variant, so an edit made of them is always
 // reported and explained (round-2 review: Gemini 1, Codex R2).
 
+import { createHash } from "node:crypto";
+
 /** True for the six ASCII whitespace code units. */
 export function isTemplateSpace(c: number): boolean {
   return c === 0x20 || (c >= 0x09 && c <= 0x0d);
@@ -30,8 +32,36 @@ export function sameIgnoringWhitespace(a: string, b: string): boolean {
   }
 }
 
-/** The text's runs of non-whitespace joined by one space. Two texts get the same key exactly when `sameIgnoringWhitespace` holds for them. */
+// Code units hashed per update. The key never holds a copy of the text, so a 64 Mi-unit
+// template costs this buffer, not a second 64 Mi string (review round 1, R5).
+const KEY_CHUNK = 64 * 1024;
+
+/** SHA-256 of the text's runs of non-whitespace joined by one space, as UTF-16 code units. Two texts get the same key exactly when `sameIgnoringWhitespace` holds for them. */
 export function whitespaceKey(text: string): string {
-  const s = text.replace(/[\t\n\v\f\r ]+/g, " ");
-  return s.slice(s.startsWith(" ") ? 1 : 0, s.endsWith(" ") ? -1 : undefined);
+  const hash = createHash("sha256");
+  const buf = new Uint16Array(KEY_CHUNK);
+  let n = 0;
+  let started = false;
+  let gap = false;
+  const put = (c: number) => {
+    if (n === KEY_CHUNK) {
+      hash.update(buf);
+      n = 0;
+    }
+    buf[n++] = c;
+  };
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (isTemplateSpace(c)) {
+      gap = started;
+      continue;
+    }
+    // A whitespace run between two non-whitespace runs becomes one space; at either end, nothing.
+    if (gap) put(0x20);
+    put(c);
+    started = true;
+    gap = false;
+  }
+  hash.update(buf.subarray(0, n));
+  return hash.digest("hex");
 }

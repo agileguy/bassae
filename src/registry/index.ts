@@ -9,9 +9,9 @@ import { fileURLToPath } from "node:url";
 import { unifiedDiff } from "../diff.ts";
 import { cKey, viewKey } from "../gguf/templates.ts";
 import { parseHfCachePath } from "../hf/cache.ts";
-import { LineMap } from "../parse/support.ts";
+import { WHOLE_TEMPLATE } from "../parse/parse.ts";
 import { clip } from "../rules/finalize.ts";
-import { whitespaceKey } from "../whitespace.ts";
+import { sameIgnoringWhitespace, whitespaceKey } from "../whitespace.ts";
 import type {
   ExtractedTemplate,
   Finding,
@@ -23,6 +23,7 @@ import type {
   RegistryMatch,
   RuntimeProfile,
   SourceKind,
+  Span,
   TemplateSource,
   TemplateStatus,
 } from "../types.ts";
@@ -85,6 +86,8 @@ function parseEntry(raw: unknown, i: number): RegistryEntry {
 // ISC-24.2's variant key; one definition with divergence and the local comparison.
 export { whitespaceKey };
 
+const BLANK_KEY = whitespaceKey("");
+
 /** Loads registry/known-good.json and the template text each entry pins. Throws when a pinned text does not hash to its entry's sha256. */
 export function loadRegistry(dir: string = REGISTRY_DIR): Registry {
   const file = readJson(join(dir, "known-good.json"));
@@ -102,7 +105,7 @@ export function loadRegistry(dir: string = REGISTRY_DIR): Registry {
       const actual = sha256(bytes);
       if (actual !== entry.sha256) throw new Error(`registry template ${entry.sha256}.jinja hashes to ${actual}, not its entry's sha256`);
       text = strictUtf8.decode(bytes); // a pinned text that is not UTF-8 throws here
-      if (whitespaceKey(text) === "") throw new Error(`registry template ${entry.sha256}.jinja is empty or all whitespace`);
+      if (whitespaceKey(text) === BLANK_KEY) throw new Error(`registry template ${entry.sha256}.jinja is empty or all whitespace`);
       texts.set(entry.sha256, text);
     }
     return Object.freeze({ entry: Object.freeze(entry), text });
@@ -129,8 +132,9 @@ export function createRegistry(known: readonly KnownGoodTemplate[]): Registry {
       if (exact) return { kind: "exact", known: preferred(exact, template) };
       // Bytes that are not UTF-8 decode lossily, so their text proves nothing about the bytes.
       if (!template.validUtf8) return { kind: "none" };
-      const variant = byKey.get(whitespaceKey(template.text));
-      if (variant) return { kind: "whitespace", known: preferred(variant, template) };
+      // The key is a hash, so a hit is confirmed against the text itself.
+      const variant = byKey.get(whitespaceKey(template.text))?.filter((k) => sameIgnoringWhitespace(k.text, template.text));
+      if (variant?.length) return { kind: "whitespace", known: preferred(variant, template) };
       return { kind: "none" };
     },
     forRepo(repo: string): readonly KnownGoodTemplate[] {
@@ -348,6 +352,16 @@ export function resolveProfiles(model: ModelRecord, table: PrecedenceTable): Rec
 // A hostile GGUF can repeat one key thousands of times; past this many pairs one summary finding stands for the rest.
 export const MAX_DIVERGENCE_PAIRS = 32;
 
+// unifiedDiff's working memory grows with its input: nine 4 MiB templates in one GGUF
+// once took 4 GB. These bound what one model's divergence findings cost (review round 1, C5).
+
+/** The most of a unified diff one finding stores; a longer diff is cut at a line end and marked. */
+export const MAX_STORED_DIFF = 64 * 1024;
+/** A pair is diffed only when its two texts together are at most this many UTF-16 units. */
+export const MAX_PAIR_DIFF_INPUT = 512 * 1024;
+/** UTF-16 units of input diffed per model across all pairs; a pair that would overrun it reports without a diff. */
+export const DIFF_BUDGET = 4 * 1024 * 1024;
+
 const label = (s: TemplateSource) => (s.key === undefined ? s.path : `${s.path}:${s.key}`);
 
 /** Which profiles load each template, under its own name or as the default. */
@@ -383,6 +397,7 @@ export function checkIntraModel(model: ModelRecord, table: PrecedenceTable): Fin
   for (const t of model.templates) byName.set(t.source.name, [...(byName.get(t.source.name) ?? []), t]);
 
   const findings: Finding[] = [];
+  const budget = { left: DIFF_BUDGET };
   let skipped = 0;
   for (const [name, group] of byName) {
     // Pairs whose bytes differ, counted without visiting them: (n^2 - sum of squared same-hash counts) / 2.
@@ -395,7 +410,7 @@ export function checkIntraModel(model: ModelRecord, table: PrecedenceTable): Fin
         if (a.sha256 === b.sha256) continue;
         // The diff's baseline is the template more runtimes load; ties keep reader order.
         if (loaded.get(b)!.length > loaded.get(a)!.length) [a, b] = [b, a];
-        findings.push(divergence(model, name, a, b, loaded));
+        findings.push(divergence(model, name, a, b, loaded, budget));
         differing--;
       }
     }
@@ -407,25 +422,39 @@ export function checkIntraModel(model: ModelRecord, table: PrecedenceTable): Fin
       severity: "MEDIUM",
       message: `${skipped} more pairs of differing same-name templates not compared`,
       file: model.id,
-      span: { start: 0, end: 0, line: 1, col: 1 },
+      span: { ...WHOLE_TEMPLATE },
       detail: { suppressed: skipped },
     });
   }
   return findings;
 }
 
-function divergence(model: ModelRecord, name: string, a: ExtractedTemplate, b: ExtractedTemplate, loaded: Map<ExtractedTemplate, RuntimeProfile[]>): Finding {
+function divergence(
+  model: ModelRecord,
+  name: string,
+  a: ExtractedTemplate,
+  b: ExtractedTemplate,
+  loaded: Map<ExtractedTemplate, RuntimeProfile[]>,
+  budget: { left: number },
+): Finding {
   const same = label(a.source) === label(b.source);
   const aLabel = same ? `${label(a.source)} (first)` : label(a.source);
   const bLabel = same ? `${label(b.source)} (second)` : label(b.source);
-  const diff = unifiedDiff(a.text, b.text, aLabel, bLabel);
+  const note = (why: string) => `--- ${aLabel}\n+++ ${bLabel}\n@@ ${why} @@\n`;
+  const input = a.text.length + b.text.length;
+  let diff: string;
+  let diffComplete = false;
+  if (input > MAX_PAIR_DIFF_INPUT) diff = note(`not diffed: ${a.text.length} and ${b.text.length} UTF-16 units, over the ${MAX_PAIR_DIFF_INPUT}-unit limit for one pair`);
+  else if (input > budget.left) diff = note(`not diffed: this model's diff budget of ${DIFF_BUDGET} UTF-16 units is spent`);
+  else {
+    budget.left -= input;
+    // Bytes can differ where both texts decode to U+FFFD, and then the text diff is empty.
+    const full = unifiedDiff(a.text, b.text, aLabel, bLabel) || note("bytes differ where both texts decode to U+FFFD");
+    diff = clipDiff(full);
+    diffComplete = diff === full;
+  }
   const side = (t: ExtractedTemplate) => ({ kind: t.source.kind, path: t.source.path, key: t.source.key, sha256: t.sha256, loadedBy: loaded.get(t), shadowed: t.shadowed === true });
-  // The span is the first line of b that differs from a.
-  let at = 0;
-  while (at < a.text.length && at < b.text.length && a.text[at] === b.text[at]) at++;
-  const lineStart = at === 0 ? 0 : b.text.lastIndexOf("\n", at - 1) + 1;
-  const nl = b.text.indexOf("\n", at);
-  const lineEnd = nl < 0 ? b.text.length : nl;
+  const span = firstDifferingLine(a.text, b.text);
   return {
     ruleId: "intra_model_divergence",
     severity: "MEDIUM",
@@ -433,11 +462,41 @@ function divergence(model: ModelRecord, name: string, a: ExtractedTemplate, b: E
     file: b.source.path,
     templateName: name,
     templateSha256: b.sha256,
-    span: new LineMap(b.text).span(lineStart, lineEnd),
-    excerpt: clip(b.text.slice(lineStart, lineEnd)),
-    // Bytes can differ where both texts decode to U+FFFD, and then the text diff is empty.
-    detail: { diff: diff || `--- ${aLabel}\n+++ ${bLabel}\n@@ bytes differ where both texts decode to U+FFFD @@\n`, model: model.id, a: side(a), b: side(b) },
+    span,
+    excerpt: clip(b.text.slice(span.start, span.end)),
+    detail: { diff, diffComplete, model: model.id, a: side(a), b: side(b) },
   };
+}
+
+// Cut at the last line end within MAX_STORED_DIFF, so no line or surrogate pair is split.
+function clipDiff(diff: string): string {
+  if (diff.length <= MAX_STORED_DIFF) return diff;
+  let cut = diff.lastIndexOf("\n", MAX_STORED_DIFF - 1) + 1;
+  if (cut === 0) {
+    const last = diff.charCodeAt(MAX_STORED_DIFF - 1);
+    cut = last >= 0xd800 && last <= 0xdbff ? MAX_STORED_DIFF - 1 : MAX_STORED_DIFF;
+  }
+  return `${diff.slice(0, cut)}${diff[cut - 1] === "\n" ? "" : "\n"}@@ diff truncated: ${cut} of ${diff.length} UTF-16 units shown @@\n`;
+}
+
+// The line of b holding the first unit where a and b differ. Lines break on \r\n, \r or \n,
+// as LineMap breaks them; scanning instead of building a LineMap keeps a 4 MiB template cheap.
+function firstDifferingLine(a: string, b: string): Span {
+  let at = 0;
+  while (at < a.length && at < b.length && a.charCodeAt(at) === b.charCodeAt(at)) at++;
+  let line = 1;
+  let start = 0;
+  for (let i = 0; i < at; i++) {
+    const c = b.charCodeAt(i);
+    if (c === 10 || (c === 13 && b.charCodeAt(i + 1) !== 10)) {
+      line++;
+      start = i + 1;
+    }
+  }
+  let end = at;
+  while (end < b.length && b.charCodeAt(end) !== 10 && b.charCodeAt(end) !== 13) end++;
+  if (end > start && b.charCodeAt(end - 1) === 13) end--; // the \r of a \r\n the first difference split
+  return { start, end, line, col: 1 };
 }
 
 // ---- transform allowlist ----

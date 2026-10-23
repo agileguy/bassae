@@ -100,7 +100,7 @@ describe("checked-in registry (ISC-24.1)", () => {
       }
       expect(code).not.toMatch(/import\s+\*|import\s*\(|require\s*\(|\bBun\.|\bfetch\s*\(|\bprocess\.|\bDeno\./);
       // Relative imports are other read-only modules, never the filesystem helpers in hf/ or gguf/ that open files.
-      for (const [, from] of code.matchAll(/from\s+"(\.[^"]+)"/g)) expect(["../diff.ts", "../gguf/templates.ts", "../hf/cache.ts", "../parse/support.ts", "../rules/finalize.ts", "../types.ts", "../whitespace.ts"]).toContain(from!);
+      for (const [, from] of code.matchAll(/from\s+"(\.[^"]+)"/g)) expect(["../diff.ts", "../gguf/templates.ts", "../hf/cache.ts", "../parse/parse.ts", "../rules/finalize.ts", "../types.ts", "../whitespace.ts"]).toContain(from!);
     }
   });
 });
@@ -144,8 +144,8 @@ describe("matching (ISC-24, ISC-24.2)", () => {
       expect(registry.match(tpl(known.text.replace(" ", ch))).kind).toBe("none");
       expect(registry.match(tpl(`${ch}${known.text}`)).kind).toBe("none");
     }
-    expect(whitespaceKey(" a\t\tb \r\n c\n")).toBe("a b c");
-    expect(whitespaceKey("a b")).toBe("a b");
+    expect(whitespaceKey(" a\t\tb \r\n c\n")).toBe(whitespaceKey("a b c"));
+    expect(whitespaceKey("a\u00a0b")).not.toBe(whitespaceKey("a b"));
   });
 
   test("bytes that are not UTF-8 never match as a variant", () => {
