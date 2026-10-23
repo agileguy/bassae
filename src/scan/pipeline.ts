@@ -24,7 +24,7 @@ import type {
   TemplateStatus,
 } from "../types.ts";
 import { type Analysis, createAnalyzer } from "./analyze.ts";
-import { type Attachable, attachModelFindings, finalizeModelFindings } from "./attach.ts";
+import { type Attachable, attachModelFindings, finalizeFindings } from "./attach.ts";
 import { loadModels } from "./load.ts";
 
 /** A command the scan refuses before reading anything. The CLI exits 3 on it (ISC-28). */
@@ -85,7 +85,7 @@ export async function scanWith(options: ScanOptions, setup: RendererSetup): Prom
   const jobs: (() => Promise<void>)[] = [];
   for (const record of records) {
     const tamper = await checkLocalTamper(record);
-    const modelFindings = finalizeModelFindings([...record.findings, ...intra.get(record)!, ...tamper, ...(local.get(record) ?? [])], record.id);
+    const modelFindings = finalizeFindings([...record.findings, ...intra.get(record)!, ...tamper, ...(local.get(record) ?? [])], record.id);
     const drafts: Draft[] = [];
     for (const [i, group] of groupTemplates(record).entries()) {
       jobs.push(async () => {
