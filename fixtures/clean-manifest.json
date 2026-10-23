@@ -1,0 +1,793 @@
+{
+  "roots": [
+    "~/.cache/huggingface/hub",
+    "~/.omlx"
+  ],
+  "entries": [
+    {
+      "path": "~/.cache/huggingface/hub/models--LiquidAI--LFM2-1.2B-Tool-GGUF/snapshots/e7ec4149433c75d4bb53a0742ee1ebde7fcbd183/LFM2-1.2B-Tool-Q8_0.gguf",
+      "kind": "gguf",
+      "name": "default",
+      "sha256": "89e790f027916b5a2bca145a6a8454e06ffc7a5043bf3b6d97829aff86bb543f",
+      "frozen": "2026-10-23",
+      "model": "~/.cache/huggingface/hub/models--LiquidAI--LFM2-1.2B-Tool-GGUF/snapshots/e7ec4149433c75d4bb53a0742ee1ebde7fcbd183/LFM2-1.2B-Tool-Q8_0.gguf",
+      "alsoAt": [
+        "~/.cache/huggingface/hub/models--LiquidAI--LFM2-1.2B-Tool-GGUF/blobs/bf035d5876eb8ef0b1a87cf0cf30d9717e4cc628d483c5b49b342603d5f2ee67"
+      ],
+      "proof": {
+        "registry": {
+          "repo": "LiquidAI/LFM2-1.2B-Tool-GGUF",
+          "revision": "e7ec4149433c75d4bb53a0742ee1ebde7fcbd183",
+          "path": "LFM2-1.2B-Tool-Q8_0.gguf",
+          "templateName": "default"
+        },
+        "integrity": {
+          "record": "hf-cache-blob",
+          "algorithm": "sha256",
+          "etag": "bf035d5876eb8ef0b1a87cf0cf30d9717e4cc628d483c5b49b342603d5f2ee67"
+        }
+      }
+    },
+    {
+      "path": "~/.cache/huggingface/hub/models--LiquidAI--LFM2-1.2B-Tool/snapshots/6d24c6b7471fcbcec084935e377a5302f4b84389/chat_template.jinja",
+      "kind": "chat_template_jinja",
+      "name": "default",
+      "sha256": "89e790f027916b5a2bca145a6a8454e06ffc7a5043bf3b6d97829aff86bb543f",
+      "frozen": "2026-10-23",
+      "model": "~/.cache/huggingface/hub/models--LiquidAI--LFM2-1.2B-Tool/snapshots/6d24c6b7471fcbcec084935e377a5302f4b84389",
+      "proof": {
+        "registry": {
+          "repo": "LiquidAI/LFM2-1.2B-Tool",
+          "revision": "6d24c6b7471fcbcec084935e377a5302f4b84389",
+          "path": "chat_template.jinja",
+          "templateName": "default"
+        },
+        "integrity": {
+          "record": "hf-cache-blob",
+          "algorithm": "git-blob-sha1",
+          "etag": "99f3593d02fff6c0ac1f3c1293d5e2d1fa182dc8"
+        }
+      }
+    },
+    {
+      "path": "~/.cache/huggingface/hub/models--Qwen--Qwen2.5-0.5B-Instruct-GGUF/snapshots/9217f5db79a29953eb74d5343926648285ec7e67/qwen2.5-0.5b-instruct-q8_0.gguf",
+      "kind": "gguf",
+      "name": "default",
+      "sha256": "d5495a1e5db0611132a97e46a65dbb64a642a499421228b9c8b93229097fa9a4",
+      "frozen": "2026-10-23",
+      "model": "~/.cache/huggingface/hub/models--Qwen--Qwen2.5-0.5B-Instruct-GGUF/snapshots/9217f5db79a29953eb74d5343926648285ec7e67/qwen2.5-0.5b-instruct-q8_0.gguf",
+      "alsoAt": [
+        "~/.cache/huggingface/hub/models--Qwen--Qwen2.5-0.5B-Instruct-GGUF/blobs/ca59ca7f13d0e15a8cfa77bd17e65d24f6844b554a7b6c12e07a5f89ff76844e"
+      ],
+      "proof": {
+        "registry": {
+          "repo": "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+          "revision": "9217f5db79a29953eb74d5343926648285ec7e67",
+          "path": "qwen2.5-0.5b-instruct-q8_0.gguf",
+          "templateName": "default"
+        },
+        "integrity": {
+          "record": "hf-cache-blob",
+          "algorithm": "sha256",
+          "etag": "ca59ca7f13d0e15a8cfa77bd17e65d24f6844b554a7b6c12e07a5f89ff76844e"
+        }
+      }
+    },
+    {
+      "path": "~/.cache/huggingface/hub/models--Qwen--Qwen2.5-0.5B-Instruct/snapshots/7ae557604adf67be50417f59c2c2f167def9a775/tokenizer_config.json",
+      "kind": "tokenizer_config",
+      "name": "default",
+      "sha256": "cd8e9439f0570856fd70470bf8889ebd8b5d1107207f67a5efb46e342330527f",
+      "frozen": "2026-10-23",
+      "model": "~/.cache/huggingface/hub/models--Qwen--Qwen2.5-0.5B-Instruct/snapshots/7ae557604adf67be50417f59c2c2f167def9a775",
+      "proof": {
+        "registry": {
+          "repo": "Qwen/Qwen2.5-0.5B-Instruct",
+          "revision": "7ae557604adf67be50417f59c2c2f167def9a775",
+          "path": "tokenizer_config.json",
+          "templateName": "default"
+        },
+        "integrity": {
+          "record": "hf-cache-blob",
+          "algorithm": "git-blob-sha1",
+          "etag": "07bfe0640cb5a0037f9322287fbfc682806cf672"
+        }
+      }
+    },
+    {
+      "path": "~/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B-GGUF/snapshots/23749fefcc72300e3a2ad315e1317431b06b590a/Qwen3-0.6B-Q8_0.gguf",
+      "kind": "gguf",
+      "name": "default",
+      "sha256": "57f1fd00f0013a2be96aa79b857391f27e23df5b5f847072b524c897e24d0361",
+      "frozen": "2026-10-23",
+      "model": "~/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B-GGUF/snapshots/23749fefcc72300e3a2ad315e1317431b06b590a/Qwen3-0.6B-Q8_0.gguf",
+      "alsoAt": [
+        "~/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B-GGUF/blobs/9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031"
+      ],
+      "proof": {
+        "registry": {
+          "repo": "Qwen/Qwen3-0.6B-GGUF",
+          "revision": "23749fefcc72300e3a2ad315e1317431b06b590a",
+          "path": "Qwen3-0.6B-Q8_0.gguf",
+          "templateName": "default"
+        },
+        "integrity": {
+          "record": "hf-cache-blob",
+          "algorithm": "sha256",
+          "etag": "9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031"
+        }
+      }
+    },
+    {
+      "path": "~/.cache/huggingface/hub/models--Salesforce--xLAM-2-1b-fc-r/snapshots/6870fcf102f434bd01819302d85780b8e767925d/tokenizer_config.json",
+      "kind": "tokenizer_config",
+      "name": "default",
+      "sha256": "0ce792efd121e97f1b88a984ec8ea85a67e148eacdb1f311228cf6d980b34bc7",
+      "frozen": "2026-10-23",
+      "model": "~/.cache/huggingface/hub/models--Salesforce--xLAM-2-1b-fc-r/snapshots/6870fcf102f434bd01819302d85780b8e767925d",
+      "proof": {
+        "registry": {
+          "repo": "Salesforce/xLAM-2-1b-fc-r",
+          "revision": "6870fcf102f434bd01819302d85780b8e767925d",
+          "path": "tokenizer_config.json",
+          "templateName": "default"
+        },
+        "integrity": {
+          "record": "hf-cache-blob",
+          "algorithm": "git-blob-sha1",
+          "etag": "fe52eb14b7e5543e2b74ee1057c5b405a6fc552a"
+        }
+      }
+    },
+    {
+      "path": "~/.cache/huggingface/hub/models--ggml-org--gemma-4-E2B-it-GGUF/snapshots/b4243c156154b6dca9324415f8c7ccc098b4aed1/gemma-4-E2B-it-Q8_0.gguf",
+      "kind": "gguf",
+      "name": "default",
+      "sha256": "0a2c8073c878ab1da004bee933a998606537bbb62016310352c7285c3f01c5b5",
+      "frozen": "2026-10-23",
+      "model": "~/.cache/huggingface/hub/models--ggml-org--gemma-4-E2B-it-GGUF/snapshots/b4243c156154b6dca9324415f8c7ccc098b4aed1/gemma-4-E2B-it-Q8_0.gguf",
+      "alsoAt": [
+        "~/.cache/huggingface/hub/models--ggml-org--gemma-4-E2B-it-GGUF/blobs/996d08777aadc6bfd3c7375ef70ba25a0f55240075860754fdb18d6d860aa63a"
+      ],
+      "proof": {
+        "registry": {
+          "repo": "ggml-org/gemma-4-E2B-it-GGUF",
+          "revision": "b4243c156154b6dca9324415f8c7ccc098b4aed1",
+          "path": "gemma-4-E2B-it-Q8_0.gguf",
+          "templateName": "default"
+        },
+        "integrity": {
+          "record": "hf-cache-blob",
+          "algorithm": "sha256",
+          "etag": "996d08777aadc6bfd3c7375ef70ba25a0f55240075860754fdb18d6d860aa63a"
+        }
+      }
+    },
+    {
+      "path": "~/.cache/huggingface/hub/models--ggml-org--gemma-4-E4B-it-GGUF/snapshots/b8093469224f83f5c38f691eb906c380e9e63114/gemma-4-E4B-it-Q8_0.gguf",
+      "kind": "gguf",
+      "name": "default",
+      "sha256": "0a2c8073c878ab1da004bee933a998606537bbb62016310352c7285c3f01c5b5",
+      "frozen": "2026-10-23",
+      "model": "~/.cache/huggingface/hub/models--ggml-org--gemma-4-E4B-it-GGUF/snapshots/b8093469224f83f5c38f691eb906c380e9e63114/gemma-4-E4B-it-Q8_0.gguf",
+      "alsoAt": [
+        "~/.cache/huggingface/hub/models--ggml-org--gemma-4-E4B-it-GGUF/blobs/34be82b17b4942d389b9b527170c4b058027abdd32531fda063d3d97dd8ce80a"
+      ],
+      "proof": {
+        "registry": {
+          "repo": "ggml-org/gemma-4-E4B-it-GGUF",
+          "revision": "b8093469224f83f5c38f691eb906c380e9e63114",
+          "path": "gemma-4-E4B-it-Q8_0.gguf",
+          "templateName": "default"
+        },
+        "integrity": {
+          "record": "hf-cache-blob",
+          "algorithm": "sha256",
+          "etag": "34be82b17b4942d389b9b527170c4b058027abdd32531fda063d3d97dd8ce80a"
+        }
+      }
+    },
+    {
+      "path": "~/.cache/huggingface/hub/models--google--gemma-4-E4B-it/snapshots/ee0ef6023621cff504d758262d4e04895a5af4a2/chat_template.jinja",
+      "kind": "chat_template_jinja",
+      "name": "default",
+      "sha256": "0a2c8073c878ab1da004bee933a998606537bbb62016310352c7285c3f01c5b5",
+      "frozen": "2026-10-23",
+      "model": "~/.cache/huggingface/hub/models--google--gemma-4-E4B-it/snapshots/ee0ef6023621cff504d758262d4e04895a5af4a2",
+      "proof": {
+        "registry": {
+          "repo": "google/gemma-4-E4B-it",
+          "revision": "ee0ef6023621cff504d758262d4e04895a5af4a2",
+          "path": "chat_template.jinja",
+          "templateName": "default"
+        },
+        "integrity": {
+          "record": "hf-cache-blob",
+          "algorithm": "git-blob-sha1",
+          "etag": "fbe3b59b625cd1b8850ea592d4203df6ec04684b"
+        }
+      }
+    },
+    {
+      "path": "~/.cache/huggingface/hub/models--lmstudio-community--GLM-4.5-Air-MLX-4bit/snapshots/92ce339f9fe1bbb3afa840d46cad1988b6a0e0bd/chat_template.jinja",
+      "kind": "chat_template_jinja",
+      "name": "default",
+      "sha256": "44f815868bf02fa458dd2f741a338046f4bf45f398eb6d067766726b9d96cce3",
+      "frozen": "2026-10-23",
+      "model": "~/.cache/huggingface/hub/models--lmstudio-community--GLM-4.5-Air-MLX-4bit/snapshots/92ce339f9fe1bbb3afa840d46cad1988b6a0e0bd",
+      "proof": {
+        "registry": {
+          "repo": "lmstudio-community/GLM-4.5-Air-MLX-4bit",
+          "revision": "92ce339f9fe1bbb3afa840d46cad1988b6a0e0bd",
+          "path": "chat_template.jinja",
+          "templateName": "default"
+        },
+        "integrity": {
+          "record": "hf-cache-blob",
+          "algorithm": "git-blob-sha1",
+          "etag": "41478957aca7a04b7321022e7d1f73de5badd995"
+        }
+      }
+    },
+    {
+      "path": "~/.cache/huggingface/hub/models--mlx-community--Qwen2.5-0.5B-Instruct-4bit/snapshots/a5339a4131f135d0fdc6a5c8b5bbed2753bbe0f3/tokenizer_config.json",
+      "kind": "tokenizer_config",
+      "name": "default",
+      "sha256": "d5495a1e5db0611132a97e46a65dbb64a642a499421228b9c8b93229097fa9a4",
+      "frozen": "2026-10-23",
+      "model": "~/.cache/huggingface/hub/models--mlx-community--Qwen2.5-0.5B-Instruct-4bit/snapshots/a5339a4131f135d0fdc6a5c8b5bbed2753bbe0f3",
+      "proof": {
+        "registry": {
+          "repo": "mlx-community/Qwen2.5-0.5B-Instruct-4bit",
+          "revision": "a5339a4131f135d0fdc6a5c8b5bbed2753bbe0f3",
+          "path": "tokenizer_config.json",
+          "templateName": "default"
+        },
+        "integrity": {
+          "record": "hf-cache-blob",
+          "algorithm": "git-blob-sha1",
+          "etag": "482ccbc1096b0e9400e86e33f189681c2aebdab9"
+        }
+      }
+    },
+    {
+      "path": "~/.cache/huggingface/hub/models--mlx-community--Qwen2.5-3B-Instruct-4bit/snapshots/4f83f8f146fdf28b512a06562b671d7af4fab457/tokenizer_config.json",
+      "kind": "tokenizer_config",
+      "name": "default",
+      "sha256": "d5495a1e5db0611132a97e46a65dbb64a642a499421228b9c8b93229097fa9a4",
+      "frozen": "2026-10-23",
+      "model": "~/.cache/huggingface/hub/models--mlx-community--Qwen2.5-3B-Instruct-4bit/snapshots/4f83f8f146fdf28b512a06562b671d7af4fab457",
+      "proof": {
+        "registry": {
+          "repo": "mlx-community/Qwen2.5-3B-Instruct-4bit",
+          "revision": "4f83f8f146fdf28b512a06562b671d7af4fab457",
+          "path": "tokenizer_config.json",
+          "templateName": "default"
+        },
+        "integrity": {
+          "record": "hf-cache-blob",
+          "algorithm": "git-blob-sha1",
+          "etag": "482ccbc1096b0e9400e86e33f189681c2aebdab9"
+        }
+      }
+    },
+    {
+      "path": "~/.cache/huggingface/hub/models--mlx-community--Qwen3-0.6B-4bit/snapshots/73e3e38d981303bc594367cd910ea6eb48349da8/tokenizer_config.json",
+      "kind": "tokenizer_config",
+      "name": "default",
+      "sha256": "87a2728cb8dc9fe424d624542f6060ec05a1d285ebbec578bb078900e33396b5",
+      "frozen": "2026-10-23",
+      "model": "~/.cache/huggingface/hub/models--mlx-community--Qwen3-0.6B-4bit/snapshots/73e3e38d981303bc594367cd910ea6eb48349da8",
+      "proof": {
+        "registry": {
+          "repo": "mlx-community/Qwen3-0.6B-4bit",
+          "revision": "73e3e38d981303bc594367cd910ea6eb48349da8",
+          "path": "tokenizer_config.json",
+          "templateName": "default"
+        },
+        "integrity": {
+          "record": "hf-cache-blob",
+          "algorithm": "git-blob-sha1",
+          "etag": "7345216a0785dc7086e8c245b2a9d3896ce2b756"
+        }
+      }
+    },
+    {
+      "path": "~/.cache/huggingface/hub/models--mlx-community--Qwen3-1.7B-4bit/snapshots/3b1b1768f8f8cf8351c712464f906e86c2b8269e/tokenizer_config.json",
+      "kind": "tokenizer_config",
+      "name": "default",
+      "sha256": "87a2728cb8dc9fe424d624542f6060ec05a1d285ebbec578bb078900e33396b5",
+      "frozen": "2026-10-23",
+      "model": "~/.cache/huggingface/hub/models--mlx-community--Qwen3-1.7B-4bit/snapshots/3b1b1768f8f8cf8351c712464f906e86c2b8269e",
+      "proof": {
+        "registry": {
+          "repo": "mlx-community/Qwen3-1.7B-4bit",
+          "revision": "3b1b1768f8f8cf8351c712464f906e86c2b8269e",
+          "path": "tokenizer_config.json",
+          "templateName": "default"
+        },
+        "integrity": {
+          "record": "hf-cache-blob",
+          "algorithm": "git-blob-sha1",
+          "etag": "7345216a0785dc7086e8c245b2a9d3896ce2b756"
+        }
+      }
+    },
+    {
+      "path": "~/.cache/huggingface/hub/models--mlx-community--Qwen3-8B-4bit/snapshots/545dc4251c05440727734bcd94334791f6ab0192/tokenizer_config.json",
+      "kind": "tokenizer_config",
+      "name": "default",
+      "sha256": "87a2728cb8dc9fe424d624542f6060ec05a1d285ebbec578bb078900e33396b5",
+      "frozen": "2026-10-23",
+      "model": "~/.cache/huggingface/hub/models--mlx-community--Qwen3-8B-4bit/snapshots/545dc4251c05440727734bcd94334791f6ab0192",
+      "alsoAt": [
+        "~/.omlx/models/Qwen3-8B-4bit/tokenizer_config.json"
+      ],
+      "proof": {
+        "registry": {
+          "repo": "mlx-community/Qwen3-8B-4bit",
+          "revision": "545dc4251c05440727734bcd94334791f6ab0192",
+          "path": "tokenizer_config.json",
+          "templateName": "default"
+        },
+        "integrity": {
+          "record": "hf-cache-blob",
+          "algorithm": "git-blob-sha1",
+          "etag": "7345216a0785dc7086e8c245b2a9d3896ce2b756"
+        }
+      }
+    },
+    {
+      "path": "~/.cache/huggingface/hub/models--mlx-community--Qwen3-Coder-30B-A3B-Instruct-4bit/snapshots/6e302ea604ad9ab206367e2c501d1571023e7b6d/chat_template.jinja",
+      "kind": "chat_template_jinja",
+      "name": "default",
+      "sha256": "672e747c77e990320152343b0a4951222e40de5645297905d89afba05586d827",
+      "frozen": "2026-10-23",
+      "model": "~/.cache/huggingface/hub/models--mlx-community--Qwen3-Coder-30B-A3B-Instruct-4bit/snapshots/6e302ea604ad9ab206367e2c501d1571023e7b6d",
+      "alsoAt": [
+        "~/.omlx/models/Qwen3-Coder-30B-A3B-Instruct-4bit/chat_template.jinja"
+      ],
+      "proof": {
+        "registry": {
+          "repo": "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+          "revision": "6e302ea604ad9ab206367e2c501d1571023e7b6d",
+          "path": "chat_template.jinja",
+          "templateName": "default"
+        },
+        "integrity": {
+          "record": "hf-cache-blob",
+          "algorithm": "git-blob-sha1",
+          "etag": "a017a30325eed7523eeeb6ec0380b9bdc79083c0"
+        }
+      }
+    },
+    {
+      "path": "~/.cache/huggingface/hub/models--mlx-community--Qwen3.5-0.8B-MLX-bf16/snapshots/7aef04e9adfd926ce0da9da376fe9610c8818a58/chat_template.jinja",
+      "kind": "chat_template_jinja",
+      "name": "default",
+      "sha256": "273d8e0e683b885071fb17e08d71e5f2a5ddfb5309756181681de4f5a1822d80",
+      "frozen": "2026-10-23",
+      "model": "~/.cache/huggingface/hub/models--mlx-community--Qwen3.5-0.8B-MLX-bf16/snapshots/7aef04e9adfd926ce0da9da376fe9610c8818a58",
+      "proof": {
+        "registry": {
+          "repo": "mlx-community/Qwen3.5-0.8B-MLX-bf16",
+          "revision": "7aef04e9adfd926ce0da9da376fe9610c8818a58",
+          "path": "chat_template.jinja",
+          "templateName": "default"
+        },
+        "integrity": {
+          "record": "hf-cache-blob",
+          "algorithm": "git-blob-sha1",
+          "etag": "0ef09f214eaa6d9bca297988afc1454b5827b2c7"
+        }
+      }
+    },
+    {
+      "path": "~/.cache/huggingface/hub/models--mlx-community--functiongemma-270m-it-bf16/snapshots/bb327a9ad61044e1496a2bee2365a6b6a6684c72/chat_template.jinja",
+      "kind": "chat_template_jinja",
+      "name": "default",
+      "sha256": "db61fb01017bd82401d3ffca4f8e066cd56ff6d38d2a30c4058770c0bf7ab49b",
+      "frozen": "2026-10-23",
+      "model": "~/.cache/huggingface/hub/models--mlx-community--functiongemma-270m-it-bf16/snapshots/bb327a9ad61044e1496a2bee2365a6b6a6684c72",
+      "proof": {
+        "registry": {
+          "repo": "mlx-community/functiongemma-270m-it-bf16",
+          "revision": "bb327a9ad61044e1496a2bee2365a6b6a6684c72",
+          "path": "chat_template.jinja",
+          "templateName": "default"
+        },
+        "integrity": {
+          "record": "hf-cache-blob",
+          "algorithm": "git-blob-sha1",
+          "etag": "16294794d96bfe26bbf2da97af27ced085fd1683"
+        }
+      }
+    },
+    {
+      "path": "~/.cache/huggingface/hub/models--mlx-community--gemma-3-1b-it-4bit/snapshots/2d44e83dc9e80843d22fb941d3d699a0b1351aa6/tokenizer_config.json",
+      "kind": "tokenizer_config",
+      "name": "default",
+      "sha256": "7de1c58e208eda46e9c7f86397df37ec49883aeece39fb961e0a6b24088dd3c4",
+      "frozen": "2026-10-23",
+      "model": "~/.cache/huggingface/hub/models--mlx-community--gemma-3-1b-it-4bit/snapshots/2d44e83dc9e80843d22fb941d3d699a0b1351aa6",
+      "proof": {
+        "registry": {
+          "repo": "mlx-community/gemma-3-1b-it-4bit",
+          "revision": "2d44e83dc9e80843d22fb941d3d699a0b1351aa6",
+          "path": "tokenizer_config.json",
+          "templateName": "default"
+        },
+        "integrity": {
+          "record": "hf-cache-blob",
+          "algorithm": "git-blob-sha1",
+          "etag": "7bdd14f0eaec30c8d2c56bc9d543587676e19c0f"
+        }
+      }
+    },
+    {
+      "path": "~/.cache/huggingface/hub/models--mlx-community--gemma-3n-E4B-it-4bit/snapshots/505468a22e5703ff090e222aae9beedec49b383f/chat_template.jinja",
+      "kind": "chat_template_jinja",
+      "name": "default",
+      "sha256": "ac03dcb3b09726f1e50ac55ae58fc8d5930eadc3b3a12cb04286dc1d82ac8001",
+      "frozen": "2026-10-23",
+      "model": "~/.cache/huggingface/hub/models--mlx-community--gemma-3n-E4B-it-4bit/snapshots/505468a22e5703ff090e222aae9beedec49b383f",
+      "proof": {
+        "registry": {
+          "repo": "mlx-community/gemma-3n-E4B-it-4bit",
+          "revision": "505468a22e5703ff090e222aae9beedec49b383f",
+          "path": "chat_template.jinja",
+          "templateName": "default"
+        },
+        "integrity": {
+          "record": "hf-cache-blob",
+          "algorithm": "git-blob-sha1",
+          "etag": "a0405ea9c2eb8f0c6ea0dd8975f0272714d88011"
+        }
+      }
+    },
+    {
+      "path": "~/.cache/huggingface/hub/models--mlx-community--gemma-4-26b-a4b-it-8bit/snapshots/33c6d23798a0af159529890f79329206dbfbd73c/chat_template.jinja",
+      "kind": "chat_template_jinja",
+      "name": "default",
+      "sha256": "36e3a42e5cf14cd0020e72d92e1fdd9970f59b82170e421f0cbe1bb42bead3f0",
+      "frozen": "2026-10-23",
+      "model": "~/.cache/huggingface/hub/models--mlx-community--gemma-4-26b-a4b-it-8bit/snapshots/33c6d23798a0af159529890f79329206dbfbd73c",
+      "proof": {
+        "registry": {
+          "repo": "mlx-community/gemma-4-26b-a4b-it-8bit",
+          "revision": "33c6d23798a0af159529890f79329206dbfbd73c",
+          "path": "chat_template.jinja",
+          "templateName": "default"
+        },
+        "integrity": {
+          "record": "hf-cache-blob",
+          "algorithm": "git-blob-sha1",
+          "etag": "e61bbfe9a31db79ea1e4e557b046f895ad7899d0"
+        }
+      }
+    },
+    {
+      "path": "~/.cache/huggingface/hub/models--mlx-community--gemma-4-31b-it-8bit/snapshots/f5f3dc92ab4af76724c36c21eb6bedadb3a851be/chat_template.jinja",
+      "kind": "chat_template_jinja",
+      "name": "default",
+      "sha256": "36e3a42e5cf14cd0020e72d92e1fdd9970f59b82170e421f0cbe1bb42bead3f0",
+      "frozen": "2026-10-23",
+      "model": "~/.cache/huggingface/hub/models--mlx-community--gemma-4-31b-it-8bit/snapshots/f5f3dc92ab4af76724c36c21eb6bedadb3a851be",
+      "proof": {
+        "registry": {
+          "repo": "mlx-community/gemma-4-31b-it-8bit",
+          "revision": "f5f3dc92ab4af76724c36c21eb6bedadb3a851be",
+          "path": "chat_template.jinja",
+          "templateName": "default"
+        },
+        "integrity": {
+          "record": "hf-cache-blob",
+          "algorithm": "git-blob-sha1",
+          "etag": "e61bbfe9a31db79ea1e4e557b046f895ad7899d0"
+        }
+      }
+    },
+    {
+      "path": "~/.cache/huggingface/hub/models--mlx-community--gemma-4-e2b-it-4bit/snapshots/238767527555cb75a05732a84dff5d6ba0dd6809/chat_template.jinja",
+      "kind": "chat_template_jinja",
+      "name": "default",
+      "sha256": "2f1b4d75d067bae3fe44e676721c7f077d243bc007156cb9c2f8b5836613d082",
+      "frozen": "2026-10-23",
+      "model": "~/.cache/huggingface/hub/models--mlx-community--gemma-4-e2b-it-4bit/snapshots/238767527555cb75a05732a84dff5d6ba0dd6809",
+      "proof": {
+        "registry": {
+          "repo": "mlx-community/gemma-4-e2b-it-4bit",
+          "revision": "238767527555cb75a05732a84dff5d6ba0dd6809",
+          "path": "chat_template.jinja",
+          "templateName": "default"
+        },
+        "integrity": {
+          "record": "hf-cache-blob",
+          "algorithm": "git-blob-sha1",
+          "etag": "c19999a347da729cf62806a8ddb7eb8e315223b5"
+        }
+      }
+    },
+    {
+      "path": "~/.cache/huggingface/hub/models--mlx-community--gemma-4-e2b-it-4bit/snapshots/2c3e507453b4f218d05fe3cc97bea5c5a654257e/chat_template.jinja",
+      "kind": "chat_template_jinja",
+      "name": "default",
+      "sha256": "2f1b4d75d067bae3fe44e676721c7f077d243bc007156cb9c2f8b5836613d082",
+      "frozen": "2026-10-23",
+      "model": "~/.cache/huggingface/hub/models--mlx-community--gemma-4-e2b-it-4bit/snapshots/2c3e507453b4f218d05fe3cc97bea5c5a654257e",
+      "proof": {
+        "registry": {
+          "repo": "mlx-community/gemma-4-e2b-it-4bit",
+          "revision": "2c3e507453b4f218d05fe3cc97bea5c5a654257e",
+          "path": "chat_template.jinja",
+          "templateName": "default"
+        },
+        "integrity": {
+          "record": "hf-cache-blob",
+          "algorithm": "git-blob-sha1",
+          "etag": "c19999a347da729cf62806a8ddb7eb8e315223b5"
+        }
+      }
+    },
+    {
+      "path": "~/.cache/huggingface/hub/models--mlx-community--gemma-4-e4b-it-4bit/snapshots/475b9088d29754a3379866cf5aeb6b41acd313c2/chat_template.jinja",
+      "kind": "chat_template_jinja",
+      "name": "default",
+      "sha256": "2f1b4d75d067bae3fe44e676721c7f077d243bc007156cb9c2f8b5836613d082",
+      "frozen": "2026-10-23",
+      "model": "~/.cache/huggingface/hub/models--mlx-community--gemma-4-e4b-it-4bit/snapshots/475b9088d29754a3379866cf5aeb6b41acd313c2",
+      "proof": {
+        "registry": {
+          "repo": "mlx-community/gemma-4-e4b-it-4bit",
+          "revision": "475b9088d29754a3379866cf5aeb6b41acd313c2",
+          "path": "chat_template.jinja",
+          "templateName": "default"
+        },
+        "integrity": {
+          "record": "hf-cache-blob",
+          "algorithm": "git-blob-sha1",
+          "etag": "c19999a347da729cf62806a8ddb7eb8e315223b5"
+        }
+      }
+    },
+    {
+      "path": "~/.cache/huggingface/hub/models--mlx-community--gemma-4-e4b-it-4bit/snapshots/deb1db712068b1c9f83fb1c97f08c1204b9459a1/chat_template.jinja",
+      "kind": "chat_template_jinja",
+      "name": "default",
+      "sha256": "2f1b4d75d067bae3fe44e676721c7f077d243bc007156cb9c2f8b5836613d082",
+      "frozen": "2026-10-23",
+      "model": "~/.cache/huggingface/hub/models--mlx-community--gemma-4-e4b-it-4bit/snapshots/deb1db712068b1c9f83fb1c97f08c1204b9459a1",
+      "proof": {
+        "registry": {
+          "repo": "mlx-community/gemma-4-e4b-it-4bit",
+          "revision": "deb1db712068b1c9f83fb1c97f08c1204b9459a1",
+          "path": "chat_template.jinja",
+          "templateName": "default"
+        },
+        "integrity": {
+          "record": "hf-cache-blob",
+          "algorithm": "git-blob-sha1",
+          "etag": "c19999a347da729cf62806a8ddb7eb8e315223b5"
+        }
+      }
+    },
+    {
+      "path": "~/.omlx/models/.disabled-gpt-oss-120b-MXFP4-Q8/chat_template.jinja",
+      "kind": "chat_template_jinja",
+      "name": "default",
+      "sha256": "a4c9919cbbd4acdd51ccffe22da049264b1b73e59055fa58811a99efbd7c8146",
+      "frozen": "2026-10-23",
+      "model": "~/.omlx/models/.disabled-gpt-oss-120b-MXFP4-Q8",
+      "proof": {
+        "registry": {
+          "repo": "mlx-community/gpt-oss-120b-MXFP4-Q8",
+          "revision": "81e5ac3ad0af6efb1298a8e8c7a10ed2990c137b",
+          "path": "chat_template.jinja",
+          "templateName": "default"
+        },
+        "integrity": {
+          "record": "download-metadata",
+          "algorithm": "git-blob-sha1",
+          "etag": "dc7bb11927d29f653ba2740f2db2c688fd77592f",
+          "commit": "81e5ac3ad0af6efb1298a8e8c7a10ed2990c137b"
+        }
+      }
+    },
+    {
+      "path": "~/.omlx/models/Qwen3-8B-sre-v1-150/chat_template.jinja",
+      "kind": "chat_template_jinja",
+      "name": "default",
+      "sha256": "87a2728cb8dc9fe424d624542f6060ec05a1d285ebbec578bb078900e33396b5",
+      "frozen": "2026-10-23",
+      "model": "~/.omlx/models/Qwen3-8B-sre-v1-150",
+      "proof": {
+        "registry": {
+          "repo": "mlx-community/Qwen3-0.6B-4bit",
+          "revision": "73e3e38d981303bc594367cd910ea6eb48349da8",
+          "path": "tokenizer_config.json",
+          "templateName": "default"
+        },
+        "integrity": {
+          "record": "none"
+        }
+      }
+    },
+    {
+      "path": "~/.omlx/models/Qwen3-8B-sre-v1-300/chat_template.jinja",
+      "kind": "chat_template_jinja",
+      "name": "default",
+      "sha256": "87a2728cb8dc9fe424d624542f6060ec05a1d285ebbec578bb078900e33396b5",
+      "frozen": "2026-10-23",
+      "model": "~/.omlx/models/Qwen3-8B-sre-v1-300",
+      "proof": {
+        "registry": {
+          "repo": "mlx-community/Qwen3-0.6B-4bit",
+          "revision": "73e3e38d981303bc594367cd910ea6eb48349da8",
+          "path": "tokenizer_config.json",
+          "templateName": "default"
+        },
+        "integrity": {
+          "record": "none"
+        }
+      }
+    },
+    {
+      "path": "~/.omlx/models/Qwen3-Embedding-4B-4bit-DWQ/chat_template.jinja",
+      "kind": "chat_template_jinja",
+      "name": "default",
+      "sha256": "44d5f08f3f72b837eaad09f13a54c1f9f4eb58d75240334548b7fd52a5437fa5",
+      "frozen": "2026-10-23",
+      "model": "~/.omlx/models/Qwen3-Embedding-4B-4bit-DWQ",
+      "proof": {
+        "registry": {
+          "repo": "mlx-community/Qwen3-Embedding-4B-4bit-DWQ",
+          "revision": "b5d88f1fe49b50d2ac01b4692ca2d387f14f9c72",
+          "path": "chat_template.jinja",
+          "templateName": "default"
+        },
+        "integrity": {
+          "record": "download-metadata",
+          "algorithm": "git-blob-sha1",
+          "etag": "28028c056af412405debd878cdda0171e35fa5d1",
+          "commit": "b5d88f1fe49b50d2ac01b4692ca2d387f14f9c72"
+        }
+      }
+    },
+    {
+      "path": "~/.omlx/models/Qwen3.5-0.8B-MLX-bf16/chat_template.jinja",
+      "kind": "chat_template_jinja",
+      "name": "default",
+      "sha256": "273d8e0e683b885071fb17e08d71e5f2a5ddfb5309756181681de4f5a1822d80",
+      "frozen": "2026-10-23",
+      "model": "~/.omlx/models/Qwen3.5-0.8B-MLX-bf16",
+      "proof": {
+        "registry": {
+          "repo": "mlx-community/Qwen3.5-0.8B-MLX-bf16",
+          "revision": "7aef04e9adfd926ce0da9da376fe9610c8818a58",
+          "path": "chat_template.jinja",
+          "templateName": "default"
+        },
+        "integrity": {
+          "record": "download-metadata",
+          "algorithm": "git-blob-sha1",
+          "etag": "0ef09f214eaa6d9bca297988afc1454b5827b2c7",
+          "commit": "7aef04e9adfd926ce0da9da376fe9610c8818a58"
+        }
+      }
+    },
+    {
+      "path": "~/.omlx/models/Qwen3.6-35B-A3B-bf16/chat_template.jinja",
+      "kind": "chat_template_jinja",
+      "name": "default",
+      "sha256": "e84f32a23fdda27689f868aa4a1a5621f41133e51a48d7f3efcbea2839574259",
+      "frozen": "2026-10-23",
+      "model": "~/.omlx/models/Qwen3.6-35B-A3B-bf16",
+      "proof": {
+        "registry": {
+          "repo": "mlx-community/Qwen3.6-35B-A3B-bf16",
+          "revision": "04bbe07c3ed2d93cbf832f523fea344bca1d0fcf",
+          "path": "chat_template.jinja",
+          "templateName": "default"
+        },
+        "integrity": {
+          "record": "download-metadata",
+          "algorithm": "git-blob-sha1",
+          "etag": "a8755d827c0a7b614c246c4060dfd58ab352a8ff",
+          "commit": "04bbe07c3ed2d93cbf832f523fea344bca1d0fcf"
+        }
+      }
+    },
+    {
+      "path": "~/.omlx/models/gemma-4-26b-a4b-it-bf16/chat_template.jinja",
+      "kind": "chat_template_jinja",
+      "name": "default",
+      "sha256": "85a08664d16d8f3be4416c92427b3ac10df1024ac566cc0b4bc3bab409393f98",
+      "frozen": "2026-10-23",
+      "model": "~/.omlx/models/gemma-4-26b-a4b-it-bf16",
+      "proof": {
+        "registry": {
+          "repo": "mlx-community/gemma-4-26b-a4b-it-bf16",
+          "revision": "c5e94f24a28a9b8f075dbfe0ba0395d3b88e85fc",
+          "path": "chat_template.jinja",
+          "templateName": "default"
+        },
+        "integrity": {
+          "record": "download-metadata",
+          "algorithm": "git-blob-sha1",
+          "etag": "98da08eb6be6f7a353d390456a6c4cacf811c9ed",
+          "commit": "c5e94f24a28a9b8f075dbfe0ba0395d3b88e85fc"
+        }
+      }
+    },
+    {
+      "path": "~/.omlx/models/gemma-4-26b-a4b-qat-4bit/chat_template.jinja",
+      "kind": "chat_template_jinja",
+      "name": "default",
+      "sha256": "29af862bccabb14b90a4ff951bcd14c33fe74b651c5f07fc7f2e9aa46a59fe7c",
+      "frozen": "2026-10-23",
+      "model": "~/.omlx/models/gemma-4-26b-a4b-qat-4bit",
+      "proof": {
+        "registry": {
+          "repo": "lmstudio-community/gemma-4-26B-A4B-it-QAT-MLX-4bit",
+          "revision": "aa5e2e50376f54254d503276ca2222ea8569b95e",
+          "path": "chat_template.jinja",
+          "templateName": "default"
+        },
+        "integrity": {
+          "record": "download-metadata",
+          "algorithm": "git-blob-sha1",
+          "etag": "333cfbf67adb71d9d9dbbcac2113bae2e047d15c",
+          "commit": "aa5e2e50376f54254d503276ca2222ea8569b95e"
+        }
+      }
+    },
+    {
+      "path": "~/.omlx/models/gemma-4-26b-a4b-qat-4bit/tokenizer_config.json",
+      "kind": "tokenizer_config",
+      "name": "default",
+      "sha256": "ae53464bf3be25802b3a5b37def7fd89667067d7577049b3b2d74c4d8de4c6d4",
+      "frozen": "2026-10-23",
+      "model": "~/.omlx/models/gemma-4-26b-a4b-qat-4bit",
+      "proof": {
+        "registry": {
+          "repo": "lmstudio-community/gemma-4-26B-A4B-it-QAT-MLX-4bit",
+          "revision": "aa5e2e50376f54254d503276ca2222ea8569b95e",
+          "path": "tokenizer_config.json",
+          "templateName": "default"
+        },
+        "integrity": {
+          "record": "download-metadata",
+          "algorithm": "git-blob-sha1",
+          "etag": "bc035cce296eb8df57b7b07c0f7e0e6aee1872a3",
+          "commit": "aa5e2e50376f54254d503276ca2222ea8569b95e"
+        }
+      }
+    },
+    {
+      "path": "~/.omlx/models/gemma-4-e4b-kp-alltime/chat_template.jinja",
+      "kind": "chat_template_jinja",
+      "name": "default",
+      "sha256": "2f1b4d75d067bae3fe44e676721c7f077d243bc007156cb9c2f8b5836613d082",
+      "frozen": "2026-10-23",
+      "model": "~/.omlx/models/gemma-4-e4b-kp-alltime",
+      "proof": {
+        "registry": {
+          "repo": "mlx-community/gemma-4-e2b-it-4bit",
+          "revision": "238767527555cb75a05732a84dff5d6ba0dd6809",
+          "path": "chat_template.jinja",
+          "templateName": "default"
+        },
+        "integrity": {
+          "record": "none"
+        }
+      }
+    }
+  ],
+  "justified": [
+    {
+      "ruleId": "intra_model_divergence",
+      "path": "~/.omlx/models/gemma-4-26b-a4b-qat-4bit/tokenizer_config.json",
+      "reason": "Upstream ships it: lmstudio-community/gemma-4-26B-A4B-it-QAT-MLX-4bit@aa5e2e50 moved only tokenizer_config.json to Google's 2026-07-15 template and left the chat_template.jinja every runtime loads; both are exact registry matches."
+    }
+  ]
+}
