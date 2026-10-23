@@ -29,7 +29,7 @@ import type {
 import { DEFAULT_RENDER_LIMITS } from "../types.ts";
 import { checkContent } from "./integrity.ts";
 import { buildProbes, readsTools, REFERENCE_DATE } from "./probes.ts";
-import { templateText, unexplainedWords, words } from "./residue.ts";
+import { templateText, unexplained as unexplainedUnits, units, words } from "./residue.ts";
 import { checkTools } from "./tools.ts";
 
 const PROFILES: readonly EnvProfile[] = ["hf-default", "jinja2-globals"];
@@ -283,13 +283,16 @@ function profileDivergence(probes: readonly Probe[], outcomes: readonly Outcome[
 // ---- render_divergence (ISC-22) ----
 
 function renderDivergence(input: DiffRenderInput, probes: readonly Probe[], outcomes: readonly Outcome[], base: FindingBase): Finding | undefined {
-  // The template's ordinary output: every word any explain probe prints under either profile.
+  // The template's ordinary output: every word and word pair any explain probe prints under either profile, also
+  // with month and weekday names masked, which is how a date probe's units are compared.
   const explained = new Set<string>();
   for (const [i, o] of outcomes.entries()) {
     if (probes[i]!.role !== "explain") continue;
     for (const profile of PROFILES) {
       const r = o[profile];
-      if (r?.ok) for (const w of words(templateText(r.output, probes[i]!.inputs))) explained.add(w);
+      if (!r?.ok) continue;
+      const text = templateText(r.output, probes[i]!.inputs);
+      for (const dateProbe of [false, true]) for (const u of units(text, dateProbe)) explained.add(u);
     }
   }
 
@@ -303,22 +306,25 @@ function renderDivergence(input: DiffRenderInput, probes: readonly Probe[], outc
       if (!r?.ok || seen.has(r.output)) continue;
       seen.add(r.output);
       const text = templateText(r.output, probe.inputs);
-      const unexplained = unexplainedWords(text, explained, probe.request.now !== REFERENCE_DATE);
+      const unexplained = unexplainedUnits(text, explained, probe.request.now !== REFERENCE_DATE);
       if (unexplained.length > 0) hits.push({ probe: probe.label, profile, words: unexplained, text });
     }
   }
   if (hits.length === 0) return undefined;
 
+  // Each unexplained unit: a word, or two known words in an order no explain probe prints.
   const all = [...new Set(hits.flatMap((h) => h.words))];
-  // The span is the injected literal that holds an unexplained word, when one does (ISC-26.1).
+  // The span is the injected literal that holds an unexplained unit's word, when one does (ISC-26.1).
   const owner = new Map<string, (typeof input.injected)[number]>();
   for (const item of input.injected) for (const w of words(item.text)) if (!owner.has(w)) owner.set(w, item);
-  const item = all.map((w) => owner.get(w)).find((x) => x !== undefined);
+  const item = all.flatMap((u) => u.split(" ")).map((w) => owner.get(w)).find((x) => x !== undefined);
 
   const first = hits[0]!;
-  const at = first.text.search(new RegExp(`(?<!\\p{L})${escapeRegExp(first.words[0]!)}(?!\\p{L})`, "u"));
+  // A pair's words may sit apart, across punctuation or markup; a masked date name matches any word.
+  const pattern = first.words[0]!.split(" ").map((w) => (w.startsWith("#") ? "\\p{L}+" : escapeRegExp(w))).join("\\P{L}+");
+  const at = Math.max(0, first.text.search(new RegExp(`(?<!\\p{L})${pattern}(?!\\p{L})`, "u")));
   const sample = clip(first.text.slice(Math.max(0, at - SAMPLE_AROUND), at + SAMPLE_AROUND * 2).replaceAll("\u0000", " … "));
-  const shown = all.slice(0, 8).join(" ");
+  const shown = all.slice(0, 8).join(", ");
   return {
     ruleId: "render_divergence",
     severity: "HIGH",
