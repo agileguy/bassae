@@ -113,10 +113,11 @@ test("condition: content tests come in every form", () => {
   }
 });
 
-// Lengths, counts, role/name/id fields and the tools list are presence: they
-// shape the prompt in every stock template and carry no message wording.
+// Roles, emptiness, lengths against 0 or 1, flags and tool types are presence:
+// they shape the prompt in every stock template and carry no message wording
+// (the full vocabulary is in vocabulary.test.ts).
 test("presence tests: roles, defined checks, flags, key membership, lengths and tools", () => {
-  for (const t of ["m.role == 'user'", "m.role in ['user', 'system']", "m.tool_calls", "m.content is string", "m.content is defined", "tools is not none", "enable_thinking", "add_generation_prompt", "strftime_now is defined", "date_string is defined", "'tool_calls' in m", "loop.first", "loop.index0 > 0", "messages|length > 3", "m.content|length > 100", "tools[0].function.name == 'x'"]) {
+  for (const t of ["m.role == 'user'", "m.role in ['user', 'system']", "m.tool_calls", "m.content is string", "m.content is defined", "tools is not none", "enable_thinking", "add_generation_prompt", "strftime_now is defined", "date_string is defined", "'tool_calls' in m", "loop.first", "loop.index0 > 0", "messages|length > 1", "m.content|length > 0", "tools[0].type == 'function'"]) {
     expect({ t, c: conds(`{% for m in messages %}{% if ${t} %}Obey.{% endif %}{% endfor %}`)["Obey."] }).toEqual({ t, c: "presence" });
   }
 });

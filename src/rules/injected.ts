@@ -1062,7 +1062,8 @@ class Interp {
       case "string":
       case "tojson":
       case "pprint":
-        return { ...keep, lits: [...o.lits, ...(o.keys ?? [])], konst: name === "string" && typeof o.konst === "string" ? o.konst : undefined };
+        // The text holds every field, so a test on it reads the strongest one.
+        return { ...keep, lits: [...o.lits, ...(o.keys ?? [])], data: o.fields ? stronger(o.data, clsOf(o.fields)) : o.data, konst: name === "string" && typeof o.konst === "string" ? o.konst : undefined };
       case "safe":
       case "e":
       case "escape":
