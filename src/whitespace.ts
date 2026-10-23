@@ -33,18 +33,19 @@ export function sameIgnoringWhitespace(a: string, b: string): boolean {
 }
 
 // Code units hashed per update. The key never holds a copy of the text, so a 64 Mi-unit
-// template costs this buffer, not a second 64 Mi string (review round 1, R5).
+// template costs this buffer, not a second 64 Mi string (review round 1, R5). A short
+// text gets a buffer of its own length: the key never has more units than the text.
 const KEY_CHUNK = 64 * 1024;
 
 /** SHA-256 of the text's runs of non-whitespace joined by one space, as UTF-16 code units. Two texts get the same key exactly when `sameIgnoringWhitespace` holds for them. */
 export function whitespaceKey(text: string): string {
   const hash = createHash("sha256");
-  const buf = new Uint16Array(KEY_CHUNK);
+  const buf = new Uint16Array(Math.min(KEY_CHUNK, text.length));
   let n = 0;
   let started = false;
   let gap = false;
   const put = (c: number) => {
-    if (n === KEY_CHUNK) {
+    if (n === buf.length) {
       hash.update(buf);
       n = 0;
     }
