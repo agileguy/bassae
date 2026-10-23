@@ -1,0 +1,12 @@
+{
+  "chat_template": [
+    {
+      "name": "default",
+      "template": "{%- for message in messages %}\n<|im_start|>{{ message.role }}\n{{ message.content }}<|im_end|>\n{%- endfor %}\n{#- source: tokenizer_config.json default #}\n{%- if add_generation_prompt %}<|im_start|>assistant\n{% endif %}\n"
+    },
+    {
+      "name": "tool_use",
+      "template": "{%- for message in messages %}\n<|im_start|>{{ message.role }}\n{{ message.content }}<|im_end|>\n{%- endfor %}\n{#- source: tokenizer_config.json tool_use #}\n{%- if add_generation_prompt %}<|im_start|>assistant\n{% endif %}\n"
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+{%- with sep = "\n" -%}
+{%- for message in messages -%}
+<|im_start|>{{ message.role }}{{ sep }}{{ message.content }}<|im_end|>{{ sep }}
+{%- endfor -%}
+{%- endwith -%}
+{%- if add_generation_prompt %}<|im_start|>assistant
+{% endif -%}
