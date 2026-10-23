@@ -523,6 +523,8 @@ export interface Val {
   fields?: Fields;
   /** With `fields`: the value may be something else instead (a constant or other value a branch, `or` or `|default` joined in), and comparing that reveals this much. Unset while it is only ever one of `fields`. */
   rest?: TestClass;
+  /** With `rest`: the numbers that something else may be, when every one is a known template constant (`namespace(k=-1)` joined with a loop count). Unset when one is not known. */
+  restNums?: number[];
   /** The access path (`message.content`), for `is mapping` / `is string` guards. */
   path?: string;
   /** A guard in force says the value is (not) a string. */
@@ -593,6 +595,23 @@ function isEmptyConst(v: Val): boolean {
 /** Either of two rests. */
 export function eitherRest(a: TestClass | undefined, b: TestClass | undefined): TestClass | undefined {
   return a === undefined ? b : b === undefined ? a : stronger(a, b);
+}
+
+// The numbers `v` may be besides its fields, for a join: none when it is only
+// ever its fields, undefined when what else it may be is not a known number.
+function restNumsOf(v: Val): number[] | undefined {
+  if (v.fields) return v.rest === undefined ? [] : v.restNums;
+  if (isEmptyConst(v)) return [];
+  const k = isRuntime(v) ? undefined : numberOf(v.konst);
+  return k === undefined ? undefined : [k];
+}
+
+/** The numbers either of two values may be besides their fields, when every one is known (Decisions 23:40). */
+export function eitherNums(a: Val, b: Val): number[] | undefined {
+  const x = restNumsOf(a);
+  const y = restNumsOf(b);
+  if (!x || !y || x.length + y.length === 0) return undefined;
+  return [...new Set([...x, ...y])].sort((p, q) => p - q);
 }
 
 // A test the fields alone pass as `cls`, on a value that may be something
@@ -898,9 +917,12 @@ function thresholdOf(fs: Fields): TestClass {
 // position: as telling as the value's emptiness. Further away it is a threshold
 // a long enough conversation crosses (ISC-18, Decisions 19:15). A template value
 // whose constant is not known (`40 if tools else 41`) may be any threshold, and
-// so may a count that may be such a value instead (`n if c else 40`) when it
-// is compared with a count. A string of digits is that number: a count's
-// `|string` is still the count (`messages|length|string == '41'`).
+// so may a count that may be such a value instead when it is compared with a
+// count. A count that may be a known constant instead is judged as that
+// constant too: `namespace(k=-1)` joined with a loop count is near a position,
+// one joined with 40 is not (Decisions 23:40). A string of digits is that
+// number: a count's `|string` is still the count (`messages|length|string ==
+// '41'`).
 //
 // Residuals: counts do not record what they count, so two counts of different
 // things within 1 of each other read as near, as two positions in one
@@ -914,11 +936,18 @@ export function countTest(x: Val, other: Val): TestClass | undefined {
   const ys = countsOf(other);
   const k = numberOf(other.konst);
   let far: boolean;
-  if (ys) far = x.rest !== undefined || other.rest !== undefined || xs.some((a) => ys.some((b) => !(Math.abs(a.off! - b.off!) <= 1)));
+  if (ys) far = restFar(x, ys) || restFar(other, xs) || xs.some((a) => ys.some((b) => !(Math.abs(a.off! - b.off!) <= 1)));
   else if (isRuntime(other)) return undefined;
   else if (k !== undefined) far = xs.some((a) => !(Math.abs(k - a.off!) <= 1));
   else far = other.konst === undefined;
   return far ? stronger(near, ys ? stronger(thresholdOf(xs), thresholdOf(ys)) : thresholdOf(xs)) : near;
+}
+
+// What `v` may be besides its counts, compared with `counts`: far unless every
+// such value is a known number within 1 of each of them.
+function restFar(v: Val, counts: Fields): boolean {
+  if (v.rest === undefined) return false;
+  return !v.restNums || v.restNums.some((k) => counts.some((c) => !(Math.abs(k - c.off!) <= 1)));
 }
 
 function numberOf(k: Val["konst"]): number | undefined {

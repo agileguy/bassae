@@ -44,6 +44,7 @@ import {
   countPick,
   countsOf,
   countTest,
+  eitherNums,
   eitherRest,
   elementField,
   factsFrom,
@@ -1922,6 +1923,7 @@ function join(a: Val, b: Val): Val {
     fields: unionFields(a.fields, b.fields),
     // Either side may be something besides the other's fields.
     rest: a.fields || b.fields ? eitherRest(restOf(a), restOf(b)) : undefined,
+    restNums: a.fields || b.fields ? eitherNums(a, b) : undefined,
     path: a.path === b.path ? a.path : undefined,
     shape: a.shape === b.shape ? a.shape : undefined,
     konst: a.konst === b.konst ? a.konst : undefined,
@@ -1948,6 +1950,7 @@ function sameVal(a: Val, b: Val): boolean {
   if (a.data !== b.data || a.truth !== b.truth || a.gate?.test !== b.gate?.test) return false;
   if (!sameFields(a.fields, b.fields) || a.rest !== b.rest || a.konst !== b.konst || a.ns !== b.ns || a.macro !== b.macro || a.pairs !== b.pairs) return false;
   if (String(a.fns) !== String(b.fns) || a.genFlag !== b.genFlag || String(a.genAt) !== String(b.genAt)) return false;
+  if (String(a.restNums) !== String(b.restNums)) return false;
   if ((a.konstList === undefined) !== (b.konstList === undefined)) return false;
   for (let i = 0; i < a.lits.length; i++) if (a.lits[i]!.cond?.test !== b.lits[i]!.cond?.test) return false;
   // A key's condition can grow on its own (`selectattr` by a value a later
