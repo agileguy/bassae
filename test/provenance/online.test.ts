@@ -571,8 +571,8 @@ describe("HubClient.range, for GGUF prefixes", () => {
 });
 
 describe("network code stays in online.ts (ISC-36)", () => {
-  test("no other source file reaches the network", () => {
-    const src = join(import.meta.dir, "..", "..", "src");
+  test("no other source file or script reaches the network; build-registry goes through HubClient", () => {
+    const root = join(import.meta.dir, "..", "..");
     const network = /\bfetch\s*\(|=\s*fetch\b|globalThis\.fetch|Bun\.connect|Bun\.listen|WebSocket|from "node:(net|http|https|http2|tls|dgram)"/;
     const offenders: string[] = [];
     const walk = (dir: string) => {
@@ -582,7 +582,9 @@ describe("network code stays in online.ts (ISC-36)", () => {
         else if (p.endsWith(".ts") && !p.endsWith(join("provenance", "online.ts")) && network.test(readFileSync(p, "utf8"))) offenders.push(p);
       }
     };
-    walk(src);
+    walk(join(root, "src"));
+    walk(join(root, "scripts"));
     expect(offenders).toEqual([]);
+    expect(readFileSync(join(root, "scripts", "build-registry.ts"), "utf8")).toContain('from "../src/provenance/online.ts"');
   });
 });
