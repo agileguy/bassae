@@ -17,7 +17,6 @@ import { isJsWhitespace } from "../parse/parse.ts";
 import { isTemplateSpace } from "../whitespace.ts";
 import { clip, FINDING_CAP } from "./finalize.ts";
 import { eachLiteral } from "./literals.ts";
-import { IncrementalPos } from "./rawtext.ts";
 import { KNOWN_TLDS } from "./tlds.ts";
 
 /**
@@ -30,19 +29,21 @@ import { KNOWN_TLDS } from "./tlds.ts";
 export function findUrls(items: readonly InjectedText[], base: FindingBase, text?: string): Finding[] {
   const hits = new Hits();
   for (const item of items) {
-    let at: SpanCursor | null | undefined; // looked up at the item's first kept hit
+    let at: number | undefined; // looked up at the item's first kept hit
     scanUrls(item.text, 0, item.text.length, (start, end, kind) => {
       if (!hits.take()) return;
-      if (at === undefined) at = text === undefined ? null : verbatimAt(text, item);
-      const span = at ? at.span(start, end) : item.span;
+      at ??= text === undefined ? -1 : verbatimAt(text, item);
       const match = item.text.slice(start, end);
-      hits.kept.push({ start: span.start, end: span.end, span, message: `injected text contains ${URL_KIND[kind]} '${clip(match)}'`, excerpt: match, detail: { kind, match: clip(match) } });
+      const hit = { message: `injected text contains ${URL_KIND[kind]} '${clip(match)}'`, excerpt: match, detail: { kind, match: clip(match) } };
+      // A hit placed in the template is spanned by finish(), in source order.
+      if (at >= 0) hits.kept.push({ start: at + start, end: at + end, ...hit });
+      else hits.kept.push({ start: item.span.start, end: item.span.end, span: item.span, ...hit });
     });
   }
-  return finish("url_in_text", "HIGH", base, [hits], (s, e) => ({ start: s, end: e, line: 1, col: 1 }));
+  return finish("url_in_text", "HIGH", base, [hits], placer(text ?? ""));
 }
 
-/** MEDIUM encoded_blob for each base64-like, base32-like or hex-like run of 32+ characters in a template literal: text between tags and string literals inside them (ISC-20). A run wrapped across lines or split by spaces counts when it decodes to text. */
+/** MEDIUM encoded_blob for each base64-like, base32-like or hex-like run of 32+ characters in a template literal: text between tags and string literals inside them (ISC-20). A run wrapped across lines or split by spaces counts when it decodes to text, or when its lines are of equal width and, read as one run, hex or random. */
 export function findEncodedBlobs(outcome: ParseOutcome, text: string, base: FindingBase): Finding[] {
   const hits = new Hits();
   eachLiteral(outcome, text, (kind, from, to) => {
@@ -52,7 +53,7 @@ export function findEncodedBlobs(outcome: ParseOutcome, text: string, base: Find
       hits.kept.push({ start, end, message: `${blob}-like run of ${end - start} characters in ${where}`, excerpt: text.slice(start, end), detail: { encoding: blob, length: end - start } });
     });
   });
-  return finish("encoded_blob", "MEDIUM", base, [hits], placer(outcome, text));
+  return finish("encoded_blob", "MEDIUM", base, [hits], placer(text));
 }
 
 /** MEDIUM encoded_blob for each base64-like, base32-like or hex-like run of 32+ characters in an injected text's folded value, spanned at the injected text (ISC-20). This catches a blob assembled from shorter literals with `~`, `+` or `|join`, or emitted by literals in sequence, whitespace between them included. The caller passes only items whose text is not one raw literal already scanned by `findEncodedBlobs`, so each blob is reported once. */
@@ -80,7 +81,7 @@ export function findInvisibleChars(text: string, base: FindingBase, outcome?: Pa
   eachLiteral(each, text, (kind, from, to) => {
     if (kind === "string") scanEscapes(text, from, to, escaped);
   });
-  return finish("invisible_char", "HIGH", base, [raw, escaped], placer(outcome, text));
+  return finish("invisible_char", "HIGH", base, [raw, escaped], placer(text));
 }
 
 /**
@@ -98,7 +99,7 @@ export function findUrlsRaw(outcome: ParseOutcome, text: string, base: FindingBa
       hits.kept.push({ start, end, message: `${where} contains ${URL_KIND[url]} '${clip(match)}'`, excerpt: match, detail: { kind: url, match: clip(match) } });
     });
   });
-  return finish("url_in_text", "HIGH", base, [hits], placer(outcome, text));
+  return finish("url_in_text", "HIGH", base, [hits], placer(text));
 }
 
 // ---- bounded collection ----
@@ -126,13 +127,27 @@ class Hits {
 
 type Placer = (start: number, end: number) => Span;
 
-// The line map when the pre-lexer built one; over the size cap, an incremental
-// walk, which finish() calls with ascending offsets.
-function placer(outcome: ParseOutcome | undefined, text: string): Placer {
-  const lines = outcome?.lines;
-  if (lines) return (start, end) => lines.span(start, end);
-  const pos = new IncrementalPos(text);
-  return (start, end) => ({ start, end, ...pos.at(start) });
+// Line and column of offsets into text, in one forward walk; finish() asks in
+// ascending order. \r\n, \r or \n breaks a line, and a column is one code
+// point: a surrogate pair is one column, and so is a lone surrogate of either
+// kind.
+function placer(text: string): Placer {
+  let i = 0;
+  let line = 1;
+  let col = 1;
+  return (start, end) => {
+    for (; i < start; i++) {
+      const c = text.charCodeAt(i);
+      const d = text.charCodeAt(i + 1);
+      if (c === 10 || (c === 13 && d !== 10)) {
+        line++;
+        col = 1;
+      } else if (!(c >= 0xd800 && c <= 0xdbff && d >= 0xdc00 && d <= 0xdfff)) {
+        col++; // a high surrogate counts with the low one after it
+      }
+    }
+    return { start, end, line, col };
+  };
 }
 
 // Merge the passes in source order and keep the first FINDING_CAP hits. Over
@@ -159,46 +174,13 @@ function finish(ruleId: RuleId, severity: Severity, base: FindingBase, passes: H
   return out;
 }
 
-// Spans of ascending offsets into an item's text, placed in the template where
-// that text stands verbatim. Line and column are walked forward from the item's
-// span and counted as LineMap counts them: \r\n, \r or \n breaks a line, and a
-// surrogate pair is one column.
-class SpanCursor {
-  private i: number;
-  private line: number;
-  private col: number;
-  constructor(
-    private readonly text: string,
-    private readonly offset: number, // where the item's text starts in the template
-    from: Span,
-  ) {
-    this.i = from.start;
-    this.line = from.line;
-    this.col = from.col;
-  }
-  span(start: number, end: number): Span {
-    const t = this.text;
-    for (const to = this.offset + start; this.i < to; this.i++) {
-      const c = t.charCodeAt(this.i);
-      if (c === 10 || (c === 13 && t.charCodeAt(this.i + 1) !== 10)) {
-        this.line++;
-        this.col = 1;
-      } else if (c < 0xd800 || c > 0xdbff) {
-        this.col++;
-      }
-    }
-    return { start: this.offset + start, end: this.offset + end, line: this.line, col: this.col };
-  }
-}
-
-// A cursor over the item's text where it occurs exactly once in the template at
-// the item's span, or null. A folded value, a string with an escape, or text
-// that occurs twice there has no one place.
-function verbatimAt(text: string, item: InjectedText): SpanCursor | null {
+// Where the item's text starts in the template, when it occurs there exactly
+// once at the item's span, or -1. A folded value, a string with an escape, or
+// text that occurs twice there has no one place.
+function verbatimAt(text: string, item: InjectedText): number {
   const { start, end } = item.span;
-  if (end > text.length) return null;
-  const at = onlyOccurrence(text, start, end, item.text);
-  return at < 0 ? null : new SpanCursor(text, at, item.span);
+  if (end > text.length) return -1;
+  return onlyOccurrence(text, start, end, item.text);
 }
 
 // The offset of needle's only occurrence in s[from, to), or -1 when it occurs
@@ -850,6 +832,14 @@ function pairPlace(a: number, b: number): number {
 // tokens, so a blob-like word or two before it does not hide it.
 const MAX_SPLIT_STARTS = 3;
 
+// Lines of a list, such as model names or codes, share their shape: the class
+// of the character at each place. Lines of random base64 agree with the line
+// before at about 0.36 of places, so lines that agree at 0.9 or more of 12 or
+// more places are a list, not a blob; this misses fewer than 1 in 10,000
+// random blobs. Hex digits agree at about 0.53, so hex lines are not tested.
+const LIST_SHAPE_SHARE = 0.9;
+const MIN_SHAPE_PLACES = 12;
+
 // Decoded bytes are text when at least this share of their characters print.
 const MIN_PRINTABLE_SHARE = 0.9;
 
@@ -892,7 +882,8 @@ function base32Value(c: number): number {
  * decodes to text; trailing '=' padding is part of it. A hex-like run is hex
  * digits only, with at least one digit and one letter. A base32 run decodes to
  * text. Blob-like tokens apart only by whitespace, a blob wrapped across lines
- * or split by spaces, are one blob when they decode to text. English words,
+ * or split by spaces, are one blob when they decode to text, or when they stand
+ * on lines of equal width and read as one run are hex or random. English words,
  * snake_case, camelCase, paths and separator lines like `====` or `----` are
  * none of these.
  */
@@ -909,8 +900,8 @@ export function scanBlobs(s: string, from: number, to: number, emit: BlobSink): 
       continue;
     }
     // A split run is one blob when it decodes to text from one of its first
-    // tokens; the tokens before that, and every token of a run that does not
-    // decode, are judged alone.
+    // tokens, and the tokens before that are judged alone. A run that does not
+    // decode is judged line by line.
     let start = i;
     let kind: BlobKind | undefined;
     for (let tries = 0; tries < MAX_SPLIT_STARTS && start < end; tries++) {
@@ -918,11 +909,71 @@ export function scanBlobs(s: string, from: number, to: number, emit: BlobSink): 
       if (kind) break;
       start = nextToken(s, start, end);
     }
-    const alone = kind ? start : end;
-    for (let k = i; k < alone; k = nextToken(s, k, alone)) judgeRun(s, k, alone, emit);
-    if (kind) emit(start, end, kind);
+    if (kind) {
+      for (let k = i; k < start; k = nextToken(s, k, start)) judgeRun(s, k, start, emit);
+      emit(start, end, kind);
+    } else {
+      judgeLines(s, i, end, emit);
+    }
     i = end;
   }
+}
+
+// Judge the tokens of a split run s[from, to) that does not decode to text.
+// Tokens on lines of their own, every line as wide as the first and the last
+// no wider, are one blob wrapped in lines when, read as one run, they are hex
+// or random: base64 of random bytes or compressed data decodes to no text. Any
+// other token is judged alone. Each token is read a bounded number of times:
+// here, against the line before and after, and by its judge.
+function judgeLines(s: string, from: number, to: number, emit: BlobSink): void {
+  for (let k = from; k < to; ) {
+    const width = tokenEnd(s, k, to) - k;
+    let end = k + width;
+    let lines = 1;
+    let line = k; // the start of the last line
+    let places = 0; // places compared with the line before
+    let same = 0; // of those, places of the same class
+    for (let last = width; last === width; lines++) {
+      let n = end;
+      let broken = false; // a line break before the next token
+      for (let c; n < to && isTemplateSpace((c = s.charCodeAt(n))); n++) if (c === 0x0a || c === 0x0d) broken = true;
+      if (!broken || n === to) break;
+      const e = tokenEnd(s, n, to);
+      if (e - n > width) break;
+      for (let j = 0; j < e - n; j++) if (charClass(s.charCodeAt(line + j)) === charClass(s.charCodeAt(n + j))) same++;
+      places += e - n;
+      last = e - n;
+      line = n;
+      end = e;
+    }
+    const list = places >= MIN_SHAPE_PLACES && same >= places * LIST_SHAPE_SHARE;
+    const kind = lines > 1 ? linesKind(s, k, end, list) : undefined;
+    if (kind) emit(k, end, kind);
+    else for (let t = k; t < end; t = nextToken(s, t, end)) judgeRun(s, t, end, emit);
+    k = end;
+    while (k < to && isTemplateSpace(s.charCodeAt(k))) k++;
+  }
+}
+
+// The end of the token at k: the first whitespace at or after k, or to.
+function tokenEnd(s: string, k: number, to: number): number {
+  while (k < to && !isTemplateSpace(s.charCodeAt(k))) k++;
+  return k;
+}
+
+// The kind of the lines s[from, to) read as one run, whitespace skipped and
+// padding left out: hex when hex digits only, with a digit and a letter,
+// base64 when random and not a list, and none otherwise.
+function linesKind(s: string, from: number, to: number, list: boolean): BlobKind | undefined {
+  resetTally();
+  for (let i = from; i < to; i++) {
+    const c = s.charCodeAt(i);
+    if (c === 0x3d) break; // '=' padding ends the data
+    if (!isTemplateSpace(c)) count(c);
+  }
+  if (tally.len < MIN_BLOB) return undefined;
+  if (tally.allHex) return tally.digits > 0 && tally.digits < tally.len ? "hex" : undefined;
+  return !list && isRandom() ? "base64" : undefined;
 }
 
 // The end of the run of two or more blob-like tokens at i, apart only by ASCII
@@ -1032,27 +1083,88 @@ function decodesToText(s: string, from: number, to: number, bits: 5 | 6): boolea
   return read >= MIN_BLOB && chars > 0 && printable >= chars * MIN_PRINTABLE_SHARE;
 }
 
+// Counts over one run of blob characters, fed one character at a time by
+// count(). judgeRun and linesKind share it, so judging allocates nothing; a
+// BlobSink therefore must not scan blobs itself.
+const tally = {
+  len: 0,
+  upper: 0,
+  lower: 0,
+  digits: 0,
+  symbols: 0,
+  switches: 0, // adjacent characters of different classes
+  adjacent: 0, // adjacent pairs with no symbol
+  wordSwitches: 0, // of those, pairs that switch class
+  pairs: 0, // adjacent distinct letters, case folded
+  common: 0, // of those, pairs in COMMON_PAIRS
+  plusSlash: false,
+  dashUnderscore: false,
+  base32: true, // only base32 digits so far
+  allHex: true, // only hex digits so far
+  prevClass: -1,
+  prev: -1, // the character before
+};
+
+function resetTally(): void {
+  const t = tally;
+  t.len = t.upper = t.lower = t.digits = t.symbols = t.switches = t.adjacent = t.wordSwitches = t.pairs = t.common = 0;
+  t.plusSlash = t.dashUnderscore = false;
+  t.base32 = t.allHex = true;
+  t.prevClass = t.prev = -1;
+}
+
+// The class of blob character c: 0 upper case, 1 lower case, 2 digit, 3 symbol.
+function charClass(c: number): number {
+  return c >= 0x41 && c <= 0x5a ? 0 : c >= 0x61 && c <= 0x7a ? 1 : c >= 0x30 && c <= 0x39 ? 2 : 3;
+}
+
+// Count blob character c, the next of the run, and return its class.
+function count(c: number): number {
+  const t = tally;
+  const cls = charClass(c);
+  t.len++;
+  if (cls === 0) t.upper++;
+  else if (cls === 1) t.lower++;
+  else if (cls === 2) t.digits++;
+  else {
+    t.symbols++;
+    if (c === 0x2b || c === 0x2f) t.plusSlash = true;
+    else t.dashUnderscore = true;
+  }
+  if (t.prevClass >= 0 && cls !== t.prevClass) t.switches++;
+  if (t.prevClass >= 0 && t.prevClass !== 3 && cls !== 3) {
+    t.adjacent++;
+    if (cls !== t.prevClass) t.wordSwitches++;
+  }
+  if (cls < 2 && isAsciiLetter(t.prev) && (t.prev & 31) !== (c & 31)) {
+    t.pairs++;
+    t.common += COMMON_PAIRS[pairPlace(t.prev, c)]!;
+  }
+  if (base32Value(c) < 0) t.base32 = false;
+  if (!isHexDigit(c)) t.allHex = false;
+  t.prevClass = cls;
+  t.prev = c;
+  return cls;
+}
+
+// Whether the counted run is random, as base64 of random bytes is: both cases,
+// and digits, few symbols and frequent switches, or letters that pair unlike
+// English words.
+function isRandom(): boolean {
+  const t = tally;
+  if (t.upper === 0 || t.lower === 0) return false;
+  if (t.digits > 0 && t.symbols <= t.len * MAX_SYMBOL_SHARE && t.switches >= (t.len - 1) * MIN_SWITCH_RATE) return true;
+  return !(t.plusSlash && t.dashUnderscore) && t.symbols <= t.len * MAX_RANDOM_SYMBOL_SHARE && (t.pairs > 0 ? t.common / t.pairs : 1) - (t.adjacent > 0 ? t.wordSwitches / t.adjacent : 0) <= MAX_COMMON_OVER_SWITCH;
+}
+
 // Judge the run of blob characters at p, emitting it and any hex sub-run that
 // is a blob. Returns the index after the run, past its padding when emitted.
 function judgeRun(s: string, p: number, to: number, emit: BlobSink): number {
   let i = p;
-  let upper = 0;
-  let lowerCase = 0;
-  let digits = 0;
-  let symbols = 0;
-  let switches = 0;
-  let prev = -1;
-  let allHex = true;
   let hexStart = -1; // the hex sub-run in progress
   let hexDigit = false;
   let hexLetter = false;
-  let adjacent = 0; // adjacent pairs with no symbol
-  let wordSwitches = 0; // of those, pairs that switch class
-  let pairs = 0; // adjacent distinct letters, case folded
-  let common = 0; // of those, pairs in COMMON_PAIRS
-  let plusSlash = false;
-  let dashUnderscore = false;
-  let base32 = true; // only base32 digits so far
+  resetTally();
   for (;;) {
     const c = i < to ? s.charCodeAt(i) : -1;
     const blob = c >= 0 && isBlobChar(c);
@@ -1062,29 +1174,7 @@ function judgeRun(s: string, p: number, to: number, emit: BlobSink): number {
       hexStart = -1;
     }
     if (!blob) break;
-    const cls = c >= 0x41 && c <= 0x5a ? 0 : c >= 0x61 && c <= 0x7a ? 1 : c >= 0x30 && c <= 0x39 ? 2 : 3;
-    if (cls === 0) upper++;
-    else if (cls === 1) lowerCase++;
-    else if (cls === 2) digits++;
-    else {
-      symbols++;
-      if (c === 0x2b || c === 0x2f) plusSlash = true;
-      else dashUnderscore = true;
-    }
-    if (prev >= 0 && cls !== prev) switches++;
-    if (prev >= 0 && prev !== 3 && cls !== 3) {
-      adjacent++;
-      if (cls !== prev) wordSwitches++;
-    }
-    if (cls < 2 && i > p) {
-      const b = s.charCodeAt(i - 1);
-      if (isAsciiLetter(b) && (b & 31) !== (c & 31)) {
-        pairs++;
-        common += COMMON_PAIRS[pairPlace(b, c)]!;
-      }
-    }
-    if (base32Value(c) < 0) base32 = false;
-    prev = cls;
+    const cls = count(c);
     if (isHexDigit(c)) {
       if (hexStart < 0) {
         hexStart = i;
@@ -1092,19 +1182,13 @@ function judgeRun(s: string, p: number, to: number, emit: BlobSink): number {
       }
       if (cls === 2) hexDigit = true;
       else hexLetter = true;
-    } else {
-      allHex = false;
     }
     i++;
   }
-  const len = i - p;
-  if (len < MIN_BLOB || allHex) return i;
-  const mixedCase = upper > 0 && lowerCase > 0;
+  if (tally.len < MIN_BLOB || tally.allHex) return i;
   let kind: BlobKind | undefined;
-  if (mixedCase && digits > 0 && symbols <= len * MAX_SYMBOL_SHARE && switches >= (len - 1) * MIN_SWITCH_RATE) kind = "base64";
-  else if (mixedCase && !(plusSlash && dashUnderscore) && symbols <= len * MAX_RANDOM_SYMBOL_SHARE && (pairs > 0 ? common / pairs : 1) - (adjacent > 0 ? wordSwitches / adjacent : 0) <= MAX_COMMON_OVER_SWITCH) kind = "base64";
-  else if (decodesToText(s, p, i, 6)) kind = "base64";
-  else if (base32 && !mixedCase && decodesToText(s, p, i, 5)) kind = "base32";
+  if (isRandom() || decodesToText(s, p, i, 6)) kind = "base64";
+  else if (tally.base32 && (tally.upper === 0 || tally.lower === 0) && decodesToText(s, p, i, 5)) kind = "base32";
   if (!kind) return i;
   let e = i;
   const padding = kind === "base64" ? 2 : 6;

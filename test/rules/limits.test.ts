@@ -478,6 +478,22 @@ test("LineMap counts columns in code points and breaks lines on \\r, \\n and \\r
   expect(astral.at(4)).toEqual({ line: 1, col: 3 });
 });
 
+test("LineMap: a lone surrogate of either kind is one column (review round 2, runtime N6)", () => {
+  // [text, offset, line, col]: a surrogate pair is one column, and so is a high
+  // or low surrogate standing alone.
+  const cases: [string, number, number, number][] = [
+    ["\uD835x", 1, 1, 2],
+    ["\uDC00x", 1, 1, 2],
+    ["\u{1D41E}x", 2, 1, 2],
+    ["x\uD835", 2, 1, 3],
+    ["\uD835\nx", 2, 2, 1],
+    ["\uD835\uD835\uDC1Ex", 3, 1, 3],
+    ["\uDC1E\uD835x", 2, 1, 3],
+    ["\uD835\uD835 go\nab\uD835c", 9, 2, 4],
+  ];
+  for (const [text, offset, line, col] of cases) expect({ text, at: new LineMap(text).at(offset) }).toEqual({ text, at: { line, col } });
+});
+
 test("a lone CR moves a finding's line (Codex R4)", () => {
   const src = "a\rb\r{{ x.__class__ }}";
   const f = scan(src).findings.find((x) => x.ruleId === "dunder_access");

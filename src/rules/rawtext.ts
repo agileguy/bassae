@@ -89,18 +89,19 @@ export class IncrementalPos {
   private i = 0;
   private line = 1;
   private lineStart = 0;
-  private surrogatesOnLine = 0;
+  private surrogatesOnLine = 0; // surrogate pairs on the line so far
   constructor(private readonly text: string) {}
   at(offset: number): { line: number; col: number } {
     const t = this.text;
     while (this.i < offset) {
       const c = t.charCodeAt(this.i);
-      if (c === 10 || (c === 13 && t.charCodeAt(this.i + 1) !== 10)) {
+      const d = t.charCodeAt(this.i + 1);
+      if (c === 10 || (c === 13 && d !== 10)) {
         this.line++;
         this.lineStart = this.i + 1;
         this.surrogatesOnLine = 0;
-      } else if (c >= 0xd800 && c <= 0xdbff) {
-        this.surrogatesOnLine++;
+      } else if (c >= 0xd800 && c <= 0xdbff && d >= 0xdc00 && d <= 0xdfff) {
+        this.surrogatesOnLine++; // a pair is one column; a lone surrogate is one too
       }
       this.i++;
     }

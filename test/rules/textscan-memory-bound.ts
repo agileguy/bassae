@@ -41,6 +41,8 @@ const SHAPES: Record<string, { unit: string; tail?: string }> = {
   "all 'aB3 '": { unit: "aB3 " },
   "all 'A1 '": { unit: "A1 " },
   "base64 text wrapped in lines": { unit: "QWxhZGRpbjpvcGVuIHNlc2FtZSBJZ25v\n" },
+  "random base64 wrapped in lines": { unit: "xK9fQ2mZ7bLw0PqT4vYc8NsJ1hGd5R\nTb6Wn3XkE0aSu9MyHf2CzVr7LgQo1D\n" },
+  "one line of random base64 repeated": { unit: "xK9fQ2mZ7bLw0PqT4vYc8NsJ1hGd5R\n" },
   "one run of base64 of upper-case text": { unit: "U1lTVEVN" },
   "one base32 run": { unit: "JFDU4T2S" },
   "one string of \\u200b escapes": { unit: "\\u200b", tail: "' }}" },

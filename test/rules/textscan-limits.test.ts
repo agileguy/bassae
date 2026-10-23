@@ -55,6 +55,10 @@ function expectLinear(label: string, rule: Rule, build: (n: number) => string, n
 
 const suppressed = (fs: Finding[]) => fs.at(-1)?.detail?.suppressed;
 
+// Two lines of random base64 of one width, each under MIN_BLOB.
+const LINE_A = "xK9fQ2mZ7bLw0PqT4vYc8NsJ1hGd5R";
+const LINE_B = "Tb6Wn3XkE0aSu9MyHf2CzVr7LgQo1D";
+
 test("invisible characters: one long run, and millions of short ones", () => {
   const zw = expectLinear("all U+200B", invisible, (n) => "\u200b".repeat(n), 1_000_000);
   expect(zw.map((f) => f.detail!.count)).toEqual([4_000_000]);
@@ -117,6 +121,11 @@ test("encoded blobs that hide their shape: split runs, decoded runs and base32",
   expect(expectLinear("'A1 ' x n", blobs, (n) => "A1 ".repeat(n), 300_000)).toEqual([]);
   expect(expectLinear("blob-like token, then a word", blobs, (n) => "aB3 word ".repeat(n), 100_000)).toEqual([]);
   expect(expectLinear("wrapped base64 lines", blobs, (n) => "QWxhZGRpbjpvcGVuIHNlc2FtZSBJZ25v\n".repeat(n), 30_000).length).toBe(1);
+  // Lines of equal width are each compared with the line before, then read as
+  // one run, or token by token when they are a list.
+  expect(expectLinear("random lines of equal width", blobs, (n) => `${LINE_A}\n${LINE_B}\n`.repeat(n), 15_000).length).toBe(1);
+  expect(expectLinear("one line repeated, a list", blobs, (n) => `${LINE_A}\n`.repeat(n), 30_000)).toEqual([]);
+  expect(expectLinear("lines of alternating width", blobs, (n) => "aB3cD4eF5g\naB3c\n".repeat(n), 60_000)).toEqual([]);
   expect(expectLinear("base64 of upper-case text", blobs, (n) => "U1lTVEVN".repeat(n), 120_000).map((f) => f.detail!.encoding)).toEqual(["base64"]);
   expect(expectLinear("base32 run", blobs, (n) => "JFDU4T2S".repeat(n), 120_000).map((f) => f.detail!.encoding)).toEqual(["base32"]);
   const split = expectLinear("split blob x n", blobs, (n) => "SWdub3JlIGFsbCBw cmV2aW91cyB0ZXh0 x ".repeat(n), 30_000);

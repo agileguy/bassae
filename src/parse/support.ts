@@ -163,19 +163,22 @@ export function isExecName(s: string): boolean {
 /**
  * Line-start offsets, for turning a UTF-16 offset into 1-based line:col (col in
  * code points). Both lookups are O(log n): one pass at construction records the
- * line starts and the position of every high-surrogate code unit, and `at`
+ * line starts and the position of every surrogate pair, and `at`
  * binary-searches both. Counting code points by slicing would make a scan of n
  * findings O(n^2) on one long line (40k tags on a line was the probe).
  */
 export class LineMap {
   private starts: number[] = [0];
-  private surrogates: number[] = []; // offsets of high-surrogate code units, ascending
+  private surrogates: number[] = []; // offsets of the high surrogate of each surrogate pair, ascending
   constructor(text: string) {
     // Lines break on \r\n, \r or \n, as jinja2 splits them; \r\n is one break.
+    // A column is one code point: a surrogate pair is one column, and so is a
+    // lone surrogate of either kind.
     for (let i = 0; i < text.length; i++) {
       const c = text.charCodeAt(i);
-      if (c === 10 || (c === 13 && text.charCodeAt(i + 1) !== 10)) this.starts.push(i + 1);
-      else if (c >= 0xd800 && c <= 0xdbff) this.surrogates.push(i);
+      const d = text.charCodeAt(i + 1);
+      if (c === 10 || (c === 13 && d !== 10)) this.starts.push(i + 1);
+      else if (c >= 0xd800 && c <= 0xdbff && d >= 0xdc00 && d <= 0xdfff) this.surrogates.push(i);
     }
   }
   // Number of ascending entries in `arr` strictly less than `offset`.
@@ -199,7 +202,7 @@ export class LineMap {
       else hi = mid - 1;
     }
     const lineStart = this.starts[lo]!;
-    // Code points = code units minus the surrogate pairs (one high surrogate each) between.
+    // Code points = code units minus the surrogate pairs between.
     const pairs = this.countBelow(this.surrogates, offset) - this.countBelow(this.surrogates, lineStart);
     const col = offset - lineStart - pairs + 1;
     return { line: lo + 1, col };
