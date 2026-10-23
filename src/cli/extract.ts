@@ -9,8 +9,8 @@
 import { constants } from "node:fs";
 import { mkdir, open, realpath, stat, unlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-import { loadModels } from "../scan/index.ts";
-import type { ExtractedTemplate, Finding, ModelRecord } from "../types.ts";
+import { type Loaded, loadModels } from "../scan/index.ts";
+import type { ExtractedTemplate, Finding } from "../types.ts";
 import { escapeText } from "./escape.ts";
 
 // Sanitized names are cut to this many characters; the SHA-256 prefix already keeps files apart.
@@ -131,7 +131,7 @@ export async function writeTemplates(dir: string, templates: readonly ExtractedT
   return result;
 }
 
-export type Loader = (roots: string[], templates: string[]) => Promise<{ models: ModelRecord[]; findings: Finding[] }>;
+export type Loader = (roots: string[], templates: string[]) => Promise<Loaded>;
 
 export interface ExtractResult {
   exitCode: 0 | 3;
@@ -159,9 +159,10 @@ export async function extract(model: string, out: string, load: Loader = loadMod
       return done(3);
     }
 
-    const { models, findings } = await load([modelPath], []);
-    // The walk may have followed links out of the model path; everywhere it read counts as scanned.
-    const scanned = [modelPath, ...models.flatMap((m) => [m.id, ...m.paths, ...m.templates.map((t) => t.source.realPath)])];
+    const { models, findings, walked } = await load([modelPath], []);
+    // The walk may have followed links out of the model path; everywhere it read counts as scanned (security S1):
+    // every directory it listed, and the directory each template's file really sits in, which a file link leaves unlisted.
+    const scanned = [modelPath, ...walked, ...models.flatMap((m) => [m.id, ...m.paths, ...m.templates.map((t) => dirname(t.source.realPath))])];
     refusal = await outRefusal(out, scanned);
     if (refusal) {
       stderr.push(refusal);

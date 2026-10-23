@@ -2,7 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { type Io, run } from "../../src/cli.ts";
-import { type Command, parseArgs } from "../../src/cli/args.ts";
+import { type Command, parseArgs, USAGE } from "../../src/cli/args.ts";
 import { defaultRootCandidates, defaultRoots } from "../../src/cli/roots.ts";
 import type { ExitCode, ScanOptions, ScanReport } from "../../src/types.ts";
 import { makeTree, removeTrees } from "../helpers/tree.ts";
@@ -57,6 +57,12 @@ describe("parseArgs: scan", () => {
 
   test("a lone - is a path", () => {
     expect(ok(["-"])).toMatchObject({ kind: "scan", paths: ["-"] });
+  });
+});
+
+describe("USAGE", () => {
+  test("exit 3 names parse errors beside scanner errors (contracts SF7)", () => {
+    expect(USAGE.replace(/\s+/g, " ")).toContain("else 3 any incomplete template, scanner or parse error, or usage error; else 1 any MEDIUM; else 0.");
   });
 });
 
@@ -184,7 +190,7 @@ function capture(result: ScanReport | Error = report([]), extra: Partial<Io> = {
     },
     loadModels: async (roots) => {
       c.loads.push(roots);
-      return { models: [], findings: [] };
+      return { models: [], findings: [], walked: [] };
     },
     exists: () => true,
     isDirectory: (p) => p === "/home/u/.omlx",

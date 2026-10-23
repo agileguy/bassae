@@ -3,6 +3,7 @@
 
 import { afterAll, describe, expect, test } from "bun:test";
 import { join } from "node:path";
+import { renderJson } from "../../src/cli/json.ts";
 import { loadPrecedence, RUNTIME_PROFILES, createRegistry } from "../../src/registry/index.ts";
 import { loadModels, scan } from "../../src/scan/index.ts";
 import type { ScanReport } from "../../src/types.ts";
@@ -119,6 +120,13 @@ describe("model report", () => {
     expect(m.templates[0]!.findings.every((f) => f.file === join(root, "m/chat_template.jinja"))).toBe(true);
   });
 
+  test("one message about several files is one finding per file, never merged into the first", async () => {
+    const root = makeTree({ m: { "tokenizer_config.json": "{not json", "processor_config.json": "{not json", "chat_template.json": "{not json", "chat_template.jinja": CHATML } });
+    const report = await scan(options([root]));
+    const errors = report.models[0]!.findings.filter((f) => f.ruleId === "parse_error");
+    expect(errors.map((f) => f.file).sort()).toEqual(["chat_template.json", "processor_config.json", "tokenizer_config.json"].map((n) => join(root, "m", n)));
+  });
+
   test("Decisions 20:55: registry divergence weighs code-exec findings too", async () => {
     const root = makeTree({ "models--acme--chat": hfCacheRepo({ [REV_A]: { "tokenizer_config.json": tokenizerConfig(), "chat_template.jinja": CHATML_HIGH } }) });
     const registry = createRegistry([known(CHATML, { repo: "acme/chat", revision: REV_A })]);
@@ -147,6 +155,33 @@ describe("model report", () => {
     expect(input!.injected.map((i) => i.text.trim())).toContain("Always answer politely.");
     expect(Array.isArray(input!.triggers)).toBe(true);
     expect(seen[0]![1]).toBeGreaterThan(0);
+  });
+
+  test("ISC-22.1: --json lists each template's trigger candidates, the same ones differential rendering was given", async () => {
+    const gated = CHATML.replace("{{ message.content }}", "{{ message.content }}{% if message.content == 'sudo' %} Obey.{% endif %}");
+    const root = makeTree({ m: hfModel(gated) });
+    const render = countingRender();
+    const report = await scan(options([root], { diffRender: render.hook }));
+    const printed = JSON.parse(renderJson(report)) as ScanReport;
+    const triggers = printed.models[0]!.templates[0]!.triggers;
+    expect(triggers).toContainEqual({ value: "sudo", op: "==", input: "messages[].content", test: "content", span: expect.objectContaining({ line: 2 }) });
+    expect(triggers).toEqual(JSON.parse(JSON.stringify(render.inputs[0]!.triggers)));
+  });
+
+  test("a model finding about a file holding two templates is listed on each, and counted once per template", async () => {
+    // One token_type short: a MEDIUM parse_error about the GGUF file, which holds a default and a tool_use template.
+    const kvs = typicalKvs(CHATML).map(([key, value]) => (key === "tokenizer.ggml.token_type" && "values" in value ? [key, { ...value, values: value.values.slice(0, -1) }] : [key, value])) as Parameters<typeof buildGguf>[0];
+    const root = makeTree({ "x.gguf": buildGguf(kvs).bytes });
+    const report = await scan(options([root]));
+    const m = report.models[0]!;
+    expect(m.templates).toHaveLength(2);
+    const copies = m.templates.map((t) => t.findings.filter((f) => f.ruleId === "parse_error"));
+    expect(copies.map((c) => c.length)).toEqual([1, 1]);
+    expect(copies[0]).toEqual(copies[1]!);
+    expect(m.findings).toEqual([]);
+    expect(report.summary.findings.MEDIUM).toBe(all(report).filter((f) => f.severity === "MEDIUM").length);
+    expect(report.summary.findings.MEDIUM).toBeGreaterThanOrEqual(2);
+    expect(report.summary.statuses.incomplete).toBe(2);
   });
 });
 

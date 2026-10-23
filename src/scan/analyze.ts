@@ -90,16 +90,28 @@ export function createAnalyzer(env: AnalyzeEnv): (template: ExtractedTemplate, m
   };
 
   return async (template, model) => {
-    const match = env.registry.match(template);
-    const baseline = selectBaseline(template, model, match, env.registry, env.upstream);
-    const known = knownOf(match, baseline);
-    const s = scaffoldingOf(model, known);
-    const ctx: AnalysisContext = { template, scaffolding: s.set, knownGood: match.kind === "exact", ...(known ? { known } : {}) };
-    const key = [template.sha256, match.kind, baselineId(baseline), s.hash].join("\0");
-    let result = cache.get(key);
-    if (!result) cache.set(key, (result = analyze(ctx, baseline, env)));
-    return { match, baseline, ...restamp(await result, template) };
+    try {
+      const match = env.registry.match(template);
+      const baseline = selectBaseline(template, model, match, env.registry, env.upstream);
+      const known = knownOf(match, baseline);
+      const s = scaffoldingOf(model, known);
+      const ctx: AnalysisContext = { template, scaffolding: s.set, knownGood: match.kind === "exact", ...(known ? { known } : {}) };
+      const key = [template.sha256, match.kind, baselineId(baseline), s.hash].join("\0");
+      let result = cache.get(key);
+      if (!result) cache.set(key, (result = analyze(ctx, baseline, env)));
+      return { match, baseline, ...restamp(await result, template) };
+    } catch (e) {
+      // One template's analysis never sinks the scan (runtime SF7). A template that can crash the analyzer loses
+      // that analysis and is HIGH, never milder than one the analyzer finishes (Decisions 02:58).
+      return failed(template, e);
+    }
   };
+}
+
+function failed(t: ExtractedTemplate, e: unknown): Analysis {
+  const findings: Finding[] = [];
+  pushAll(findings, [{ ruleId: "scanner_error", severity: "HIGH", message: `analysis failed: ${errorText(e)}`, file: t.source.path, templateName: t.source.name, templateSha256: t.sha256 }]);
+  return { match: { kind: "none" }, baseline: { kind: "none" }, findings, injected: [], triggers: [], probes: { ...NO_PROBES }, gaps: [`analysis incomplete: ${errorText(e)}`] };
 }
 
 interface Scaffolding {
@@ -132,20 +144,26 @@ async function analyze(ctx: AnalysisContext, baseline: Baseline, env: AnalyzeEnv
 
   // Divergence weighs every static finding on the changed lines, code execution included (Decisions 20:55).
   // They are already computed, so the callback hands them back rather than running the rules again.
+  // Own properties only: a polluted Object.prototype must not be able to switch rendering off (runtime 1).
+  const unavailable = Object.hasOwn(env, "unavailable") ? env.unavailable : undefined;
+  const renderer = Object.hasOwn(env, "renderer") ? env.renderer : undefined;
+
+  // An internal failure from here on is while analyzing the template's text or its rendered output, so it is
+  // HIGH: a template that can crash the analyzer gets no milder verdict than one it finishes (Decisions 02:58).
   const rules: RuleResult = { findings: [...findings], complete: codeExec.complete && injection.complete };
   try {
-    pushAll(findings, await registryDivergence(t, baseline, () => rules, env.renderer));
+    pushAll(findings, await registryDivergence(t, baseline, () => rules, renderer));
   } catch (e) {
-    pushAll(findings, [{ ruleId: "scanner_error", severity: "MEDIUM", message: `baseline comparison failed: ${errorText(e)}`, ...base }]);
+    pushAll(findings, [{ ruleId: "scanner_error", severity: "HIGH", message: `baseline comparison failed: ${errorText(e)}`, ...base }]);
     gaps.push("baseline comparison incomplete");
   }
 
   let probes = NO_PROBES;
-  if (env.unavailable !== undefined || !env.renderer) {
-    gaps.push(`renderer unavailable: ${env.unavailable ?? "none supplied"}`);
+  if (unavailable !== undefined || !renderer) {
+    gaps.push(`renderer unavailable: ${unavailable ?? "none supplied"}`);
   } else {
     try {
-      const r = await env.diffRender({ template: t, injected: injection.injected, triggers: injection.triggers, reads: injection.reads, scaffolding: ctx.scaffolding }, env.renderer, env.transforms);
+      const r = await env.diffRender({ template: t, injected: injection.injected, triggers: injection.triggers, reads: injection.reads, scaffolding: ctx.scaffolding }, renderer, env.transforms);
       pushAll(findings, r.findings);
       probes = r.probes;
       if (!r.complete) {
@@ -155,7 +173,7 @@ async function analyze(ctx: AnalysisContext, baseline: Baseline, env: AnalyzeEnv
       for (const g of r.gaps ?? []) gaps.push(`differential rendering incomplete: ${g}`);
     } catch (e) {
       // diffRender never throws by contract; a hook that does costs this template its coverage, not the scan.
-      pushAll(findings, [{ ruleId: "scanner_error", severity: "MEDIUM", message: `differential rendering failed: ${errorText(e)}`, ...base }]);
+      pushAll(findings, [{ ruleId: "scanner_error", severity: "HIGH", message: `differential rendering failed: ${errorText(e)}`, ...base }]);
       gaps.push("differential rendering incomplete: it failed before rendering");
     }
   }

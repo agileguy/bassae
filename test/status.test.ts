@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { exitCodeOf, modelStatus, statusOf } from "../src/status.ts";
+import { exitCodeOf, isGapFinding, modelStatus, statusOf } from "../src/status.ts";
 import type { Finding, ModelReport, Severity, TemplateReport, TemplateStatus } from "../src/types.ts";
 
 const finding = (severity: Severity, ruleId: Finding["ruleId"] = "url_in_text"): Finding => ({ ruleId, severity, message: "m", file: "/m/t.jinja" });
@@ -52,6 +52,31 @@ describe("statusOf (ISC-42, ISC-42.1)", () => {
     expect(statusOf([], [], "exact")).toBe("known-good");
     expect(statusOf([], [], "whitespace")).toBe("known-good-variant");
     expect(statusOf([], [], "none")).toBe("clean-unverified");
+  });
+  test("a scanner or parse error among the findings is a gap: incomplete unless a HIGH makes it findings (Decisions 02:58)", () => {
+    expect(statusOf([finding("MEDIUM", "parse_error")], [], "exact")).toBe("incomplete");
+    expect(statusOf([finding("MEDIUM", "scanner_error"), finding("LOW")], [], "none")).toBe("incomplete");
+    expect(statusOf([finding("HIGH", "scanner_error")], [], "none")).toBe("findings");
+    expect(statusOf([finding("MEDIUM", "parse_error"), finding("HIGH")], [], "none")).toBe("findings");
+  });
+});
+
+describe("isGapFinding", () => {
+  test("scanner_error and parse_error say the scanner could not read something; no other rule does", () => {
+    expect(isGapFinding(finding("MEDIUM", "scanner_error"))).toBe(true);
+    expect(isGapFinding(finding("HIGH", "parse_error"))).toBe(true);
+    for (const ruleId of ["url_in_text", "local_tamper", "render_dos", "unanalyzable"] as const) expect(isGapFinding(finding("MEDIUM", ruleId))).toBe(false);
+  });
+
+  test("statusOf and modelStatus give one answer for the same findings", () => {
+    const cases: Finding[][] = [
+      [finding("MEDIUM", "parse_error")],
+      [finding("MEDIUM", "scanner_error"), finding("MEDIUM")],
+      [finding("HIGH", "scanner_error")],
+      [finding("MEDIUM")],
+      [finding("LOW")],
+    ];
+    for (const findings of cases) expect(modelStatus([], true, findings)).toBe(statusOf(findings, [], "none"));
   });
 });
 

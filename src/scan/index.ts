@@ -5,10 +5,11 @@
 // model findings, and pipeline.ts runs them in order.
 
 import { createRenderer, sandboxAvailable } from "../sandbox/index.ts";
-import type { Finding, ModelRecord, ScanOptions, ScanReport } from "../types.ts";
-import { loadModels as load } from "./load.ts";
+import type { ScanOptions, ScanReport } from "../types.ts";
+import { type Loaded, loadModels as load } from "./load.ts";
 import { checkUsage, scanWith } from "./pipeline.ts";
 
+export type { Loaded } from "./load.ts";
 export { ScanUsageError } from "./pipeline.ts";
 
 /**
@@ -23,6 +24,6 @@ export async function scan(options: ScanOptions): Promise<ScanReport> {
 }
 
 /** Walks the roots and reads every model, plus each bare template, exactly as `scan` does. `--extract` reads models through here. */
-export async function loadModels(roots: string[], templates: string[]): Promise<{ models: ModelRecord[]; findings: Finding[] }> {
+export async function loadModels(roots: string[], templates: string[]): Promise<Loaded> {
   return load(roots, templates);
 }

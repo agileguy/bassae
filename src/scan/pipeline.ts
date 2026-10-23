@@ -24,7 +24,7 @@ import type {
   TemplateStatus,
 } from "../types.ts";
 import { type Analysis, createAnalyzer } from "./analyze.ts";
-import { type Attachable, attachModelFindings, finalizeModelFindings } from "./attach.ts";
+import { type Attachable, attachModelFindings, finalizeFindings } from "./attach.ts";
 import { loadModels } from "./load.ts";
 
 /** A command the scan refuses before reading anything. The CLI exits 3 on it (ISC-28). */
@@ -39,6 +39,9 @@ export type RendererSetup =
 const POOL_SIZE = 8;
 
 const EXTRACTION_GAP = "model extraction incomplete: a template may exist that was not extracted";
+
+// What a summary of the scan's own capped findings names, as "<renderer>" names the renderer: no one file.
+const SCAN_FILE = "<scan>";
 
 const VERSION = readVersion();
 
@@ -68,9 +71,10 @@ export async function scanWith(options: ScanOptions, setup: RendererSetup): Prom
   const records = loaded.models;
 
   // Shadowing is set here and read by the local comparison, so every model is checked first (ISC-7.5).
-  const intra = new Map(records.map((m) => [m, checkIntraModel(m, precedence)]));
+  const intra = new Map<ModelRecord, Finding[]>();
+  for (const m of records) intra.set(m, await guard(m, "intra-model comparison", () => checkIntraModel(m, precedence)));
   const local = new Map<ModelRecord, Finding[]>();
-  for (const { gguf, hf } of pairLocal(records)) local.set(gguf, [...(local.get(gguf) ?? []), ...compareLocal(gguf, hf)]);
+  for (const { gguf, hf } of pairLocal(records)) local.set(gguf, [...(local.get(gguf) ?? []), ...(await guard(gguf, "local comparison", () => compareLocal(gguf, hf)))]);
 
   const analyze = createAnalyzer({
     registry,
@@ -84,8 +88,8 @@ export async function scanWith(options: ScanOptions, setup: RendererSetup): Prom
   const pending: { record: ModelRecord; modelFindings: Finding[]; drafts: Draft[] }[] = [];
   const jobs: (() => Promise<void>)[] = [];
   for (const record of records) {
-    const tamper = await checkLocalTamper(record);
-    const modelFindings = finalizeModelFindings([...record.findings, ...intra.get(record)!, ...tamper, ...(local.get(record) ?? [])], record.id);
+    const tamper = await guard(record, "local tamper check", () => checkLocalTamper(record));
+    const modelFindings = finalizeFindings([...record.findings, ...intra.get(record)!, ...tamper, ...(local.get(record) ?? [])], record.id);
     const drafts: Draft[] = [];
     for (const [i, group] of groupTemplates(record).entries()) {
       jobs.push(async () => {
@@ -97,6 +101,8 @@ export async function scanWith(options: ScanOptions, setup: RendererSetup): Prom
   await pool(jobs, POOL_SIZE);
 
   const models = pending.map(({ record, modelFindings, drafts }) => modelReport(record, modelFindings, drafts, precedence));
+  // The scan's own findings are finalized like every other, so a walk past thousands of unreadable entries costs one summary.
+  const scanFindings = finalizeFindings(findings, SCAN_FILE);
   const report: ScanReport = {
     tool: { name: "bassae", version: VERSION },
     schemaVersion: 1,
@@ -105,8 +111,8 @@ export async function scanWith(options: ScanOptions, setup: RendererSetup): Prom
     ...(options.online && options.upstream ? { upstream: { repo: options.upstream.repo, revision: options.upstream.revision } } : {}),
     renderer: setup.status,
     models,
-    findings,
-    summary: summarize(models, findings),
+    findings: scanFindings,
+    summary: summarize(models, scanFindings),
     exitCode: 0,
   };
   report.exitCode = exitCodeOf(report);
@@ -126,6 +132,16 @@ async function fetchBaselines(options: ScanOptions, findings: Finding[]): Promis
       file: `https://huggingface.co/${repo}/tree/${revision}`,
     });
     return [];
+  }
+}
+
+// A model-level check that throws costs that model the check, never the scan (runtime SF7). It reads the model's
+// files or provenance, so its failure is a MEDIUM scanner_error, which is a gap (Decisions 02:58).
+async function guard(record: ModelRecord, what: string, check: () => Finding[] | Promise<Finding[]>): Promise<Finding[]> {
+  try {
+    return await check();
+  } catch (e) {
+    return [{ ruleId: "scanner_error", severity: "MEDIUM", message: `${what} failed: ${e instanceof Error ? e.message : String(e)}`, file: record.id }];
   }
 }
 

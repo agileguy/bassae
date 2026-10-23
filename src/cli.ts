@@ -48,6 +48,7 @@ export function processIo(): Io {
 }
 
 const errorMessage = (e: unknown) => (e instanceof Error ? e.message : String(e));
+const errorCode = (e: unknown) => (e as NodeJS.ErrnoException)?.code;
 
 export async function run(argv: string[], io: Io = processIo()): Promise<ExitCode> {
   // One line, escaped: an argument or a path may carry anything (ISC-44).
@@ -55,25 +56,29 @@ export async function run(argv: string[], io: Io = processIo()): Promise<ExitCod
     await io.stderr(`${escapeText(`bassae: ${message}`)}\n`);
     return 3;
   };
+  // A reader that stopped early (`| head`) changes nothing that was found, so the code stands. Any other
+  // failure to print is the scanner's own, and is 3: never a milder code than the result (runtime SF6).
+  const print = async (text: string, code: ExitCode): Promise<ExitCode> => {
+    try {
+      await io.stdout(text);
+      return code;
+    } catch (e) {
+      return errorCode(e) === "EPIPE" ? code : 3;
+    }
+  };
 
   const parsed = parseArgs(argv);
   if (!parsed.ok) return refuse(`${parsed.error} (see bassae --help)`);
   const command = parsed.command;
 
-  if (command.kind === "help") {
-    await io.stdout(`${USAGE}\n`);
-    return 0;
-  }
-  if (command.kind === "version") {
-    await io.stdout(`bassae ${await io.version()}\n`);
-    return 0;
-  }
+  if (command.kind === "help") return print(`${USAGE}\n`, 0);
+  if (command.kind === "version") return print(`bassae ${await io.version()}\n`, 0);
 
   if (command.kind === "extract") {
     const result = await extract(command.model, command.out, io.loadModels);
-    if (result.stdout.length > 0) await io.stdout(`${result.stdout.join("\n")}\n`);
+    const code = result.stdout.length > 0 ? await print(`${result.stdout.join("\n")}\n`, result.exitCode) : result.exitCode;
     if (result.stderr.length > 0) await io.stderr(`${result.stderr.join("\n")}\n`);
-    return result.exitCode;
+    return code;
   }
 
   for (const path of [...command.paths, ...command.templates]) {
@@ -91,9 +96,30 @@ export async function run(argv: string[], io: Io = processIo()): Promise<ExitCod
   } catch (e) {
     return refuse(`scan failed: ${errorMessage(e)}`);
   }
-  await io.stdout(command.json ? renderJson(report) : renderHuman(report));
   // The pipeline set this through exitCodeOf, the same function that ranks statuses (ISC-28).
-  return report.exitCode;
+  return print(command.json ? renderJson(report) : renderHuman(report), report.exitCode);
 }
 
-if (import.meta.main) process.exitCode = await run(process.argv.slice(2));
+/** run(), with a rejection from anywhere in it reported on one line and given exit 3, never a milder code (ISC-28). */
+export async function main(argv: string[], io: Io = processIo()): Promise<ExitCode> {
+  try {
+    return await run(argv, io);
+  } catch (e) {
+    await io.stderr(`${escapeText(`bassae: internal error: ${errorMessage(e)}`)}\n`).catch(() => undefined);
+    return 3;
+  }
+}
+
+if (import.meta.main) {
+  // Whatever escapes run() altogether, a throw in a callback or a promise nobody awaited, is 3 as well.
+  const crash = (e: unknown) => {
+    try {
+      process.stderr.write(`${escapeText(`bassae: internal error: ${errorMessage(e)}`)}\n`);
+    } finally {
+      process.exit(3);
+    }
+  };
+  process.on("uncaughtException", crash);
+  process.on("unhandledRejection", crash);
+  process.exitCode = await main(process.argv.slice(2));
+}

@@ -2,8 +2,10 @@
 
 import { afterAll, describe, expect, test } from "bun:test";
 import { join } from "node:path";
+import { renderHuman } from "../../src/cli/human.ts";
 import { scan } from "../../src/scan/index.ts";
 import type { ScanReport, TemplateReport } from "../../src/types.ts";
+import { arr, buildGguf, str, T, TOKEN } from "../gguf/builder.ts";
 import { makeTree, removeTrees } from "../helpers/tree.ts";
 import {
   CHATML,
@@ -123,5 +125,28 @@ describe("ISC-42: one status per template, one fixture per status", () => {
     expect(m.templates[0]!.gaps).toContain("model extraction incomplete: a template may exist that was not extracted");
     // The unreadable tokenizer_config.json is a HIGH parse_error on the model itself, and a HIGH outranks the gap.
     expect(m.status).toBe("findings");
+  });
+
+  test("ISC-42.1: a MEDIUM parse_error attached to a template makes it incomplete, and the summary, exit code and human line agree", async () => {
+    // One token_type short: the reader says so in a MEDIUM parse_error about the GGUF file, and still extracts the template.
+    const kvs: Parameters<typeof buildGguf>[0] = [
+      ["general.architecture", str("llama")],
+      ["tokenizer.ggml.model", str("gpt2")],
+      ["tokenizer.ggml.tokens", arr(T.STRING, ["<unk>", "<|im_start|>", "<|im_end|>", "hello"])],
+      ["tokenizer.ggml.token_type", arr(T.I32, [TOKEN.UNKNOWN, TOKEN.CONTROL, TOKEN.CONTROL])],
+      ["tokenizer.chat_template", str(CHATML)],
+    ];
+    const dir = makeTree({ "mismatch.gguf": buildGguf(kvs).bytes });
+    const report = await scan(options([dir]));
+    const m = report.models[0]!;
+    const t = only(report, "mismatch.gguf");
+
+    expect(t.findings).toEqual([expect.objectContaining({ ruleId: "parse_error", severity: "MEDIUM", message: expect.stringContaining("3 entries but tokenizer.ggml.tokens has 4") })]);
+    expect(t.status).toBe("incomplete");
+    expect(t.gaps).toEqual([expect.stringContaining("parse_error: ")]);
+    expect(m.status).toBe("incomplete");
+    expect(report.summary.statuses).toMatchObject({ findings: 0, incomplete: 1 });
+    expect(report.exitCode).toBe(3);
+    expect(renderHuman(report)).toContain("· findings 0, incomplete 1, clean-unverified 0, known-good-variant 0, known-good 0, no_template 0 · exit 3\n");
   });
 });

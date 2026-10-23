@@ -7,8 +7,15 @@ import { readGgufModel } from "../gguf/index.ts";
 import { readHfModel } from "../hf/index.ts";
 import type { DiscoveredModel, Finding, ModelRecord } from "../types.ts";
 
-/** Walks the roots and reads every model, plus each bare template. The walk's own findings come back beside the models. */
-export async function loadModels(roots: string[], templates: string[]): Promise<{ models: ModelRecord[]; findings: Finding[] }> {
+/** What loadModels returns: the models, and the walk's own findings and directories (Discovery). */
+export interface Loaded {
+  models: ModelRecord[];
+  findings: Finding[];
+  walked: string[];
+}
+
+/** Walks the roots and reads every model, plus each bare template. The walk's own findings and directories come back beside the models. */
+export async function loadModels(roots: string[], templates: string[]): Promise<Loaded> {
   const discovery = await discover(roots);
   const models: ModelRecord[] = [];
   for (const found of discovery.models) models.push(await readModel(found));
@@ -19,7 +26,7 @@ export async function loadModels(roots: string[], templates: string[]): Promise<
       models.push(failed("bare", path, path, e));
     }
   }
-  return { models, findings: discovery.findings };
+  return { models, findings: discovery.findings, walked: discovery.walked };
 }
 
 async function readModel(found: DiscoveredModel): Promise<ModelRecord> {

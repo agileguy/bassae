@@ -2,12 +2,15 @@
 
 import { afterAll, describe, expect, test } from "bun:test";
 import { join } from "node:path";
+import { createRegistry } from "../../src/registry/index.ts";
+import { FINDING_CAP } from "../../src/rules/finalize.ts";
 import { loadModels, scan } from "../../src/scan/index.ts";
 import { sandboxAvailable } from "../../src/sandbox/index.ts";
 import { scanWith } from "../../src/scan/pipeline.ts";
+import type { Registry, Renderer } from "../../src/types.ts";
 import { makeTree, removeTrees } from "../helpers/tree.ts";
 import { buildGguf, typicalKvs } from "../gguf/builder.ts";
-import { CHATML, hfModel, options } from "./fixtures/pipeline.ts";
+import { CHATML, CHATML_HIGH, CHATML_MEDIUM, countingRender, hfCacheRepo, hfModel, known, options, REV_A, tokenizerConfig } from "./fixtures/pipeline.ts";
 
 afterAll(removeTrees);
 
@@ -64,7 +67,7 @@ describe("ISC-9: a malformed GGUF is a finding and the scan goes on", () => {
     expect(report.exitCode).toBe(3);
   });
 
-  test("a diffRender hook that throws is a scanner_error on the template, which goes incomplete", async () => {
+  test("a diffRender hook that throws is a HIGH scanner_error on the template, with the gap listed (Decisions 02:58)", async () => {
     const root = makeTree({ m: hfModel(CHATML) });
     const report = await scan(
       options([root], {
@@ -74,13 +77,96 @@ describe("ISC-9: a malformed GGUF is a finding and the scan goes on", () => {
       }),
     );
     const t = report.models[0]!.templates[0]!;
-    expect(t.status).toBe("incomplete");
-    expect(t.findings).toContainEqual(expect.objectContaining({ ruleId: "scanner_error", message: expect.stringContaining("probe matrix exploded") }));
+    expect(t.findings).toContainEqual(expect.objectContaining({ ruleId: "scanner_error", severity: "HIGH", message: expect.stringContaining("probe matrix exploded") }));
+    expect(t.status).toBe("findings");
     expect(t.gaps).toContain("differential rendering incomplete: it failed before rendering");
+    expect(report.exitCode).toBe(2);
+  });
+
+  test("a baseline comparison that throws is a HIGH scanner_error on the template, with the gap listed (Decisions 02:58)", async () => {
+    // A trim marker on a tag with nothing to trim: control flow only, so the comparison renders both texts.
+    const root = makeTree({ "models--acme--chat": hfCacheRepo({ [REV_A]: { "tokenizer_config.json": tokenizerConfig(), "chat_template.jinja": CHATML.replace("{% if add", "{%- if add") } }) });
+    const renderer: Renderer = {
+      async renderBatch(_template, requests) {
+        return requests.map(() => ({
+          get id(): string {
+            throw new Error("renderer answer unreadable");
+          },
+          ok: true as const,
+          output: "",
+        }));
+      },
+    };
+    const report = await scan(options([root], { registry: createRegistry([known(CHATML, { repo: "acme/chat", revision: REV_A })]), renderer }));
+    const t = report.models[0]!.templates[0]!;
+    expect(t.baseline).toMatchObject({ kind: "registry" });
+    expect(t.findings).toContainEqual(expect.objectContaining({ ruleId: "scanner_error", severity: "HIGH", message: expect.stringContaining("renderer answer unreadable") }));
+    expect(t.status).toBe("findings");
+    expect(t.gaps).toContain("baseline comparison incomplete");
+    expect(report.exitCode).toBe(2);
+  });
+});
+
+describe("runtime SF7: one template's or one model's failure never sinks the scan", () => {
+  test("an analysis that throws for one template is a HIGH scanner_error on that template; every other model keeps its findings", async () => {
+    const root = makeTree({ a: hfModel(CHATML_MEDIUM), b: hfModel(CHATML_HIGH), c: hfModel(CHATML.replace("assistant", "assistant\n")) });
+    const inner = createRegistry([]);
+    const registry: Registry = {
+      entries: inner.entries,
+      forRepo: (repo) => inner.forRepo(repo),
+      match(template) {
+        if (template.source.path === join(root, "c", "chat_template.jinja")) throw new Error("registry lookup exploded");
+        return inner.match(template);
+      },
+    };
+    const report = await scan(options([root], { registry }));
+    const [a, b, c] = report.models;
+
+    expect(a!.templates[0]!.findings.map((f) => f.ruleId)).toContain("unbaselined_text");
+    expect(a!.status).toBe("findings");
+    expect(b!.templates[0]!.findings.map((f) => f.ruleId)).toContain("dunder_access");
+
+    const failed = c!.templates[0]!;
+    expect(failed.findings).toEqual([
+      expect.objectContaining({ ruleId: "scanner_error", severity: "HIGH", file: join(root, "c", "chat_template.jinja"), message: expect.stringContaining("registry lookup exploded") }),
+    ]);
+    expect(failed.gaps).toEqual([expect.stringContaining("registry lookup exploded")]);
+    expect(failed.status).toBe("findings");
+    expect(report.exitCode).toBe(2);
+  });
+});
+
+describe("contracts SF10: scan-level findings are finalized like every other", () => {
+  test("a root given twice gives one finding, and past FINDING_CAP one summary carries the rest", async () => {
+    const root = makeTree({});
+    const missing = Array.from({ length: FINDING_CAP + 20 }, (_, i) => join(root, `missing-${i}`));
+    const report = await scan(options([missing[0]!, ...missing]));
+    const errors = report.findings.filter((f) => f.ruleId === "scanner_error");
+    expect(errors).toHaveLength(FINDING_CAP + 1);
+    // One "cannot read" per missing root, the root given twice once, in walk order.
+    expect(errors.slice(0, FINDING_CAP).map((f) => f.file)).toEqual(missing.slice(0, FINDING_CAP));
+    expect(errors.at(-1)).toMatchObject({ message: "20 more scanner_error findings suppressed", file: "<scan>", detail: { suppressed: 20 } });
+    expect(report.summary.findings.MEDIUM).toBe(FINDING_CAP + 1);
+    expect(report.exitCode).toBe(3);
   });
 });
 
 describe("renderer", () => {
+  test("runtime 1: an `unavailable` inherited from a polluted Object.prototype does not switch rendering off", async () => {
+    const root = makeTree({ m: hfModel(CHATML) });
+    const render = countingRender();
+    const proto = Object.prototype as { unavailable?: unknown };
+    proto.unavailable = "Please note that pwned matters";
+    try {
+      const report = await scan(options([root], { diffRender: render.hook }));
+      expect(render.inputs).toHaveLength(1);
+      expect(report.models[0]!.templates[0]!.gaps).toEqual([]);
+    } finally {
+      delete proto.unavailable;
+    }
+    expect(Object.hasOwn(Object.prototype, "unavailable")).toBe(false);
+  });
+
   test("a supplied renderer is reported as such", async () => {
     const root = makeTree({ m: hfModel(CHATML) });
     const report = await scan(options([root]));

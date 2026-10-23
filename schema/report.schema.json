@@ -55,6 +55,7 @@
     "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" }, "description": "Findings that belong to no model: unreadable paths, spent budgets, an unavailable renderer." },
     "summary": {
       "type": "object",
+      "description": "statuses counts each template once, and each model with no template once, as no_template, or incomplete when its extraction did not complete. findings counts every finding in the report by severity, a model finding copied onto several templates once per copy.",
       "properties": {
         "models": { "$ref": "#/$defs/count" },
         "templates": { "$ref": "#/$defs/count" },
@@ -142,12 +143,18 @@
         "ruleId": { "$ref": "#/$defs/ruleId" },
         "severity": { "$ref": "#/$defs/severity" },
         "message": { "type": "string" },
-        "file": { "type": "string", "description": "Absolute path of the file the template or record came from." },
+        "file": {
+          "type": "string",
+          "description": "Absolute path of the file the template or record came from, or the model's id for a finding about the model as a whole. Three kinds of finding name no file and carry a sentinel instead: \"<renderer>\" for an unavailable renderer, https://huggingface.co/<repo>/tree/<revision> for an upstream that could not be fetched, and \"<scan>\" for the summary of the scan's own findings past the per-rule cap."
+        },
         "templateName": { "type": "string" },
         "templateSha256": { "$ref": "#/$defs/sha256" },
         "span": { "$ref": "#/$defs/span" },
         "excerpt": { "type": "string", "description": "The matched text, as found, clipped." },
-        "detail": { "type": "object", "description": "Rule-specific data. Open: its keys depend on the rule." }
+        "detail": {
+          "type": "object",
+          "description": "Rule-specific data. Open: its keys depend on the rule. For content_integrity and tool_integrity, each listed issue's index is the content's or tool's index in the probe, or -1 for a tool the probe did not pass (an extra tool, or one the scan budget could not rule out)."
+        }
       },
       "required": ["ruleId", "severity", "message", "file"],
       "additionalProperties": false
@@ -289,7 +296,11 @@
             }
           ]
         },
-        "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
+        "findings": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/finding" },
+          "description": "Every finding on this template, including model findings about its own file or hash. A model finding about a file holding several templates, such as a GGUF, is copied onto each of them, so it appears, and counts in summary, once per template."
+        },
         "injected": { "type": "array", "items": { "$ref": "#/$defs/injectedText" } },
         "triggers": { "type": "array", "items": { "$ref": "#/$defs/triggerCandidate" } },
         "probes": {
@@ -367,7 +378,11 @@
           }
         },
         "extractionComplete": { "type": "boolean" },
-        "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
+        "findings": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/finding" },
+          "description": "Findings about the model as a whole that name none of its templates' files or hashes."
+        },
         "templates": { "type": "array", "items": { "$ref": "#/$defs/templateReport" } }
       },
       "required": ["format", "id", "paths", "status", "hints", "profiles", "upstreamCandidates", "extractionComplete", "findings", "templates"],
