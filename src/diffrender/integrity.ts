@@ -271,16 +271,25 @@ interface Span {
   inputs: number[];
 }
 
+/** A content's first copy: `length` of its characters at output[at, at + length), found past the first `prior` spans. */
+export interface Copy {
+  i: number;
+  at: number;
+  length: number;
+  prior: number;
+}
+
 /**
- * Each distinctive content in `spans`, outside `skip`, that appears again outside every span, whole or as a slice
- * of at least TRUNCATION_MIN characters, with what to say about it. Spans are in output order and do not overlap.
+ * The first copy of each distinctive content in `spans`, outside `skip`, that appears again outside every span,
+ * whole or as a slice of at least TRUNCATION_MIN characters. `texts` are the contents, `held` every input the probe
+ * passes. Spans are in output order and do not overlap.
  */
-function copies(probe: Probe, output: string, inputs: readonly ScanInput[], spans: readonly Span[], skip: ReadonlySet<number>, turns: Turns): [number, string][] {
+export function firstCopies(output: string, texts: readonly string[], held: readonly string[], spans: readonly Pick<Span, "start" | "end" | "inputs">[], skip: ReadonlySet<number>): Copy[] {
   const W = TRUNCATION_MIN;
   // Each distinctive window of a checked content, with the content and where in it the window starts.
   const owner = new Map<string, [number, number]>();
   for (const i of spans.flatMap((s) => s.inputs)) {
-    const text = inputs[i]!.text;
+    const text = texts[i]!;
     if (skip.has(i) || !distinctive(text)) continue;
     for (let k = 0; k + W <= text.length; k++) {
       const w = text.slice(k, k + W);
@@ -290,7 +299,7 @@ function copies(probe: Probe, output: string, inputs: readonly ScanInput[], span
   if (owner.size === 0) return [];
   // A window two of the probe's inputs hold is theirs to repeat.
   const holders = new Map<string, number>();
-  for (const s of new Set([...probe.inputs, ...inputs.map((x) => x.text)])) {
+  for (const s of new Set([...held, ...texts])) {
     const seen = new Set<string>();
     for (let k = 0; k + W <= s.length; k++) {
       const w = s.slice(k, k + W);
@@ -302,7 +311,7 @@ function copies(probe: Probe, output: string, inputs: readonly ScanInput[], span
   }
   for (const [w, n] of holders) if (n > 1) owner.delete(w);
 
-  const found: [number, string][] = [];
+  const found: Copy[] = [];
   const reported = new Set<number>();
   let s = 0; // the first span that ends after p
   for (let p = 0; p + W <= output.length; p++) {
@@ -314,20 +323,27 @@ function copies(probe: Probe, output: string, inputs: readonly ScanInput[], span
     const hit = owner.get(output.slice(p, p + W));
     if (!hit || reported.has(hit[0])) continue;
     const [i, k] = hit;
-    const text = inputs[i]!.text;
+    const text = texts[i]!;
     let before = 0;
     while (before < k && output[p - before - 1] === text[k - before - 1]) before++;
     let after = W;
     while (k + after < text.length && output[p + after] === text[k + after]) after++;
-    const n = before + after;
-    // The turn the copy sits in, read on from the span before it.
-    const prev = spans[s - 1];
-    const t = turnScan(output, prev?.end ?? 0, prev?.turn ?? {}, turns)(p - before);
     reported.add(i);
-    found.push([i, `is copied: ${n === text.length ? `all ${n} of its` : `${n} of its ${text.length}`} characters appear a second time, ${t.turn ? `in a ${t.turn} turn` : "outside any turn"}`]);
+    found.push({ i, at: p - before, length: before + after, prior: s });
     p += after - 1;
   }
   return found;
+}
+
+/** Each content firstCopies finds copied, with what to say about it. */
+function copies(probe: Probe, output: string, inputs: readonly ScanInput[], spans: readonly Span[], skip: ReadonlySet<number>, turns: Turns): [number, string][] {
+  return firstCopies(output, inputs.map((x) => x.text), probe.inputs, spans, skip).map(({ i, at, length: n, prior }) => {
+    const all = inputs[i]!.text.length;
+    // The turn the copy sits in, read on from the span before it.
+    const prev = spans[prior - 1];
+    const t = turnScan(output, prev?.end ?? 0, prev?.turn ?? {}, turns)(at);
+    return [i, `is copied: ${n === all ? `all ${n} of its` : `${n} of its ${all}`} characters appear a second time, ${t.turn ? `in a ${t.turn} turn` : "outside any turn"}`];
+  });
 }
 
 /** The content_integrity issues in one rendered probe's output. Empty when every content arrived intact. */
