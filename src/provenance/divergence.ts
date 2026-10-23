@@ -2,8 +2,11 @@
 // per diverging template, carrying the diff, the baseline's citation and the
 // rules that fired. Severity, in order:
 //
-// 1. the highest finding of `analyze(template)` whose span overlaps an added or
-//    changed span;
+// 1. the highest finding of `analyze(template)` that touches an added or changed
+//    span: through its own span, or through a span in its detail, such as the
+//    injected text a content_trigger gates (`detail.textSpan`) while its own span
+//    is the unchanged condition. A finding with no place in the text
+//    (unanalyzable, scanner_error) touches every change (Decisions 19:15);
 // 2. else MEDIUM when any literal text (text between tags, or a string literal
 //    inside one) was added, changed or removed;
 // 3. else the rewrite changes control flow only. It is LOW only when the
@@ -50,7 +53,7 @@ export async function registryDivergence(
   } catch (e) {
     analyzeError = e instanceof Error ? e.message : String(e);
   }
-  const hits = (result?.findings ?? []).filter((f) => changed.some((r) => overlaps(f.span, r)));
+  const hits = (result?.findings ?? []).filter((f) => touches(f, changed));
 
   let severity: Severity;
   let reason: string;
@@ -124,9 +127,23 @@ export function firstChange(text: string, diff: LineDiff): Span {
   return new LineMap(text).span(block.bRange.start, end);
 }
 
-// A finding the pre-lexer could not place spans the whole template, so it may stem from any change.
-function overlaps(span: Span | undefined, r: { start: number; end: number }): boolean {
-  if (!span || (span.start === 0 && span.end === 0)) return true;
+function touches(f: Finding, changed: readonly { start: number; end: number }[]): boolean {
+  // A finding with no span, or the whole-template one, may stem from any change, a pure deletion included.
+  if (!f.span || isWholeTemplate(f.span)) return true;
+  const spans = [f.span, ...Object.values(f.detail ?? {}).filter(isSpan)];
+  return spans.some((s) => changed.some((r) => overlaps(s, r)));
+}
+
+function isWholeTemplate(s: Span): boolean {
+  return s.start === WHOLE_TEMPLATE.start && s.end === WHOLE_TEMPLATE.end;
+}
+
+function isSpan(v: unknown): v is Span {
+  const s = v as Span | null;
+  return typeof s === "object" && s !== null && Number.isInteger(s.start) && Number.isInteger(s.end) && Number.isInteger(s.line) && Number.isInteger(s.col);
+}
+
+function overlaps(span: Span, r: { start: number; end: number }): boolean {
   if (span.end <= span.start) return r.start <= span.start && span.start < r.end;
   return span.start < r.end && r.start < span.end;
 }
