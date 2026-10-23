@@ -1,6 +1,8 @@
 // Shared contract between the readers, the rules, the renderer and the CLI.
 // Every module imports its data shapes from here; nothing else defines them.
 
+import type { Transform } from "./registry/index.ts";
+
 export type Severity = "HIGH" | "MEDIUM" | "LOW";
 
 export const SEVERITY_RANK: Record<Severity, number> = { HIGH: 3, MEDIUM: 2, LOW: 1 };
@@ -460,4 +462,6 @@ export interface ScanOptions {
   renderer?: Renderer;
   /** Replaces `fetch` for the upstream call. */
   fetcher?: typeof fetch;
+  /** Replaces differential rendering (src/diffrender), for pipeline tests. */
+  diffRender?: (input: DiffRenderInput, renderer: Renderer, transforms: readonly Transform[]) => Promise<DiffRenderResult>;
 }
