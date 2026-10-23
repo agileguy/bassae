@@ -20,14 +20,23 @@ import { eachLiteral } from "./literals.ts";
 import { IncrementalPos } from "./rawtext.ts";
 import { KNOWN_TLDS } from "./tlds.ts";
 
-/** HIGH url_in_text for each URL, email address, known-TLD domain or IP address in injected text, spanned at the literal it sits in (ISC-19). */
-export function findUrls(items: readonly InjectedText[], base: FindingBase): Finding[] {
+/**
+ * HIGH url_in_text for each URL, email address, known-TLD domain or IP address
+ * in injected text (ISC-19). Given the template text, a hit in an item whose
+ * text stands verbatim, once, in the template at the item's span (text between
+ * tags, or a string literal with no escapes) is spanned at the hit itself; any
+ * other hit, as in a folded value, is spanned at the literal it sits in.
+ */
+export function findUrls(items: readonly InjectedText[], base: FindingBase, text?: string): Finding[] {
   const hits = new Hits();
   for (const item of items) {
+    let at: SpanCursor | null | undefined; // looked up at the item's first kept hit
     scanUrls(item.text, 0, item.text.length, (start, end, kind) => {
       if (!hits.take()) return;
+      if (at === undefined) at = text === undefined ? null : verbatimAt(text, item);
+      const span = at ? at.span(start, end) : item.span;
       const match = item.text.slice(start, end);
-      hits.kept.push({ start: item.span.start, end: item.span.end, span: item.span, message: `injected text contains ${URL_KIND[kind]} '${clip(match)}'`, excerpt: match, detail: { kind, match: clip(match) } });
+      hits.kept.push({ start: span.start, end: span.end, span, message: `injected text contains ${URL_KIND[kind]} '${clip(match)}'`, excerpt: match, detail: { kind, match: clip(match) } });
     });
   }
   return finish("url_in_text", "HIGH", base, [hits], (s, e) => ({ start: s, end: e, line: 1, col: 1 }));
@@ -144,6 +153,76 @@ function finish(ruleId: RuleId, severity: Severity, base: FindingBase, passes: H
     out.push({ ruleId, severity, message: `${suppressed} more ${ruleId} findings suppressed`, ...base, span: first.span ?? place(first.start, first.end), detail: { suppressed } });
   }
   return out;
+}
+
+// Spans of ascending offsets into an item's text, placed in the template where
+// that text stands verbatim. Line and column are walked forward from the item's
+// span and counted as LineMap counts them: \r\n, \r or \n breaks a line, and a
+// surrogate pair is one column.
+class SpanCursor {
+  private i: number;
+  private line: number;
+  private col: number;
+  constructor(
+    private readonly text: string,
+    private readonly offset: number, // where the item's text starts in the template
+    from: Span,
+  ) {
+    this.i = from.start;
+    this.line = from.line;
+    this.col = from.col;
+  }
+  span(start: number, end: number): Span {
+    const t = this.text;
+    for (const to = this.offset + start; this.i < to; this.i++) {
+      const c = t.charCodeAt(this.i);
+      if (c === 10 || (c === 13 && t.charCodeAt(this.i + 1) !== 10)) {
+        this.line++;
+        this.col = 1;
+      } else if (c < 0xd800 || c > 0xdbff) {
+        this.col++;
+      }
+    }
+    return { start: this.offset + start, end: this.offset + end, line: this.line, col: this.col };
+  }
+}
+
+// A cursor over the item's text where it occurs exactly once in the template at
+// the item's span, or null. A folded value, a string with an escape, or text
+// that occurs twice there has no one place.
+function verbatimAt(text: string, item: InjectedText): SpanCursor | null {
+  const { start, end } = item.span;
+  if (end > text.length) return null;
+  const at = onlyOccurrence(text, start, end, item.text);
+  return at < 0 ? null : new SpanCursor(text, at, item.span);
+}
+
+// The offset of needle's only occurrence in s[from, to), or -1 when it occurs
+// there not at all or more than once. Knuth-Morris-Pratt, linear in both, where
+// indexOf takes quadratic time on a needle like `!!!…!a.com!!!…!` that matches
+// up to its middle at every offset before its own.
+function onlyOccurrence(s: string, from: number, to: number, needle: string): number {
+  const n = needle.length;
+  if (n === 0 || n > to - from) return -1;
+  const fail = new Int32Array(n); // longest proper border of needle[0, k]
+  for (let i = 1, k = 0; i < n; i++) {
+    const c = needle.charCodeAt(i);
+    while (k > 0 && c !== needle.charCodeAt(k)) k = fail[k - 1]!;
+    if (c === needle.charCodeAt(k)) k++;
+    fail[i] = k;
+  }
+  let found = -1;
+  for (let i = from, k = 0; i < to; i++) {
+    const c = s.charCodeAt(i);
+    while (k > 0 && c !== needle.charCodeAt(k)) k = fail[k - 1]!;
+    if (c === needle.charCodeAt(k)) k++;
+    if (k === n) {
+      if (found >= 0) return -1;
+      found = i - n + 1;
+      k = fail[k - 1]!;
+    }
+  }
+  return found;
 }
 
 // ---- ISC-19: URLs, email addresses and domains ----

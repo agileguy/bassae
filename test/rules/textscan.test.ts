@@ -166,7 +166,7 @@ describe("ISC-19 URLs, email addresses and domains", () => {
     }
   });
 
-  test("findUrls spans every finding at its injected-text item", () => {
+  test("findUrls with no template text spans every finding at its injected-text item", () => {
     const a = item("Contact bob@evil.com or https://x.evil.com.", { start: 10, end: 60, line: 2, col: 3 });
     const b = item("Plain text.", { start: 70, end: 81, line: 3, col: 1 });
     const c = item("visit evil.com", { start: 90, end: 104, line: 4, col: 5 });

@@ -8,6 +8,7 @@
 
 import { expect, test } from "bun:test";
 import { parseTemplate, type ParseOutcome } from "../../src/parse/parse.ts";
+import { extract } from "../../src/rules/injected.ts";
 import { FINDING_CAP } from "../../src/rules/finalize.ts";
 import { findEncodedBlobs, findInvisibleChars, findUrls, findUrlsRaw } from "../../src/rules/textscan.ts";
 import type { Finding, InjectedText } from "../../src/types.ts";
@@ -132,27 +133,48 @@ test("the literal walk is linear under the cap and over it", () => {
   expect(expectLinear("comments", urlsRaw, (n) => "{# a.com #}".repeat(n), 100_000)).toEqual([]);
 }, TIMING_TIMEOUT_MS);
 
+// findUrls on items built outside the timed region, as expectLinear times a rule.
+function expectLinearItems(label: string, build: (n: number) => { items: InjectedText[]; text?: string }, n: number): Finding[] {
+  const small = build(n);
+  const large = build(n * GROWTH);
+  const run = (x: { items: InjectedText[]; text?: string }) => () => findUrls(x.items, base, x.text);
+  run(small)(); // warm-up
+  const a = bestOf(run(small));
+  const b = bestOf(run(large));
+  const ratio = (b.ms + FLOOR_MS) / (a.ms + FLOOR_MS);
+  console.log(`  ${label}: ${a.ms.toFixed(1)} ms -> ${b.ms.toFixed(1)} ms at ${GROWTH}x size, ratio ${ratio.toFixed(1)}`);
+  expect({ label, linear: ratio < MAX_RATIO }).toEqual({ label, linear: true });
+  expect(b.r.length).toBeLessThanOrEqual(FINDING_CAP);
+  return b.r;
+}
+
+// Best of three after a full GC, as best() does.
+function bestOf(run: () => Finding[]): { r: Finding[]; ms: number } {
+  let out: { r: Finding[]; ms: number } | undefined;
+  for (let i = 0; i < 3; i++) {
+    Bun.gc(true);
+    const t0 = performance.now();
+    const r = run();
+    const ms = performance.now() - t0;
+    if (!out || ms < out.ms) out = { r, ms };
+  }
+  return out!;
+}
+
 test("findUrls is linear in the number of items and bounded in findings", () => {
   const items = (n: number): InjectedText[] => Array.from({ length: n }, (_, k) => ({ text: "see a.com and b.com", span: { start: k, end: k + 1, line: 1, col: k + 1 }, afterGenerationPrompt: false }));
-  const small = items(100_000);
-  const large = items(400_000);
-  findUrls(small, base);
-  // Best of three after a full GC, as best() does.
-  const time = (xs: InjectedText[]) => {
-    let out: { r: Finding[]; ms: number } | undefined;
-    for (let i = 0; i < 3; i++) {
-      Bun.gc(true);
-      const t0 = performance.now();
-      const r = findUrls(xs, base);
-      const ms = performance.now() - t0;
-      if (!out || ms < out.ms) out = { r, ms };
-    }
-    return out!;
-  };
-  const a = time(small);
-  const b = time(large);
-  const ratio = (b.ms + FLOOR_MS) / (a.ms + FLOOR_MS);
-  console.log(`  findUrls items: ${a.ms.toFixed(1)} ms -> ${b.ms.toFixed(1)} ms at ${GROWTH}x items, ratio ${ratio.toFixed(1)}`);
-  expect(ratio).toBeLessThan(MAX_RATIO);
-  expect(suppressed(b.r)).toBe(800_000 - FINDING_CAP + 1);
+  expect(suppressed(expectLinearItems("findUrls items", (n) => ({ items: items(n) }), 100_000))).toBe(800_000 - FINDING_CAP + 1);
+}, TIMING_TIMEOUT_MS);
+
+test("findUrls places hits in the template text linearly, however its text nearly matches", () => {
+  const extracted = (src: string) => ({ items: extract(parseTemplate(src), src, new Set(["<s>"])).items, text: src });
+  // Every hit placed in one long item, lines and surrogate pairs counted once.
+  const dense = expectLinearItems("one item of 'a.com\\n\\u{1F600} '", (n) => extracted(`{{ x }}${"a.com\n\u{1F600} ".repeat(n)}`), 12_000);
+  expect(suppressed(dense)).toBe(48_000 - FINDING_CAP + 1);
+  expect(dense[1]!.span).toEqual({ start: 16, end: 21, line: 2, col: 3 });
+  // The item's text is `!!!…!a.com!!!…!`, after scaffolding and twice as many
+  // '!': it matches up to its host at every offset before its own, which takes
+  // indexOf quadratic time (3.5 s at the larger size).
+  const near = expectLinearItems("near-miss before the item's text", (n) => extracted(`<s>${"!".repeat(2 * n)}<s>${"!".repeat(n)}a.com${"!".repeat(n)}`), 30_000);
+  expect(near.map((f) => f.span!.start)).toEqual([3 * 30_000 * GROWTH + 6]);
 }, TIMING_TIMEOUT_MS);
