@@ -18,6 +18,9 @@
 // as a value. An assignment under a test carries the test onto its literals,
 // except text the test only moves: what the variable already held, and text
 // split out of the value the test reads, when that text is printed another way.
+// Text a test chooses without wrapping it takes the test as well: a literal
+// only one arm of an `if` leaves in a variable, and text picked by a subscript
+// key, slice bound, `.get` key, replace needle or repeat count.
 //
 // The walk is bounded: a work budget over every node visit and every literal
 // copied, a cap on literals per value, a budget on folded constants, a cap on
@@ -348,7 +351,7 @@ class Interp {
     const oa: Sink = { lits: [], data: "none", truth: "none" };
     this.exec(s.body, body, ob);
     this.exec(s.alternate, alt, oa);
-    this.spend(joinLayers(c.st, sb, sa) + ob.lits.length + oa.lits.length);
+    this.spend(this.joinBranches(c.st, sb, sa, tc) + ob.lits.length + oa.lits.length);
     // A literal both branches print, with no test between the branch and the
     // print, is there whichever way the test goes: it does not depend on it.
     const inB = new Set(ob.lits.map(printKey));
@@ -357,6 +360,32 @@ class Interp {
     for (const l of oa.lits) this.repush(l, !inB.has(printKey(l)), tc, c, sink);
     sink.data = stronger(sink.data, stronger(ob.data, oa.data));
     sink.truth = stronger(sink.truth, stronger(ob.truth, oa.truth));
+  }
+
+  // Where an `if`'s branches meet, each variable either branch set takes the
+  // join of both branches' values. A literal only one branch's value holds is
+  // there only when the test went that way (`set x = '...'` then `if not T`
+  // `set x = ''`), so it takes the test, as a print in one branch does.
+  private joinBranches(into: State, a: State, b: State, test: Cond | undefined): number {
+    let copied = 0;
+    for (const k of new Set([...a.own.keys(), ...b.own.keys()])) {
+      const va = a.get(k);
+      const vb = b.get(k);
+      const v = va && vb && va !== vb ? join(this.oneSided(va, vb, test), this.oneSided(vb, va, test)) : (va ?? vb);
+      if (v) into.own.set(k, v);
+      copied += (va?.lits.length ?? 0) + (vb?.lits.length ?? 0);
+    }
+    return copied;
+  }
+
+  // `v` with `test` on each literal `other` does not hold.
+  private oneSided(v: Val, other: Val, test: Cond | undefined): Val {
+    if (!test) return v;
+    const there = new Set<string>();
+    for (const l of other.lits) there.add(litKey(l));
+    for (const l of other.keys ?? []) there.add(litKey(l));
+    const mark = (l: Lit): Lit => (there.has(litKey(l)) ? l : { ...l, cond: strongest(l.cond, test), via: ++this.vias });
+    return { ...v, lits: v.lits.map(mark), keys: v.keys?.map(mark) };
   }
 
   // Move a literal printed in an `if` branch out to the enclosing sink, under
@@ -701,12 +730,12 @@ class Interp {
       if (prop?.type === "Identifier") key = String(prop.value);
     } else if (prop?.type === "SliceExpression") {
       // A slice keeps the container: `messages[1:]` is still the messages.
-      for (const part of [prop.start, prop.stop, prop.step]) if (part) keyGate = strongest(keyGate, this.eval(part, c).gate);
-      return { ...o, path: undefined, konst: undefined, konstList: undefined, gate: strongest(o.gate, keyGate) };
+      for (const part of [prop.start, prop.stop, prop.step]) if (part) keyGate = strongest(keyGate, this.selCond(this.eval(part, c), part as Node));
+      return { ...o, lits: this.choose(o.lits, keyGate), keys: o.keys && this.choose(o.keys, keyGate), path: undefined, konst: undefined, konstList: undefined, gate: strongest(o.gate, keyGate) };
     } else {
       const kv = this.eval(prop, c);
       if (typeof kv.konst === "string" || typeof kv.konst === "number") key = kv.konst;
-      keyGate = strongest(kv.gate, condOf(kv.data === "presence" ? "none" : kv.data, this.exprSpan(prop)));
+      keyGate = this.selCond(kv, prop);
     }
     if (o.ns !== undefined && typeof key === "string") {
       const v = c.st.get(`${o.ns}.${key}`);
@@ -716,7 +745,8 @@ class Interp {
     const fields = o.fields ? mapFields(o.fields, (f) => memberField(f, typeof key === "string" ? key : undefined)) : undefined;
     const path = o.path !== undefined && typeof key === "string" ? `${o.path}.${key}` : undefined;
     const v: Val = {
-      lits: o.lits,
+      // The key chooses which entry is printed: the entries depend on it.
+      lits: this.choose(o.lits, keyGate),
       data: fields ? clsOf(fields) : o.data,
       truth: fields ? "presence" : o.truth,
       gate: strongest(o.gate, keyGate),
@@ -877,7 +907,7 @@ class Interp {
         // Case and whitespace changes keep the text and its emptiness.
         return { ...base, lits: r.lits, data: r.data, truth: r.truth, konst: typeof r.konst === "string" ? caseMap(r.konst, m) : undefined };
       case "replace":
-        return { ...base, lits: [...r.lits, ...(a[1]?.lits ?? [])], data: r.data, truth: r.data };
+        return { ...base, ...this.replaced(r, a, argNodes, receiver) };
       case "format":
         return { ...base, lits: [...r.lits, ...a.flatMap((x) => [...x.lits, ...(x.keys ?? [])])], data: maxData(r, a), truth: maxData(r, a) };
       case "join": {
@@ -895,7 +925,9 @@ class Interp {
       case "get": {
         const k = a[0]?.konst;
         const fields = r.fields ? mapFields(r.fields, (f) => memberField(f, typeof k === "string" ? k : undefined)) : undefined;
-        return { ...base, lits: [...r.lits, ...(a[1]?.lits ?? [])], data: fields ? clsOf(fields) : r.data, truth: fields ? "presence" : r.truth, fields };
+        // The key chooses an entry or the default: both depend on it.
+        const sel = argNodes[0] ? this.selCond(a[0]!, argNodes[0]) : undefined;
+        return { ...base, lits: this.choose([...r.lits, ...(a[1]?.lits ?? [])], sel), data: fields ? clsOf(fields) : r.data, truth: fields ? "presence" : r.truth, fields };
       }
       case "items":
       case "keys":
@@ -941,7 +973,7 @@ class Interp {
         return { ...keep, lits: this.folded(lits, konst, fnode), konst };
       }
       case "replace":
-        return { ...keep, lits: [...o.lits, ...(a[1]?.lits ?? [])], truth: o.data };
+        return { ...keep, ...this.replaced(o, a, argNodes, fnode) };
       case "format":
         return { ...keep, lits: [...o.lits, ...a.flatMap((x) => x.lits)], data: maxData(o, a), truth: maxData(o, a) };
       case "upper":
@@ -963,10 +995,12 @@ class Interp {
       case "indent":
       case "center":
       case "wordwrap":
-      case "truncate":
       case "striptags":
       case "urlencode":
         return keep;
+      case "truncate":
+        // How much survives depends on the length argument.
+        return { ...keep, lits: this.choose(o.lits, this.argsCond(a, argNodes)) };
       case "list":
       case "reverse":
       case "sort":
@@ -982,7 +1016,8 @@ class Interp {
       case "min":
       case "max": {
         const fields = o.fields ? mapFields(o.fields, elementField) : undefined;
-        return { ...keep, data: fields ? clsOf(fields) : o.data, truth: fields ? "presence" : o.truth, fields };
+        // `min(attribute=x)`: the attribute chooses the element.
+        return { ...keep, lits: this.choose(o.lits, this.argsCond(a, argNodes)), data: fields ? clsOf(fields) : o.data, truth: fields ? "presence" : o.truth, fields };
       }
       case "length":
       case "count":
@@ -1001,7 +1036,8 @@ class Interp {
           const fs = mapFields(efs, (f) => memberField(f, attr));
           return { ...keep, data: clsOf(fs), fields: mapFields(fs, listOf) };
         }
-        return keep;
+        // An attribute name computed at runtime chooses which entries are printed.
+        return { ...keep, lits: this.choose(o.lits, this.argsCond(a, argNodes)) };
       }
       case "selectattr":
       case "rejectattr":
@@ -1010,19 +1046,23 @@ class Interp {
         // Which elements survive depends on the test applied to each one.
         const efs = o.fields ? mapFields(o.fields, elementField) : undefined;
         let read: TestClass;
-        let testArg: Val | undefined;
+        let testAt: number;
         if (name === "selectattr" || name === "rejectattr") {
           const attr = typeof a[0]?.konst === "string" ? a[0].konst : undefined;
           const fs = efs ? mapFields(efs, (f) => memberField(f, attr)) : undefined;
           read = fs ? clsOf(fs) : o.data;
-          testArg = a[1];
+          testAt = 1;
         } else {
           read = efs ? clsOf(efs) : o.data;
-          testArg = a[0];
+          testAt = 0;
         }
+        const testArg = a[testAt];
         const test = typeof testArg?.konst === "string" ? testArg.konst : "";
-        const sel: TestClass = test === "" || SHAPE_SELECT_TESTS.has(test) ? (read === "none" ? "none" : "presence") : read;
-        return { ...keep, keys: o.keys, fields: o.fields, truth: stronger(o.truth, sel) };
+        let sel: TestClass = test === "" || SHAPE_SELECT_TESTS.has(test) ? (read === "none" ? "none" : "presence") : read;
+        // What the elements are compared with (`select('in', x)`) decides too.
+        for (const x of a.slice(testAt + 1)) sel = stronger(sel, x.data);
+        const cond = strongest(this.argsCond(a, argNodes), condOf(sel === "presence" ? "none" : sel, this.exprSpan(fnode)));
+        return { ...keep, lits: this.choose(o.lits, cond), keys: o.keys && this.choose(o.keys, cond), fields: o.fields, truth: stronger(o.truth, sel) };
       }
       case "random": {
         this.flagNondet(fnode, "uses the `random` filter");
@@ -1061,7 +1101,45 @@ class Interp {
       const lits = [...l.lits, ...r.lits];
       return { lits: this.folded(lits, konst, n), keys: concatKeys(l, r), data, truth: stronger(l.truth, r.truth), gate, konst };
     }
+    if (o === "*") {
+      // `'text' * n`: the count decides whether the text is printed at all.
+      const lits = [...this.choose(l.lits, this.selCond(r, n.right as Node)), ...this.choose(r.lits, this.selCond(l, n.left as Node))];
+      return { lits, data, truth: stronger(l.truth, r.truth), gate };
+    }
     return { lits: [...l.lits, ...r.lits], data, truth: stronger(l.truth, r.truth), gate };
+  }
+
+  // A value used to choose text (a subscript key, a slice bound, a `.get`
+  // key, a repeat count): the test that choice amounts to, its own gate or the
+  // class of what it reads. Data known only by its shape chooses nothing that
+  // matters. A choice by the clock is a nondeterministic trigger (ISC-18.1).
+  private selCond(v: Val, at: Node): Cond | undefined {
+    if (v.data === "nondeterministic") this.flagNondet(at, "the clock or chance chooses template text");
+    return strongest(v.gate, condOf(v.data === "presence" ? "none" : v.data, this.exprSpan(at)));
+  }
+
+  // The strongest choice among a filter's or method's arguments.
+  private argsCond(a: Val[], nodes: Node[]): Cond | undefined {
+    let cond: Cond | undefined;
+    a.forEach((x, i) => {
+      if (typeof x.konst !== "string" && nodes[i]) cond = strongest(cond, this.selCond(x, nodes[i]!));
+    });
+    return cond;
+  }
+
+  // Literals a choice decides: each takes its test, with a new provenance.
+  private choose(lits: Lit[], cond: Cond | undefined): Lit[] {
+    if (!cond) return lits;
+    return lits.map((l) => ({ ...l, cond: strongest(l.cond, cond), via: ++this.vias }));
+  }
+
+  // `s.replace(old, new)` and `s|replace(old, new)`: `new` is printed only
+  // where `s` holds `old`, so it depends on what `s` is; text of `s`
+  // survives only where `old` does not match it.
+  private replaced(s: Val, a: Val[], argNodes: Node[], at: Node): Pick<Val, "lits" | "data" | "truth"> {
+    const old = argNodes[0] ? this.selCond(a[0]!, argNodes[0]) : undefined;
+    const into = strongest(old, condOf(s.data === "presence" ? "none" : s.data, this.exprSpan(at)));
+    return { lits: [...this.choose(s.lits, old), ...this.choose(a[1]?.lits ?? [], into)], data: s.data, truth: s.data };
   }
 
   // Replace the literals a constant was folded from with one literal for the
@@ -1155,7 +1233,6 @@ function refine(v: Val, path: string | undefined, c: Ctx): Val {
   return { ...v, path, shape };
 }
 
-/** Where two branches meet: each variable either branch set takes the join of both branches' values. */
 // `c` with one more test on everything it does and prints.
 function gated(c: Ctx, gate: Cond | undefined): Ctx {
   return gate ? { ...c, cond: strongest(c.cond, gate), emitCond: strongest(c.emitCond, gate) } : c;
@@ -1171,18 +1248,6 @@ const KNOWN_METHODS = new Set([
   "title", "translate", "upper", "zfill", "append", "clear", "copy", "extend", "insert", "pop", "remove", "reverse", "sort",
   "get", "items", "keys", "values", "update", "setdefault", "popitem", "fromkeys", "add",
 ]);
-
-function joinLayers(into: State, a: State, b: State): number {
-  let copied = 0;
-  for (const k of new Set([...a.own.keys(), ...b.own.keys()])) {
-    const va = a.get(k);
-    const vb = b.get(k);
-    const v = va && vb && va !== vb ? join(va, vb) : (va ?? vb);
-    if (v) into.own.set(k, v);
-    copied += v?.lits.length ?? 0;
-  }
-  return copied;
-}
 
 function printKey(l: Lit): string {
   return `${litKey(l)}:${l.via ?? ""}`;
