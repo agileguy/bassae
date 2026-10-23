@@ -8,6 +8,7 @@
 
 import { expect, test } from "bun:test";
 import { parseTemplate, type ParseOutcome } from "../../src/parse/parse.ts";
+import { extract } from "../../src/rules/injected.ts";
 import { FINDING_CAP } from "../../src/rules/finalize.ts";
 import { findEncodedBlobs, findInvisibleChars, findUrls, findUrlsRaw } from "../../src/rules/textscan.ts";
 import type { Finding, InjectedText } from "../../src/types.ts";
@@ -86,6 +87,21 @@ test("URLs: dense domains, long dotted runs, www. paths and near-miss emails", (
   expect(expectLinear("63-char labels", urlsRaw, (n) => `${"a".repeat(63)}.`.repeat(n) + "com", 16_000).length).toBe(1);
 }, TIMING_TIMEOUT_MS);
 
+test("URLs through the fold: fullwidth, astral, IDN and defanged runs, IPs and brackets", () => {
+  const fw = (s: string) => [...s].map((c) => String.fromCharCode(c.charCodeAt(0) + 0xfee0)).join(""); // ASCII to fullwidth
+  expect(expectLinear("fullwidth a.a.a...com", urlsRaw, (n) => fw("a.").repeat(n) + fw("com"), 500_000).length).toBe(1);
+  expect(expectLinear("math bold a.a.a...com", urlsRaw, (n) => String.fromCodePoint(0x1d41a, 0x2e).repeat(n) + "com", 300_000).length).toBe(1);
+  const rf = String.fromCharCode(0x440, 0x444);
+  expect(expectLinear("Cyrillic labels ending in an IDN TLD", urlsRaw, (n) => String.fromCharCode(0x43f, 0x2e).repeat(n) + rf, 500_000).length).toBe(1);
+  expect(expectLinear("a[.]a[.]...com", urlsRaw, (n) => "a[.]".repeat(n) + "com", 300_000).length).toBe(1);
+  expect(expectLinear("x@ Cyrillic labels...1", urlsRaw, (n) => "x@" + String.fromCharCode(0x43f, 0x2e).repeat(n) + "1", 500_000)).toEqual([]);
+  expect(suppressed(expectLinear("'1.2.3.4 ' x n", urlsRaw, (n) => "1.2.3.4 ".repeat(n), 150_000))).toBe(4 * 150_000 - FINDING_CAP + 1);
+  expect(expectLinear("1.1.1.1... no IP", urlsRaw, (n) => "1.".repeat(n) + "1", 500_000)).toEqual([]);
+  expect(expectLinear("unclosed IPv6 brackets", urlsRaw, (n) => "[1111:2222:3333:4444:5555:6666:7777".repeat(n), 50_000)).toEqual([]);
+  expect(expectLinear("brackets", urlsRaw, (n) => "[".repeat(n), 1_000_000)).toEqual([]);
+  expect(expectLinear("trailing punctuation after a scheme", urlsRaw, (n) => "x://" + ".".repeat(n), 1_000_000).length).toBe(1);
+}, TIMING_TIMEOUT_MS);
+
 test("encoded blobs: one long run, hex, near-misses and many tiny strings", () => {
   expect(expectLinear("base64 run", blobs, (n) => "aB3c".repeat(n), 250_000).length).toBe(1);
   expect(expectLinear("hex run", blobs, (n) => "0a".repeat(n), 500_000).map((f) => f.detail!.encoding)).toEqual(["hex"]);
@@ -93,6 +109,18 @@ test("encoded blobs: one long run, hex, near-misses and many tiny strings", () =
   expect(expectLinear("snake_case run", blobs, (n) => "ab_".repeat(n), 300_000)).toEqual([]);
   const tiny = expectLinear("blob x n", blobs, (n) => "aB3caB3caB3caB3caB3caB3caB3caB3c ".repeat(n), 30_000);
   expect(suppressed(tiny)).toBe(120_000 - FINDING_CAP + 1);
+}, TIMING_TIMEOUT_MS);
+
+test("encoded blobs that hide their shape: split runs, decoded runs and base32", () => {
+  // Each split run is decoded from a few of its tokens, then each token is judged alone.
+  expect(expectLinear("blob-like tokens that never decode", blobs, (n) => "aB3 ".repeat(n), 250_000)).toEqual([]);
+  expect(expectLinear("'A1 ' x n", blobs, (n) => "A1 ".repeat(n), 300_000)).toEqual([]);
+  expect(expectLinear("blob-like token, then a word", blobs, (n) => "aB3 word ".repeat(n), 100_000)).toEqual([]);
+  expect(expectLinear("wrapped base64 lines", blobs, (n) => "QWxhZGRpbjpvcGVuIHNlc2FtZSBJZ25v\n".repeat(n), 30_000).length).toBe(1);
+  expect(expectLinear("base64 of upper-case text", blobs, (n) => "U1lTVEVN".repeat(n), 120_000).map((f) => f.detail!.encoding)).toEqual(["base64"]);
+  expect(expectLinear("base32 run", blobs, (n) => "JFDU4T2S".repeat(n), 120_000).map((f) => f.detail!.encoding)).toEqual(["base32"]);
+  const split = expectLinear("split blob x n", blobs, (n) => "SWdub3JlIGFsbCBw cmV2aW91cyB0ZXh0 x ".repeat(n), 30_000);
+  expect(suppressed(split)).toBe(120_000 - FINDING_CAP + 1);
 }, TIMING_TIMEOUT_MS);
 
 test("the literal walk is linear under the cap and over it", () => {
@@ -105,27 +133,48 @@ test("the literal walk is linear under the cap and over it", () => {
   expect(expectLinear("comments", urlsRaw, (n) => "{# a.com #}".repeat(n), 100_000)).toEqual([]);
 }, TIMING_TIMEOUT_MS);
 
+// findUrls on items built outside the timed region, as expectLinear times a rule.
+function expectLinearItems(label: string, build: (n: number) => { items: InjectedText[]; text?: string }, n: number): Finding[] {
+  const small = build(n);
+  const large = build(n * GROWTH);
+  const run = (x: { items: InjectedText[]; text?: string }) => () => findUrls(x.items, base, x.text);
+  run(small)(); // warm-up
+  const a = bestOf(run(small));
+  const b = bestOf(run(large));
+  const ratio = (b.ms + FLOOR_MS) / (a.ms + FLOOR_MS);
+  console.log(`  ${label}: ${a.ms.toFixed(1)} ms -> ${b.ms.toFixed(1)} ms at ${GROWTH}x size, ratio ${ratio.toFixed(1)}`);
+  expect({ label, linear: ratio < MAX_RATIO }).toEqual({ label, linear: true });
+  expect(b.r.length).toBeLessThanOrEqual(FINDING_CAP);
+  return b.r;
+}
+
+// Best of three after a full GC, as best() does.
+function bestOf(run: () => Finding[]): { r: Finding[]; ms: number } {
+  let out: { r: Finding[]; ms: number } | undefined;
+  for (let i = 0; i < 3; i++) {
+    Bun.gc(true);
+    const t0 = performance.now();
+    const r = run();
+    const ms = performance.now() - t0;
+    if (!out || ms < out.ms) out = { r, ms };
+  }
+  return out!;
+}
+
 test("findUrls is linear in the number of items and bounded in findings", () => {
   const items = (n: number): InjectedText[] => Array.from({ length: n }, (_, k) => ({ text: "see a.com and b.com", span: { start: k, end: k + 1, line: 1, col: k + 1 }, afterGenerationPrompt: false }));
-  const small = items(100_000);
-  const large = items(400_000);
-  findUrls(small, base);
-  // Best of three after a full GC, as best() does.
-  const time = (xs: InjectedText[]) => {
-    let out: { r: Finding[]; ms: number } | undefined;
-    for (let i = 0; i < 3; i++) {
-      Bun.gc(true);
-      const t0 = performance.now();
-      const r = findUrls(xs, base);
-      const ms = performance.now() - t0;
-      if (!out || ms < out.ms) out = { r, ms };
-    }
-    return out!;
-  };
-  const a = time(small);
-  const b = time(large);
-  const ratio = (b.ms + FLOOR_MS) / (a.ms + FLOOR_MS);
-  console.log(`  findUrls items: ${a.ms.toFixed(1)} ms -> ${b.ms.toFixed(1)} ms at ${GROWTH}x items, ratio ${ratio.toFixed(1)}`);
-  expect(ratio).toBeLessThan(MAX_RATIO);
-  expect(suppressed(b.r)).toBe(800_000 - FINDING_CAP + 1);
+  expect(suppressed(expectLinearItems("findUrls items", (n) => ({ items: items(n) }), 100_000))).toBe(800_000 - FINDING_CAP + 1);
+}, TIMING_TIMEOUT_MS);
+
+test("findUrls places hits in the template text linearly, however its text nearly matches", () => {
+  const extracted = (src: string) => ({ items: extract(parseTemplate(src), src, new Set(["<s>"])).items, text: src });
+  // Every hit placed in one long item, lines and surrogate pairs counted once.
+  const dense = expectLinearItems("one item of 'a.com\\n\\u{1F600} '", (n) => extracted(`{{ x }}${"a.com\n\u{1F600} ".repeat(n)}`), 12_000);
+  expect(suppressed(dense)).toBe(48_000 - FINDING_CAP + 1);
+  expect(dense[1]!.span).toEqual({ start: 16, end: 21, line: 2, col: 3 });
+  // The item's text is `!!!…!a.com!!!…!`, after scaffolding and twice as many
+  // '!': it matches up to its host at every offset before its own, which takes
+  // indexOf quadratic time (3.5 s at the larger size).
+  const near = expectLinearItems("near-miss before the item's text", (n) => extracted(`<s>${"!".repeat(2 * n)}<s>${"!".repeat(n)}a.com${"!".repeat(n)}`), 30_000);
+  expect(near.map((f) => f.span!.start)).toEqual([3 * 30_000 * GROWTH + 6]);
 }, TIMING_TIMEOUT_MS);
