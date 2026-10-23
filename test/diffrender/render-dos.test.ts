@@ -4,11 +4,11 @@
 
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
-import { diffRender } from "../../src/diffrender/index.ts";
+import { diffRender, diffRenderWith, OUTPUT_BUDGET } from "../../src/diffrender/index.ts";
 import { buildProbes } from "../../src/diffrender/probes.ts";
 import { createRenderer, sandboxAvailable } from "../../src/sandbox/index.ts";
 import { makeTemplateFromString } from "../../src/template.ts";
-import { CAP_FAILURES, type DiffRenderInput, type RenderRequest, type RenderResult, type Renderer } from "../../src/types.ts";
+import { CAP_FAILURES, DEFAULT_RENDER_LIMITS, type DiffRenderInput, type IntegrityIssue, type RenderRequest, type RenderResult, type Renderer } from "../../src/types.ts";
 
 const FIXTURES = join(import.meta.dir, "fixtures", "probes");
 const fixture = (name: string) => Bun.file(join(FIXTURES, `${name}.jinja`)).text();
@@ -149,6 +149,55 @@ describe("render_dos (ISC-43)", () => {
     const r = await diffRender(input("{{ x }}"), renderer, []);
     expect(r.complete).toBe(false);
     expect(r.probes.failed).toBe(TOTAL);
+  });
+});
+
+describe("bounded cost (Decisions 02:58)", () => {
+  const gaps = (r: object) => (r as { gaps?: string[] }).gaps ?? [];
+
+  test("output past the template's budget is never asked for, so never held: the result is incomplete, and says why", async () => {
+    // Every render comes back at the output cap, different under each profile: 52 MiB in all, against a 32 MiB budget.
+    const cap = DEFAULT_RENDER_LIMITS.maxOutputBytes;
+    const fill = { "hf-default": "h".repeat(cap - 64), "jinja2-globals": "j".repeat(cap - 64) };
+    let produced = 0;
+    let largestAsk = 0;
+    const { renderer } = scripted((r) => {
+      produced += fill[r.profile].length;
+      return { id: r.id, ok: true, output: fill[r.profile] };
+    });
+    const asking: Renderer = {
+      renderBatch: (template, requests) => {
+        largestAsk = Math.max(largestAsk, requests.length);
+        return renderer.renderBatch(template, requests);
+      },
+    };
+    const r = await diffRender(input("{{ x }}"), asking, []);
+    expect(produced).toBeLessThanOrEqual(OUTPUT_BUDGET);
+    expect(largestAsk * cap).toBeLessThanOrEqual(OUTPUT_BUDGET);
+    expect(r.findings.filter((f) => f.ruleId === "render_dos")).toEqual([]);
+    expect(r.complete).toBe(false);
+    expect(r.probes.failed).toBeGreaterThan(0);
+    expect(gaps(r)).toEqual([expect.stringMatching(/^the 32 MiB output budget was spent, so \d+ of 26 probes were not rendered under both profiles$/)]);
+  });
+
+  test("an output the two profiles share is held once, so a template within the budget renders whole", async () => {
+    // 26 probes of 1 MiB, the same under both profiles: 26 MiB held once, 52 MiB if held twice.
+    const out = "s".repeat(DEFAULT_RENDER_LIMITS.maxOutputBytes - 64);
+    const r = await diffRender(input("{{ x }}"), scripted((req) => ({ id: req.id, ok: true, output: out })).renderer, []);
+    expect(r.complete).toBe(true);
+    expect(gaps(r)).toEqual([]);
+    expect(r.probes.rendered).toBe(TOTAL);
+  });
+
+  test("integrity issues are kept as counts and a few samples, however many a check finds", async () => {
+    const flood = (): IntegrityIssue[] => Array.from({ length: 1000 }, (_, index) => ({ ruleId: "content_integrity", message: `content ${index} is missing`, index }));
+    const r = await diffRenderWith(input("{{ x }}"), scripted().renderer, [], { checkContent: flood, checkTools: () => [] });
+    const content = r.findings.find((f) => f.ruleId === "content_integrity")!;
+    // The scripted renderer prints the same under both profiles, so each probe's output is checked once.
+    expect(content.detail).toMatchObject({ probeCount: TOTAL, issueCount: TOTAL * 1000 });
+    const listed = (content.detail as { probes: { issues: unknown[] }[] }).probes;
+    expect(listed).toHaveLength(20);
+    expect(listed.every((p) => p.issues.length === 5)).toBe(true);
   });
 });
 

@@ -3,7 +3,8 @@
 //
 // Every probe renders under both environment profiles. The first explain probe goes alone, then the other
 // explain probes, then the vary probes. The sandbox stops at the first cap breach and nothing more is sent after
-// it, so one hostile template costs about one cap (Decisions 17:35, 02:58). What came back is checked four ways:
+// it, so one hostile template costs about one cap (Decisions 17:35, 02:58), and what a template prints may hold at
+// most OUTPUT_BUDGET of the scanner's memory. What came back is checked four ways:
 // - render_divergence: a vary probe prints a word, once its inputs are removed, that no explain probe prints;
 // - env_profile_divergence: one probe renders differently under the two profiles;
 // - content_integrity and tool_integrity: p3-integrity's checks on every output;
@@ -40,6 +41,14 @@ const MAX_LISTED_WORDS = 50;
 const MAX_LISTED_ISSUES = 5;
 const SAMPLE_AROUND = 80;
 
+// What one template's output may hold of the scanner's memory, rendered and in flight (Decisions 02:58). The
+// registry's templates print 0.2 to 0.35 MiB across all their probes, so this is some 90 times that: 32 renders at
+// the output cap, and 256 MiB across the scan's pool of 8. Past it nothing more renders, and the result is incomplete.
+export const OUTPUT_BUDGET = 32 * 2 ** 20;
+
+/** A DiffRenderResult that also says why it is incomplete, where its counts alone do not. */
+export type DiffRenderReport = DiffRenderResult & { gaps?: string[] };
+
 // What a finding calls each of CAP_FAILURES.
 const CAP_NAMES: ReadonlyMap<RenderFailure, string> = new Map([
   ["timeout", `time cap (${DEFAULT_RENDER_LIMITS.timeoutMs} ms)`],
@@ -58,12 +67,12 @@ export interface IntegrityChecks {
  * render_divergence, env_profile_divergence, content_integrity, tool_integrity and render_dos for one template.
  * Never throws: an internal failure is a scanner_error finding and an incomplete result.
  */
-export async function diffRender(input: DiffRenderInput, renderer: Renderer, transforms: readonly Transform[]): Promise<DiffRenderResult> {
+export async function diffRender(input: DiffRenderInput, renderer: Renderer, transforms: readonly Transform[]): Promise<DiffRenderReport> {
   return diffRenderWith(input, renderer, transforms, { checkContent, checkTools });
 }
 
 /** diffRender with the integrity checks passed in. */
-export async function diffRenderWith(input: DiffRenderInput, renderer: Renderer, transforms: readonly Transform[], checks: IntegrityChecks): Promise<DiffRenderResult> {
+export async function diffRenderWith(input: DiffRenderInput, renderer: Renderer, transforms: readonly Transform[], checks: IntegrityChecks): Promise<DiffRenderReport> {
   const t = input.template;
   const base: FindingBase = { file: t.source.path, templateName: t.source.name, templateSha256: t.sha256 };
   try {
@@ -98,8 +107,11 @@ interface Breach {
   after: Set<number>;
 }
 
-/** Sends each batch in turn and stops after the first cap breach, or once the template or the sandbox cannot run at all. */
-async function renderAll(template: string, probes: readonly Probe[], renderer: Renderer): Promise<{ outcomes: Outcome[]; breach?: Breach }> {
+/**
+ * Sends each batch in turn and stops after the first cap breach, once the template or the sandbox cannot run at all,
+ * or once OUTPUT_BUDGET has no room for another render.
+ */
+async function renderAll(template: string, probes: readonly Probe[], renderer: Renderer): Promise<{ outcomes: Outcome[]; breach?: Breach; spent?: true }> {
   const outcomes: Outcome[] = probes.map(() => ({}));
   const sent = new Map<string, { probe: number; profile: EnvProfile }>();
   const request = (i: number, profile: EnvProfile): RenderRequest => {
@@ -114,28 +126,42 @@ async function renderAll(template: string, probes: readonly Probe[], renderer: R
   const split = Math.max(1, explain.length * PROFILES.length);
   const batches = [queue.slice(0, 1), queue.slice(1, split), queue.slice(split)];
 
+  // Any render may come back at the output cap, so a call asks for no more renders than the budget has room for at
+  // that size: what is held and what is in flight never pass it together.
+  let held = 0;
   for (const batch of batches) {
-    if (batch.length === 0) continue;
-    let results: RenderResult[];
-    try {
-      results = await renderer.renderBatch(template, batch);
-    } catch (e) {
-      results = batch.map(({ id }) => ({ id, ok: false, failure: "sandbox", message: `renderer failed: ${errorText(e)}` }));
+    for (let at = 0; at < batch.length; ) {
+      const room = Math.floor((OUTPUT_BUDGET - held) / DEFAULT_RENDER_LIMITS.maxOutputBytes);
+      if (room < 1) return { outcomes, spent: true };
+      const call = batch.slice(at, at + room);
+      at += call.length;
+      let results: RenderResult[];
+      try {
+        results = await renderer.renderBatch(template, call);
+      } catch (e) {
+        results = call.map(({ id }) => ({ id, ok: false, failure: "sandbox", message: `renderer failed: ${errorText(e)}` }));
+      }
+      const byId = new Map(results.map((r) => [r.id, r]));
+      let breach: Breach | undefined;
+      let fatal = false;
+      for (const req of call) {
+        const result: RenderResult = byId.get(req.id) ?? { id: req.id, ok: false, failure: "sandbox", message: "the renderer returned no result for this probe" };
+        const { probe, profile } = sent.get(req.id)!;
+        const other = outcomes[probe]![PROFILES.find((p) => p !== profile)!];
+        // An output the other profile printed too is held once.
+        if (result.ok && other?.ok && other.output === result.output) outcomes[probe]![profile] = { ...result, output: other.output };
+        else {
+          outcomes[probe]![profile] = result;
+          if (result.ok) held += Buffer.byteLength(result.output);
+        }
+        if (breach && result.ok) breach.after.add(probe);
+        if (!result.ok && !breach && isCapBreach(result)) breach = { probe, profile, result, after: new Set() };
+        if (!result.ok && (result.failure === "parse" || result.failure === "sandbox")) fatal = true;
+      }
+      if (breach) return { outcomes, breach };
+      // A template that does not parse, or a sandbox that does not start, fails every later probe the same way.
+      if (fatal) return { outcomes };
     }
-    const byId = new Map(results.map((r) => [r.id, r]));
-    let breach: Breach | undefined;
-    let fatal = false;
-    for (const req of batch) {
-      const result: RenderResult = byId.get(req.id) ?? { id: req.id, ok: false, failure: "sandbox", message: "the renderer returned no result for this probe" };
-      const { probe, profile } = sent.get(req.id)!;
-      outcomes[probe]![profile] = result;
-      if (breach && result.ok) breach.after.add(probe);
-      if (!result.ok && !breach && isCapBreach(result)) breach = { probe, profile, result, after: new Set() };
-      if (!result.ok && (result.failure === "parse" || result.failure === "sandbox")) fatal = true;
-    }
-    if (breach) return { outcomes, breach };
-    // A template that does not parse, or a sandbox that does not start, fails every later probe the same way.
-    if (fatal) break;
   }
   return { outcomes };
 }
@@ -151,12 +177,12 @@ function isRefusal(r: RenderResult, templateText: string): boolean {
 
 // ---- the run ----
 
-async function run(input: DiffRenderInput, renderer: Renderer, transforms: readonly Transform[], checks: IntegrityChecks, base: FindingBase): Promise<DiffRenderResult> {
+async function run(input: DiffRenderInput, renderer: Renderer, transforms: readonly Transform[], checks: IntegrityChecks, base: FindingBase): Promise<DiffRenderReport> {
   const text = input.template.text;
   const scaffolding = input.scaffolding ?? new Set<string>();
   // A template that never reads `tools` gets no probe passing any: it cannot render them (ISC-22.4).
   const { probes, cut } = buildProbes(input.triggers, { tools: readsTools(text), text, ...(input.reads ? { reads: input.reads } : {}) });
-  const { outcomes, breach } = await renderAll(text, probes, renderer);
+  const { outcomes, breach, spent } = await renderAll(text, probes, renderer);
 
   let rendered = 0;
   let refused = 0;
@@ -206,7 +232,8 @@ async function run(input: DiffRenderInput, renderer: Renderer, transforms: reado
   if (divergence) findings.push(divergence);
 
   // ISC-22.3 and ISC-22.4 on every output under both profiles; an output identical to the other profile's is checked once.
-  const issues = { content_integrity: [] as Listed[], tool_integrity: [] as Listed[] };
+  // A check can find thousands of issues in one output, so each rule keeps counts and the first few it found.
+  const issues = { content_integrity: tally(), tool_integrity: tally() };
   for (const [i, outcome] of outcomes.entries()) {
     const seen = new Set<string>();
     for (const profile of PROFILES) {
@@ -223,27 +250,28 @@ async function run(input: DiffRenderInput, renderer: Renderer, transforms: reado
         }
         for (const rule of ["content_integrity", "tool_integrity"] as const) {
           const mine = found.filter((x) => x.ruleId === rule);
-          if (mine.length > 0) issues[rule].push({ probe: probes[i]!.label, profile, issues: mine });
+          if (mine.length === 0) continue;
+          const kept = issues[rule];
+          kept.probeCount++;
+          kept.issueCount += mine.length;
+          if (kept.listed.length < MAX_LISTED_PROBES) kept.listed.push({ probe: probes[i]!.label, profile, issues: mine.slice(0, MAX_LISTED_ISSUES) });
         }
       }
     }
   }
   for (const rule of ["content_integrity", "tool_integrity"] as const) {
-    const listed = issues[rule];
-    if (listed.length === 0) continue;
-    const first = listed[0]!;
+    const { probeCount, issueCount, listed } = issues[rule];
+    const first = listed[0];
+    if (!first) continue;
     findings.push({
       ruleId: rule,
       severity: "HIGH",
-      message: `${first.issues[0]!.message} (the ${first.probe} probe${listed.length > 1 ? ` and ${listed.length - 1} more` : ""})`,
+      message: `${first.issues[0]!.message} (the ${first.probe} probe${probeCount > 1 ? ` and ${probeCount - 1} more` : ""})`,
       ...whole,
       detail: {
-        probeCount: listed.length,
-        probes: listed.slice(0, MAX_LISTED_PROBES).map((l) => ({
-          probe: l.probe,
-          profile: l.profile,
-          issues: l.issues.slice(0, MAX_LISTED_ISSUES).map((x) => ({ index: x.index, message: x.message })),
-        })),
+        probeCount,
+        issueCount,
+        probes: listed.map((l) => ({ probe: l.probe, profile: l.profile, issues: l.issues.map((x) => ({ index: x.index, message: x.message })) })),
       },
     });
   }
@@ -252,8 +280,14 @@ async function run(input: DiffRenderInput, renderer: Renderer, transforms: reado
     findings.push({ ruleId: "scanner_error", severity: "HIGH", message: `internal error in an integrity check: ${internal}`, ...whole });
   }
 
-  const complete = failed === 0 && !(explainCount > 0 && explainRefused === explainCount) && internal === undefined;
-  return { findings, complete, probes: { total, rendered, refused, failed } };
+  const gaps: string[] = [];
+  if (spent) {
+    const short = outcomes.filter((o) => PROFILES.some((p) => !o[p])).length;
+    gaps.push(`the ${OUTPUT_BUDGET / 2 ** 20} MiB output budget was spent, so ${short} of ${probes.length} probes were not rendered under both profiles`);
+  }
+
+  const complete = failed === 0 && !spent && !(explainCount > 0 && explainRefused === explainCount) && internal === undefined;
+  return { findings, complete, probes: { total, rendered, refused, failed }, gaps };
 }
 
 interface Listed {
@@ -261,6 +295,9 @@ interface Listed {
   profile: EnvProfile;
   issues: IntegrityIssue[];
 }
+
+/** What one integrity rule found: how many outputs, how many issues, and the first few of each. */
+const tally = () => ({ probeCount: 0, issueCount: 0, listed: [] as Listed[] });
 
 // ---- env_profile_divergence (ISC-22.2) ----
 
