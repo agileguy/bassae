@@ -16,7 +16,8 @@
 //                     compared with a value outside its vocabulary, a length or
 //                     loop threshold further than 1 from 0, anything serialized
 //                     from these, or an unknown runtime variable
-//   nondeterministic  reads a strftime_now() result or a random choice
+//   nondeterministic  reads the clock (strftime_now(), date_string, today) or a
+//                     random choice
 //
 // The strength comes from two places: what the test itself reads (a comparison
 // reads the whole value, `is defined` reads none of it) and what decided the
@@ -99,6 +100,9 @@ const BUILTIN_NAMES = vocab("browser", "python", "brave_search", "wolfram_alpha"
 const PRESENCE: Field = { cls: "presence", kind: "any" };
 const TEXT: Field = { cls: "content", kind: "string" };
 const TYPE: Field = { cls: "content", kind: "string", vocab: TYPES };
+// The date a runtime passes (Llama 3.x `date_string`, `today`): the clock, the
+// same as a strftime_now() result.
+const CLOCK: Field = { cls: "nondeterministic", kind: "string" };
 
 // Unknown data under the conversation: every member and element is content too.
 const ANY_CONTENT: Field = { cls: "content", kind: "any" };
@@ -226,8 +230,8 @@ const ROOTS: Readonly<Record<string, Field>> = {
   eos_token: SCHEMA,
   pad_token: SCHEMA,
   unk_token: SCHEMA,
-  date_string: SCHEMA,
-  today: SCHEMA,
+  date_string: CLOCK,
+  today: CLOCK,
   loop: LOOP,
 };
 
@@ -376,8 +380,8 @@ export interface TestEnv {
 }
 
 // Tests that read nothing of the value: whether it is there, and its type.
-// `date_string is defined` stays a presence test even though the value came
-// from strftime_now(): the test does not read the date.
+// `date_string is defined` stays a presence test even though the value is the
+// clock: the test does not read the date.
 const SHAPE_TESTS = new Set([
   "defined", "undefined", "none", "string", "mapping", "iterable", "sequence", "number", "integer", "float",
   "boolean", "callable", "filter", "test", "escaped", "list", "dict", "tuple",

@@ -183,3 +183,16 @@ test("ISC-18: a serialized parameter schema or role list is still a presence tes
   expect(cls(`{% for t in tools %}{% if 'object' in t.function.parameters|tojson %}${INJ}{% endif %}{% endfor %}`)).toBe("presence");
   expect(cls(`{% if 'tool' in messages|map(attribute='role')|list|tojson %}${INJ}{% endif %}`)).toBe("presence");
 });
+
+// ---- the clock ----
+
+test("ISC-18.1: a value test on date_string or today is a nondeterministic trigger; is defined is not", () => {
+  for (const t of ["date_string[-4:] >= '2027'", "today[-4:] >= '2027'", "date_string == '26 Jul 2024'", "'Dec' in today", "date_string|length > 10"]) {
+    const src = `{% if ${t} %}${INJ}{% endif %}`;
+    expect({ t, cls: cls(src), nd: highs(src).includes("nondeterministic_trigger") }).toEqual({ t, cls: "nondeterministic", nd: true });
+  }
+  for (const t of ["date_string is defined", "today is not defined", "date_string", "date_string|length > 0"]) {
+    const src = `{% if ${t} %}${INJ}{% endif %}`;
+    expect({ t, cls: cls(src), highs: highs(src) }).toEqual({ t, cls: "presence", highs: [] });
+  }
+});
