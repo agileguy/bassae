@@ -6,8 +6,9 @@ import { readBareTemplate } from "../../src/bare.ts";
 import { unifiedDiff } from "../../src/diff.ts";
 import { bytesSource, readGgufSource } from "../../src/gguf/index.ts";
 import { readHfModel } from "../../src/hf/index.ts";
-import { checkIntraModel, loadPrecedence, loadRegistry, MAX_DIVERGENCE_PAIRS, resolveProfiles } from "../../src/registry/index.ts";
-import type { ExtractedTemplate, Finding, TemplateSource } from "../../src/types.ts";
+import { checkIntraModel, DIFF_BUDGET, loadPrecedence, loadRegistry, MAX_DIVERGENCE_PAIRS, MAX_PAIR_DIFF_INPUT, MAX_STORED_DIFF, resolveProfiles } from "../../src/registry/index.ts";
+import { makeTemplateFromString } from "../../src/template.ts";
+import type { ExtractedTemplate, Finding, ModelRecord, TemplateSource } from "../../src/types.ts";
 import { buildGguf, str } from "../gguf/builder.ts";
 import { makeTree, removeTrees } from "../helpers/tree.ts";
 
@@ -140,6 +141,76 @@ describe("ISC-7.5 edge cases", () => {
     const summary = findings.at(-1)! as Finding;
     expect(summary.detail).toEqual({ suppressed: total - MAX_DIVERGENCE_PAIRS });
     expect(model.templates.filter((t) => !t.shadowed)).toHaveLength(1);
+  });
+});
+
+describe("ISC-7.5 memory bound (review round 1, C5)", () => {
+  // n same-name GGUF templates, each `units` UTF-16 units of single-letter lines, so every pair differs on every line.
+  const letters = (n: number, units: number): ModelRecord => ({
+    format: "gguf",
+    id: "/m/x.gguf",
+    paths: ["/m/x.gguf"],
+    templates: Array.from({ length: n }, (_, k) =>
+      makeTemplateFromString({ kind: "gguf", path: "/m/x.gguf", realPath: "/m/x.gguf", name: "default", key: "tokenizer.chat_template" }, `${String.fromCharCode(97 + k)}\n`.repeat(units / 2)),
+    ),
+    hints: {},
+    specialTokens: [],
+    extractionComplete: true,
+    findings: [],
+  });
+
+  test("a pair over MAX_PAIR_DIFF_INPUT reports without a diff", () => {
+    const [f, ...rest] = checkIntraModel(letters(2, MAX_PAIR_DIFF_INPUT / 2 + 2), table);
+    expect(rest).toEqual([]);
+    expect(f!.severity).toBe("MEDIUM");
+    expect(detail(f!).diff).toMatch(new RegExp(`^--- .*\n\\+\\+\\+ .*\n@@ not diffed: \\d+ and \\d+ UTF-16 units, over the ${MAX_PAIR_DIFF_INPUT}-unit limit for one pair @@\n$`));
+    expect(f!.detail!.diffComplete).toBe(false);
+    expect(f!.span).toEqual({ start: 0, end: 1, line: 1, col: 1 });
+  });
+
+  test("once the model's diff budget is spent, the remaining pairs report without a diff", () => {
+    const units = MAX_PAIR_DIFF_INPUT / 4;
+    const findings = checkIntraModel(letters(9, units), table);
+    // 9 templates make 36 differing pairs: 32 compared, then one summary for the other 4.
+    expect(findings).toHaveLength(MAX_DIVERGENCE_PAIRS + 1);
+    const pairs = findings.slice(0, -1);
+    const diffed = pairs.filter((f) => !detail(f).diff.includes("@@ not diffed"));
+    expect(diffed).toHaveLength(Math.floor(DIFF_BUDGET / (2 * units)));
+    for (const f of pairs.slice(diffed.length)) expect(detail(f).diff).toEndWith(`@@ not diffed: this model's diff budget of ${DIFF_BUDGET} UTF-16 units is spent @@\n`);
+    // Every stored diff, diffed or not, stays within MAX_STORED_DIFF plus its marker line.
+    for (const f of pairs) expect(detail(f).diff.length).toBeLessThan(MAX_STORED_DIFF + 100);
+  });
+
+  test("a long diff is cut at a line end and marked, keeping the start of the full diff", () => {
+    const a = Array.from({ length: 20_000 }, (_, i) => `line ${i}\n`).join("");
+    const b = a.replace(/line/g, "LINE");
+    const src = (key: string): TemplateSource => ({ kind: "gguf", path: "/m/x.gguf", realPath: "/m/x.gguf", name: "default", key });
+    const model = { ...letters(0, 0), templates: [makeTemplateFromString(src("tokenizer.chat_template"), a), makeTemplateFromString(src("tokenizer.chat_template"), b)] };
+    const [f] = checkIntraModel(model, table);
+    const full = unifiedDiff(a, b, "/m/x.gguf:tokenizer.chat_template (first)", "/m/x.gguf:tokenizer.chat_template (second)");
+    const d = detail(f!).diff;
+    expect(full.length).toBeGreaterThan(MAX_STORED_DIFF);
+    expect(f!.detail!.diffComplete).toBe(false);
+    const [, kept, total] = /@@ diff truncated: (\d+) of (\d+) UTF-16 units shown @@\n$/.exec(d)!;
+    expect(Number(total)).toBe(full.length);
+    expect(Number(kept)).toBeLessThanOrEqual(MAX_STORED_DIFF);
+    expect(d.slice(0, Number(kept))).toBe(full.slice(0, Number(kept)));
+    expect(full[Number(kept) - 1]).toBe("\n");
+  });
+
+  test("a small diff is stored whole", async () => {
+    const model = await readHfModel(join(import.meta.dir, "fixtures/every-source"));
+    for (const f of checkIntraModel(model, table)) expect(f.detail!.diffComplete).toBe(true);
+  });
+
+  test("the span is b's first differing line, with lines broken as LineMap breaks them", () => {
+    const src: TemplateSource = { kind: "gguf", path: "/m/x.gguf", realPath: "/m/x.gguf", name: "default", key: "tokenizer.chat_template" };
+    const model = { ...letters(0, 0), templates: [makeTemplateFromString(src, "a\rb\r\nc d\ne"), makeTemplateFromString(src, "a\rb\r\nc D\ne")] };
+    const [f] = checkIntraModel(model, table);
+    expect(f!.span).toEqual({ start: 5, end: 8, line: 3, col: 1 });
+    expect(f!.excerpt).toBe("c D");
+    const crlf = { ...model, templates: [makeTemplateFromString(src, "x\r"), makeTemplateFromString(src, "x\r\ny")] };
+    expect(checkIntraModel(crlf, table)[0]!.excerpt).toBe("x");
   });
 });
 

@@ -100,7 +100,7 @@ describe("checked-in registry (ISC-24.1)", () => {
       }
       expect(code).not.toMatch(/import\s+\*|import\s*\(|require\s*\(|\bBun\.|\bfetch\s*\(|\bprocess\.|\bDeno\./);
       // Relative imports are other read-only modules, never the filesystem helpers in hf/ or gguf/ that open files.
-      for (const [, from] of code.matchAll(/from\s+"(\.[^"]+)"/g)) expect(["../diff.ts", "../gguf/templates.ts", "../hf/cache.ts", "../parse/support.ts", "../rules/finalize.ts", "../types.ts", "../whitespace.ts"]).toContain(from!);
+      for (const [, from] of code.matchAll(/from\s+"(\.[^"]+)"/g)) expect(["../diff.ts", "../gguf/templates.ts", "../hf/cache.ts", "../rules/finalize.ts", "../types.ts", "../whitespace.ts"]).toContain(from!);
     }
   });
 });
