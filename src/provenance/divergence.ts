@@ -10,22 +10,26 @@
 // 2. else MEDIUM when any literal (text between tags, a string literal or a
 //    number inside one) was added, changed or removed. A changed number is a
 //    changed threshold, which no fixed probe set can show harmless (Decisions 19:15);
-// 3. else the rewrite changes control flow only. It is LOW only when the
-//    sandboxed renderer gives identical output for both texts on every probe that
-//    renders, and every conversation shape renders at least once. A probe both
-//    texts refuse with the same render_error message counts as identical but not
-//    as rendered. With no renderer, an incomplete analysis or any other failed
-//    render it cannot be shown harmless, so it stays MEDIUM (fail closed).
+// 3. else the rewrite changes control flow only. It is LOW only when it adds no
+//    test on content or on the clock or chance (conditions.ts, Decisions 20:55): a
+//    fixed probe set never sends the one message such a test waits for. Then the
+//    sandboxed renderer must give identical output for both texts on every probe
+//    that renders, and every conversation shape must render at least once. A probe
+//    both texts refuse with the same render_error message counts as identical but
+//    not as rendered. With no renderer, an incomplete analysis, tests that cannot
+//    be classified or any other failed render it cannot be shown harmless, so it
+//    stays MEDIUM (fail closed).
 //
 // A whitespace-only difference is the ISC-24.2 variant and gives no finding, and
 // so does a `none` baseline.
 
 import { diffLines, type LineDiff, unifiedDiff } from "../diff.ts";
+import { type AddedTest, addedTests } from "./conditions.ts";
 import { WHOLE_TEMPLATE } from "../parse/parse.ts";
 import { preLex } from "../parse/prelexer.ts";
 import { LineMap } from "../parse/support.ts";
 import { clip } from "../rules/finalize.ts";
-import { sameIgnoringWhitespace, whitespaceKey } from "../whitespace.ts";
+import { isTemplateSpace, sameIgnoringWhitespace, whitespaceKey } from "../whitespace.ts";
 import type { Baseline, ExtractedTemplate, Finding, RenderRequest, Renderer, RuleResult, Severity, Span } from "../types.ts";
 import { SEVERITY_RANK } from "../types.ts";
 
@@ -61,6 +65,7 @@ export async function registryDivergence(
   let severity: Severity;
   let reason: string;
   let probes: Record<string, unknown> | undefined;
+  let added: AddedTest[] | undefined;
   if (hits.length > 0) {
     severity = hits.reduce<Severity>((s, f) => (SEVERITY_RANK[f.severity] > SEVERITY_RANK[s] ? f.severity : s), "LOW");
     const ids = [...new Set(hits.map((f) => f.ruleId))];
@@ -69,12 +74,22 @@ export async function registryDivergence(
     severity = "MEDIUM";
     reason = "literal text or a number was added, changed or removed";
   } else {
-    const proof: Proof = !result?.complete ? { identical: false, why: analyzeError ? `analysis failed: ${analyzeError}` : "analysis incomplete" } : await sameOutput(base, template.text, renderer);
-    probes = proof;
-    severity = proof.identical ? "LOW" : "MEDIUM";
-    reason = proof.identical
-      ? `control flow only, with identical output on ${proof.rendered} of ${proof.total} probes${proof.skipped ? ` (${proof.skipped} refused identically by both)` : ""}`
-      : `control flow only, but identical output could not be shown: ${proof.why}`;
+    added = result?.complete ? addedTests(base, template.text, diff) : undefined;
+    const first = added?.[0];
+    if (result?.complete && !added) {
+      severity = "MEDIUM";
+      reason = "control flow only, but the tests it changed could not be classified";
+    } else if (first) {
+      severity = "MEDIUM";
+      reason = `control flow only, but the rewrite adds a ${first.cls} test: \`${first.excerpt}\` (line ${first.span.line})`;
+    } else {
+      const proof: Proof = !result?.complete ? { identical: false, why: analyzeError ? `analysis failed: ${analyzeError}` : "analysis incomplete" } : await sameOutput(base, template.text, renderer);
+      probes = proof;
+      severity = proof.identical ? "LOW" : "MEDIUM";
+      reason = proof.identical
+        ? `control flow only, with identical output on ${proof.rendered} of ${proof.total} probes${proof.skipped ? ` (${proof.skipped} refused identically by both)` : ""}`
+        : `control flow only, but identical output could not be shown: ${proof.why}`;
+    }
   }
 
   const span = firstChange(template.text, diff);
@@ -93,6 +108,7 @@ export async function registryDivergence(
         diff: unifiedDiff(base, template.text, `${baseline.kind}: ${label(baseline)}`, `${template.source.path} [${template.source.name}]`),
         coarse: diff.coarse,
         rules: hits.slice(0, MAX_RULES_LISTED).map((f) => ({ ruleId: f.ruleId, severity: f.severity, message: f.message, span: f.span })),
+        ...(added?.length ? { tests: added.slice(0, MAX_RULES_LISTED).map((t) => ({ class: t.cls, span: t.span, excerpt: t.excerpt })) } : {}),
         ...(probes ? { probes } : {}),
         ...(analyzeError ? { analyzeError } : {}),
       },
@@ -155,18 +171,22 @@ function overlaps(span: Span, r: { start: number; end: number }): boolean {
 
 // Each text run and string literal reduced to its ASCII-whitespace-separated runs, so moving text between a raw
 // run and a string literal, or re-indenting it, is not a literal change; whether such an edit changes output
-// is the renderer's to show. Numbers are kept as written.
+// is the renderer's to show. A run or string of whitespace alone (the newline a `-%}` trims) has no runs and is
+// left out: whitespaceKey hashes even an empty text, so its key alone cannot say so (review round 2, Gemini N3).
+// Numbers are kept as written.
 function literals(text: string): string[] | undefined {
   if (text.length > MAX_LITERAL_UNITS) return undefined;
   const out: string[] = [];
   for (const t of preLex(text).tokens) {
     if (t.type === "number") out.push(`#${t.value}`);
-    else if (t.type === "text" || t.type === "string") {
-      const runs = whitespaceKey(t.value);
-      if (runs) out.push(runs);
-    }
+    else if ((t.type === "text" || t.type === "string") && !allSpace(t.value)) out.push(whitespaceKey(t.value));
   }
   return out;
+}
+
+function allSpace(s: string): boolean {
+  for (let i = 0; i < s.length; i++) if (!isTemplateSpace(s.charCodeAt(i))) return false;
+  return true;
 }
 
 function literalsChanged(a: string, b: string): boolean {

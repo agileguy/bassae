@@ -178,6 +178,10 @@ export class HubClient {
    * The first `length` bytes of a file at the pinned commit, and the file's full size, by one
    * Range request. The hub must answer 206 from the pinned commit, with a Content-Range for
    * exactly those bytes and a size that agrees with the one it linked.
+   *
+   * Unlike file(), the bytes are not checked against the etag: for a GGUF that is the SHA-256 of
+   * the whole file, and a prefix cannot be hashed to it. That they are the pinned commit's bytes
+   * rests on TLS to the hub's hosts and the x-repo-commit header alone.
    */
   async range(repo: string, revision: string, path: string, length: number): Promise<{ bytes: Uint8Array; size: number }> {
     const rev = pinned(repo, revision);
@@ -363,6 +367,8 @@ function verifyEtag(url: string, body: Uint8Array, etag: string): void {
 }
 
 // Only https, and only the hub's own hosts: the resolve endpoint redirects to itself and, for LFS files, to its CDN.
+// Any host under huggingface.co or hf.co is trusted, not the CDN hosts alone; a subdomain the hub
+// does not control is an accepted limit (Decisions 20:55).
 function redirectTarget(from: string, location: string | null): string {
   if (!location) throw new UpstreamError(`${from}: redirect without a Location`);
   let next: URL;

@@ -145,6 +145,11 @@ async function everyFile(dir: string, max: number, findings: Finding[]): Promise
 }
 
 // snapshots/<rev>/<path> -> <repo folder>/blobs/<etag>, read one hop and resolved against the real directory.
+// In a snapshot the blob must be its own repo's: another repo's blob records another download, so a link
+// into it vouches for nothing here and the file is left to unrecordedSnapshotFile. The folders are compared
+// as real paths, so an absolute link through a linked cache root still counts as its own. Outside a snapshot
+// (a local_dir that older huggingface_hub filled with links into the cache) the file names no repo of its
+// own, and a blob in any repo folder is checked against its name.
 async function blobExpectation(file: string, realDir: string): Promise<Expectation[]> {
   const st = await lstat(file);
   if (!st.isSymbolicLink()) return [];
@@ -153,7 +158,18 @@ async function blobExpectation(file: string, realDir: string): Promise<Expectati
   const blobs = dirname(target);
   const algorithm = algorithmOf(name);
   if (!algorithm || basename(blobs) !== "blobs" || !REPO_FOLDER.test(basename(dirname(blobs)))) return [];
+  const own = repoFolderOf(realDir);
+  if (own !== undefined && (await realpath(dirname(blobs))) !== own) return [];
   return [{ record: "hf-cache-blob", recordPath: target, algorithm, expected: name }];
+}
+
+// <cache>/models--<org>--<name> for a real directory inside one of its commit snapshots; innermost wins, as in parseHfCachePath.
+function repoFolderOf(realDir: string): string | undefined {
+  const parts = realDir.split("/");
+  for (let i = parts.length - 3; i >= 0; i--) {
+    if (REPO_FOLDER.test(parts[i]!) && parts[i + 1] === "snapshots" && SHA1_HEX.test(parts[i + 2]!)) return parts.slice(0, i + 1).join("/");
+  }
+  return undefined;
 }
 
 // <local_dir>/.cache/huggingface/download/<path>.metadata for the nearest ancestor that has the folder.
