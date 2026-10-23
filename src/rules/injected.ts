@@ -39,6 +39,7 @@ import {
   condOf,
   elementField,
   factsFrom,
+  FLAG_FILTERS,
   genPolarity,
   isRuntime,
   KEY_FIELD,
@@ -339,7 +340,7 @@ class Interp {
     const sa = new State(c.st);
     const body: Ctx = { ...c, cond, subject, fresh: false, st: sb, facts: factsFrom(test, true, c.facts) };
     const alt: Ctx = { ...c, cond, subject, fresh: false, st: sa, facts: factsFrom(test, false, c.facts) };
-    const polarity = genPolarity(test);
+    const polarity = genPolarity(test, (x) => (x.type === "Identifier" || x.type === "MemberExpression") && this.eval(x, c).genFlag === true);
     if (polarity) {
       let id = this.genIds.get(s);
       if (id === undefined) this.genIds.set(s, (id = this.genIds.size));
@@ -638,7 +639,9 @@ class Interp {
       case "FilterExpression": {
         const o = this.eval(node.operand, c);
         const f = node.filter as Node;
-        return this.applyFilter(o, filterName(f), filterArgs(f), c, f);
+        const v = this.applyFilter(o, filterName(f), filterArgs(f), c, f);
+        // `add_generation_prompt|default(false)` is still the flag.
+        return o.genFlag && FLAG_FILTERS.has(filterName(f)) ? { ...v, genFlag: true } : v;
       }
       case "TestExpression":
         return boolVal(this.testClass(node, c));
@@ -726,7 +729,8 @@ class Interp {
     // The clock and chance are values too: `set f = strftime_now` then `f()`.
     if (NONDET_FNS.has(name)) return { ...EMPTY, fns: [name] };
     if (BUILTINS.has(name)) return EMPTY;
-    return refine(runtimeVal(rootField(name), name), name, c);
+    const v = refine(runtimeVal(rootField(name), name), name, c);
+    return name === "add_generation_prompt" ? { ...v, genFlag: true } : v;
   }
 
   private member(n: Node, c: Ctx): Val {
@@ -1442,6 +1446,7 @@ function join(a: Val, b: Val): Val {
     ns: a.ns === b.ns ? a.ns : undefined,
     macro: a.macro === b.macro ? a.macro : undefined,
     fns: a.fns || b.fns ? [...new Set([...(a.fns ?? []), ...(b.fns ?? [])])].sort() : undefined,
+    genFlag: a.genFlag && b.genFlag ? true : undefined,
     pairs: a.pairs && b.pairs ? true : undefined,
     nsInit: a.nsInit ?? b.nsInit,
   };
@@ -1451,7 +1456,7 @@ function sameVal(a: Val, b: Val): boolean {
   if (a.lits.length !== b.lits.length || (a.keys?.length ?? 0) !== (b.keys?.length ?? 0)) return false;
   if (a.data !== b.data || a.truth !== b.truth || a.gate?.test !== b.gate?.test) return false;
   if (!sameFields(a.fields, b.fields) || a.konst !== b.konst || a.ns !== b.ns || a.macro !== b.macro || a.pairs !== b.pairs) return false;
-  if (String(a.fns) !== String(b.fns)) return false;
+  if (String(a.fns) !== String(b.fns) || a.genFlag !== b.genFlag) return false;
   if ((a.konstList === undefined) !== (b.konstList === undefined)) return false;
   for (let i = 0; i < a.lits.length; i++) if (a.lits[i]!.cond?.test !== b.lits[i]!.cond?.test) return false;
   return true;
@@ -1638,10 +1643,15 @@ interface TrieNode {
   bare?: boolean;
 }
 
-/** The residue of a literal: the non-scaffolding runs that hold a letter or digit, and where the last scaffolding match ended. */
+// An assistant role in a header: `assistant`, `<|assistant|>`, Gemma's
+// `model`, ShareGPT's `gpt`, `bot`.
+const ASSISTANT_ROLE = /(?:^|[^\p{L}\p{N}])(?:assistant|model|gpt|bot)(?:$|[^\p{L}\p{N}])/iu;
+
+/** The residue of a literal: the non-scaffolding runs that hold a letter or digit, where the first scaffolding match ends, and where the last one naming the assistant ends (-1 for none). */
 export interface Residue {
   frags: [number, number][];
-  lastPieceEnd: number;
+  firstPieceEnd: number;
+  assistantEnd: number;
 }
 
 // Word characters for the boundary rule, by UTF-16 unit. A surrogate half is
@@ -1693,7 +1703,8 @@ export class Scaffold {
     const hit = this.cache.get(text);
     if (hit) return hit;
     const frags: [number, number][] = [];
-    let lastPieceEnd = -1;
+    let firstPieceEnd = -1;
+    let assistantEnd = -1;
     let segStart = 0;
     let i = 0;
     const n = text.length;
@@ -1718,13 +1729,14 @@ export class Scaffold {
       }
       if (matchEnd > i) {
         pushFrag(text, segStart, i, frags);
-        lastPieceEnd = matchEnd;
+        if (firstPieceEnd < 0) firstPieceEnd = matchEnd;
+        if (ASSISTANT_ROLE.test(text.slice(i, matchEnd))) assistantEnd = matchEnd;
         i = matchEnd;
         segStart = i;
       } else i++;
     }
     pushFrag(text, segStart, n, frags);
-    const r = { frags, lastPieceEnd };
+    const r = { frags, firstPieceEnd, assistantEnd };
     if (this.cache.size < 100_000) this.cache.set(text, r);
     return r;
   }
@@ -1751,11 +1763,16 @@ function pushFrag(text: string, s: number, e: number, out: [number, number][]): 
 // ---- items ----
 
 /**
- * Turn the ordered output literals into injected-text items. The generation-
- * prompt marker is the first literal emitted in an `add_generation_prompt`
- * branch: residue after its last scaffolding match, and every literal emitted
- * after it in program order, is prefilled assistant text (ISC-17.2). The
- * branch's `else` is exclusive with it and is never after it.
+ * Turn the ordered output literals into injected-text items. Residue after an
+ * assistant header the prompt ends in is prefilled assistant text (ISC-17.2):
+ * - The generation prompt's header is the first literal emitted in an
+ *   `add_generation_prompt` branch. Residue after its first scaffolding match
+ *   (a scripted `<think>` inside the header literal), and every literal
+ *   emitted after it in program order, is prefill. A header literal with no
+ *   scaffolding is all header (`### Response:`). The branch's `else` is
+ *   exclusive with it and is never after it.
+ * - An assistant header left open: the last one in program order, when no
+ *   token after it ends the turn or starts another, whatever test gates it.
  */
 export function toItems(lits: Lit[], matcher: Scaffold): InjectedText[] {
   const items = new Map<string, InjectedText>();
@@ -1778,20 +1795,57 @@ export function toItems(lits: Lit[], matcher: Scaffold): InjectedText[] {
     if (!routed) direct.add(key);
     items.set(key, { text, span: l.span, condition: cond ? { span: cond.span, test: cond.test } : undefined, afterGenerationPrompt: afterGen });
   };
-  for (const l of lits) {
-    const r = matcher.residue(l.text);
+  const res = lits.map((l) => matcher.residue(l.text));
+  const open = openHeader(lits, res);
+  const openGen = open && lits[open.index]!.gen;
+  for (let i = 0; i < lits.length; i++) {
+    const l = lits[i]!;
+    const r = res[i]!;
     if (l.genElse !== undefined && seen.has(l.genElse)) {
       add(l, r.frags, false);
-    } else if (l.gen !== undefined && !seen.has(l.gen)) {
-      seen.add(l.gen);
-      const cut = r.lastPieceEnd >= 0 ? r.lastPieceEnd : l.text.length;
-      add(l, r.frags.filter((f) => f[0] < cut), after);
-      add(l, r.frags.filter((f) => f[0] >= cut), true);
-      after = true;
-    } else {
-      add(l, r.frags, after);
+      continue;
     }
+    // Residue from `cut` on is prefill.
+    let cut = after ? 0 : Infinity;
+    if (l.gen !== undefined && !seen.has(l.gen) && WORDISH.test(l.text)) {
+      seen.add(l.gen);
+      cut = Math.min(cut, r.firstPieceEnd >= 0 ? r.firstPieceEnd : l.text.length);
+      after = true;
+    }
+    if (open && i === open.index) cut = Math.min(cut, open.at);
+    else if (open && i > open.index && (openGen === undefined || l.genElse !== openGen)) cut = 0;
+    add(l, r.frags.filter((f) => f[0] < cut), false);
+    add(l, r.frags.filter((f) => f[0] >= cut), true);
   }
   return [...items.values()];
+}
+
+// A token-shaped string, and the names that end a turn or start another
+// (`<|im_end|>`, `<end_of_turn>`, `<|eot_id|>`, `<turn|>`, `<|im_start|>`,
+// `<|start_header_id|>`, `<|user|>`). `<|end_header_id|>` and
+// `<|end_of_role|>` close a role name, not a turn.
+const TOKEN = /<\/s>|<[^<>\s]{1,48}>/gu;
+const TURN_EDGE = /end|eot|eos|eom|return|start|turn|user|system|human|observation/i;
+
+function closesTurn(text: string): boolean {
+  for (const m of text.matchAll(TOKEN)) {
+    const t = m[0];
+    if (t === "</s>") return true;
+    if (/header|role/i.test(t) && !/start/i.test(t)) continue;
+    if (TURN_EDGE.test(t)) return true;
+  }
+  return false;
+}
+
+// The last assistant header in program order, and where it ends, unless a
+// token after it closes the turn.
+function openHeader(lits: Lit[], res: Residue[]): { index: number; at: number } | undefined {
+  for (let i = lits.length - 1; i >= 0; i--) {
+    const text = lits[i]!.text;
+    const at = res[i]!.assistantEnd;
+    if (at >= 0) return closesTurn(text.slice(at)) ? undefined : { index: i, at };
+    if (closesTurn(text)) return undefined;
+  }
+  return undefined;
 }
 
