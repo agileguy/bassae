@@ -10,13 +10,13 @@ import { analyzeInjection, buildScaffolding } from "../../src/rules/injection.ts
 import { createRenderer, sandboxAvailable } from "../../src/sandbox/index.ts";
 import { makeTemplateFromString } from "../../src/template.ts";
 import type { Baseline, ExtractedTemplate, KnownGoodTemplate, ModelRecord, Renderer, RenderRequest, RenderResult, RuleResult } from "../../src/types.ts";
+import { RENDER_TEMPLATES, recordedRenderer } from "./recorded.ts";
 
 const status = await sandboxAvailable();
 const live = status.available;
 if (!live) console.warn(`\n[sandbox] SKIPPING live divergence probes: ${status.reason}\n`);
 
-const CHATML =
-  "{% for message in messages %}<|im_start|>{{ message.role }}\n{{ message.content }}<|im_end|>\n{% endfor %}\n{% if add_generation_prompt %}<|im_start|>assistant\n{% endif %}";
+const { CHATML, RENAMED, TOOL_GATED, STRICT, STRICT_RENAMED } = RENDER_TEMPLATES;
 
 const tpl = (text: string, name = "default"): ExtractedTemplate => makeTemplateFromString({ kind: "bare", path: "/models/x/chat_template.jinja", realPath: "/models/x/chat_template.jinja", name }, text);
 
@@ -43,10 +43,7 @@ function stubRenderer(answer: (template: string, r: RenderRequest) => RenderResu
 }
 const echo = stubRenderer((_, q) => ({ id: q.id, ok: true, output: `rendered ${q.id}` }));
 
-// Same literals, same output: the loop variable is renamed.
-const RENAMED = CHATML.replaceAll("message.", "m.").replace("for message in", "for m in");
-// Same literals, different output on long conversations: a length gate.
-const GATED = CHATML.replace("{% for message in messages %}", "{% for message in messages %}{% if loop.index < 40 %}").replace("{% endfor %}", "{% endif %}{% endfor %}");
+const TOTAL = probeRequests().length;
 
 describe("registryDivergence (ISC-25)", () => {
   test("index.ts exports the same function", () => {
@@ -146,7 +143,7 @@ describe("registryDivergence (ISC-25)", () => {
     const renderer = stubRenderer((_, q) => ({ id: q.id, ok: true, output: "a" }));
     const [f] = await registryDivergence(tpl(added), upstream(), quiet, renderer);
     expect(f).toMatchObject({ ruleId: "registry_divergence", severity: "MEDIUM" });
-    expect(f!.message).toContain("upstream Qwen/Qwen2.5-0.5B-Instruct@7ae5576 tokenizer_config.json [default]: literal text was added, changed or removed");
+    expect(f!.message).toContain("upstream Qwen/Qwen2.5-0.5B-Instruct@7ae5576 tokenizer_config.json [default]: literal text or a number was added, changed or removed");
     expect(f!.detail!.baseline).toEqual({ kind: "upstream", repo: "Qwen/Qwen2.5-0.5B-Instruct", revision: "7ae557604adf67be50417f59c2c2f167def9a775", path: "tokenizer_config.json", templateName: "default" });
     expect(renderer.calls).toBe(0);
   });
@@ -163,10 +160,26 @@ describe("registryDivergence (ISC-25)", () => {
     }
   });
 
+  test("a rewrite that changes only a number is MEDIUM, never LOW, even when every probe renders the same (Decisions 19:15)", async () => {
+    const gate = (n: string) => CHATML.replace("{% for message in messages %}", `{% for message in messages %}{% if message.content|length > ${n} %}`).replace("{% endfor %}", "{% endif %}{% endfor %}");
+    for (const [base, changed] of [
+      [gate("3000"), gate("30")],
+      [gate("3000"), gate("3000.0")],
+      [CHATML, CHATML.replace("{% if add_generation_prompt %}", "{% if add_generation_prompt and loop is undefined and 1 %}")],
+      [gate("3000"), CHATML],
+    ] as const) {
+      const [f] = await registryDivergence(tpl(changed), registry(base), quiet, echo);
+      expect(f).toMatchObject({ severity: "MEDIUM" });
+      expect(f!.message).toContain("literal text or a number was added, changed or removed");
+      expect(f!.detail!.probes).toBeUndefined();
+    }
+  });
+
   test("outcome 3 without a sandbox: a control-flow rewrite is LOW only when every probe renders the same", async () => {
     const [low] = await registryDivergence(tpl(RENAMED), registry(), quiet, echo);
     expect(low).toMatchObject({ severity: "LOW" });
-    expect(low!.message).toContain(`control flow only, with identical output on ${probeRequests().length} probes`);
+    expect(low!.message).toContain(`control flow only, with identical output on ${TOTAL} of ${TOTAL} probes`);
+    expect(low!.detail!.probes).toEqual({ identical: true, total: TOTAL, rendered: TOTAL, skipped: 0 });
 
     const differs = stubRenderer((t, q) => ({ id: q.id, ok: true, output: t === CHATML || !q.id.startsWith("long/") ? "same" : "other" }));
     const [medium] = await registryDivergence(tpl(RENAMED), registry(), quiet, differs);
@@ -191,18 +204,43 @@ describe("registryDivergence (ISC-25)", () => {
     }
   });
 
-  test("the same refusal in both texts is the same behavior; a different one is not", async () => {
-    const refuse = (msg: string) => stubRenderer((t, q) => (q.id.startsWith("chat/") ? { id: q.id, ok: false, failure: "render_error", message: t === CHATML ? "no system role" : msg } : { id: q.id, ok: true, output: "a" }));
-    expect((await registryDivergence(tpl(RENAMED), registry(), quiet, refuse("no system role")))[0]).toMatchObject({ severity: "LOW" });
+  test("the same refusal in both texts is the same behavior, counted as skipped; a different one is not", async () => {
+    const refuse = (msg: string) => stubRenderer((t, q) => (q.id.includes("/system/") ? { id: q.id, ok: false, failure: "render_error", message: t === CHATML ? "no system role" : msg } : { id: q.id, ok: true, output: "a" }));
+    const [low] = await registryDivergence(tpl(RENAMED), registry(), quiet, refuse("no system role"));
+    expect(low).toMatchObject({ severity: "LOW" });
+    expect(low!.detail!.probes).toEqual({ identical: true, total: TOTAL, rendered: TOTAL / 2, skipped: TOTAL / 2 });
+    expect(low!.message).toContain(`identical output on ${TOTAL / 2} of ${TOTAL} probes (${TOTAL / 2} refused identically by both)`);
     expect((await registryDivergence(tpl(RENAMED), registry(), quiet, refuse("other")))[0]).toMatchObject({ severity: "MEDIUM" });
-    const allRefused = stubRenderer((_, q) => ({ id: q.id, ok: false, failure: "render_error", message: "no" }));
-    expect((await registryDivergence(tpl(RENAMED), registry(), quiet, allRefused))[0]!.message).toContain("no probe rendered");
   });
 
-  test("the probe set covers every role, tools present and absent, add_generation_prompt both ways, three dates, both profiles", () => {
+  test("LOW needs every conversation shape to render at least once (Decisions 19:15)", async () => {
+    const refusing = (refused: (id: string) => boolean) => stubRenderer((_, q) => (refused(q.id) ? { id: q.id, ok: false, failure: "render_error", message: "System role not supported" } : { id: q.id, ok: true, output: "a" }));
+    // A whole shape refused by both, every variant of it.
+    const [chat] = await registryDivergence(tpl(RENAMED), registry(), quiet, refusing((id) => id.startsWith("chat/")));
+    expect(chat).toMatchObject({ severity: "MEDIUM" });
+    expect(chat!.message).toContain("no probe of shape chat rendered");
+    expect(chat!.detail!.probes).toMatchObject({ identical: false, unrendered: ["chat"], rendered: TOTAL - TOTAL / 5, skipped: TOTAL / 5 });
+    // A single probe rendering proves nothing about the rest.
+    const first = probeRequests()[0]!.id;
+    const [one] = await registryDivergence(tpl(RENAMED), registry(), quiet, refusing((id) => id !== first));
+    expect(one).toMatchObject({ severity: "MEDIUM" });
+    expect(one!.detail!.probes).toMatchObject({ identical: false, rendered: 1, skipped: TOTAL - 1, unrendered: ["chat", "tool", "long", "long-content"] });
+    const [none] = await registryDivergence(tpl(RENAMED), registry(), quiet, refusing(() => true));
+    expect(none!.message).toContain("no probe of shape one, chat, tool, long, long-content rendered");
+  });
+
+  test("the probe set covers five shapes with and without a system turn, every role, long content, tools present and absent, add_generation_prompt both ways, three dates, both profiles", () => {
     const probes = probeRequests();
+    expect(probes).toHaveLength(240);
     expect(new Set(probes.map((p) => p.id)).size).toBe(probes.length);
-    const roles = new Set(probes.flatMap((p) => (p.context.messages as { role: string }[]).map((m) => m.role)));
+    expect(new Set(probes.map((p) => p.id.split("/")[0]))).toEqual(new Set(["one", "chat", "tool", "long", "long-content"]));
+    const messages = (p: RenderRequest) => p.context.messages as { role: string; content?: string }[];
+    expect(new Set(probes.map((p) => messages(p)[0]!.role === "system"))).toEqual(new Set([true, false]));
+    // Every shape is probed both ways, so a template that refuses system turns still renders each shape.
+    for (const p of probes) expect(messages(p)[0]!.role === "system").toBe(p.id.includes("/system/"));
+    expect(Math.max(...probes.flatMap((p) => messages(p).map((m) => m.content?.length ?? 0)))).toBeGreaterThan(8192);
+    expect(Math.max(...probes.map((p) => messages(p).length))).toBeGreaterThan(40);
+    const roles = new Set(probes.flatMap((p) => messages(p).map((m) => m.role)));
     expect([...roles].sort()).toEqual(["assistant", "system", "tool", "user"]);
     expect(new Set(probes.map((p) => "tools" in p.context))).toEqual(new Set([true, false]));
     expect(new Set(probes.map((p) => p.context.add_generation_prompt))).toEqual(new Set([true, false]));
@@ -223,25 +261,47 @@ describe("registryDivergence (ISC-25)", () => {
   });
 });
 
+// Outcome 3 end to end, once on renders recorded from the sandbox (so it runs in CI) and once live.
+function outcome3(name: string, renderer: () => Renderer) {
+  test(`${name}: a renamed loop variable renders identically on every probe: LOW`, async () => {
+    const [f] = await registryDivergence(tpl(RENAMED), registry(), codeExec, renderer());
+    expect(f).toMatchObject({ ruleId: "registry_divergence", severity: "LOW" });
+    expect(f!.detail!.probes).toEqual({ identical: true, total: TOTAL, rendered: TOTAL, skipped: 0 });
+  }, 60_000);
+
+  test(`${name}: a gate with no new literal changes only the tool shape's output: MEDIUM`, async () => {
+    const [f] = await registryDivergence(tpl(TOOL_GATED), registry(), codeExec, renderer());
+    expect(f).toMatchObject({ severity: "MEDIUM" });
+    expect(f!.message).toContain("control flow only, but identical output could not be shown: output differs");
+    expect(f!.detail!.probes).toMatchObject({ identical: false, why: "output differs", probe: expect.stringMatching(/^tool\//) });
+  }, 60_000);
+
+  test(`${name}: a trusted template's own refusal of system turns, kept by the rewrite, still allows LOW on the system-less probes`, async () => {
+    const [f] = await registryDivergence(tpl(STRICT_RENAMED), registry(STRICT), codeExec, renderer());
+    expect(f).toMatchObject({ severity: "LOW" });
+    expect(f!.detail!.probes).toEqual({ identical: true, total: TOTAL, rendered: TOTAL / 2, skipped: TOTAL / 2 });
+  }, 60_000);
+}
+
+describe("registryDivergence on recorded sandbox renders (ISC-25, outcome 3)", () => {
+  outcome3("recorded", () => recordedRenderer());
+
+  test("the recorded renderer refuses a template or probe set it was not recorded with", async () => {
+    await expect(recordedRenderer().renderBatch("{{ unknown }}", probeRequests())).rejects.toThrow("no recorded renders");
+    await expect(recordedRenderer().renderBatch(CHATML, probeRequests().slice(1))).rejects.toThrow("the probe set changed");
+  });
+});
+
 describe.skipIf(!live)("registryDivergence with the sandbox (ISC-25, outcome 3)", () => {
   const renderer = createRenderer();
+  outcome3("live", () => renderer);
 
-  test("a renamed loop variable renders identically on every probe: LOW", async () => {
-    const [f] = await registryDivergence(tpl(RENAMED), registry(), codeExec, renderer);
-    expect(f).toMatchObject({ ruleId: "registry_divergence", severity: "LOW" });
-    expect(f!.detail!.probes).toEqual({ identical: true, count: probeRequests().length });
-  }, 60_000);
-
-  test("a length gate with no new literal changes the long probe's output: MEDIUM", async () => {
-    const [f] = await registryDivergence(tpl(GATED), registry(), codeExec, renderer);
-    expect(f).toMatchObject({ severity: "MEDIUM" });
-    expect(f!.detail!.probes).toMatchObject({ identical: false, why: "output differs", probe: expect.stringMatching(/^long\//) });
-  }, 60_000);
-
-  test("a trusted template's own refusal, kept by the rewrite, still allows LOW", async () => {
-    const strict = `{% if messages[0].role == 'system' %}{{ raise_exception('System role not supported') }}{% endif %}${CHATML}`;
-    const rewritten = strict.replaceAll("message.", "m.").replace("for message in", "for m in");
-    const [f] = await registryDivergence(tpl(rewritten), registry(strict), codeExec, renderer);
-    expect(f).toMatchObject({ severity: "LOW" });
-  }, 60_000);
+  test("the recording matches what the sandbox renders today", async () => {
+    const recorded = recordedRenderer();
+    for (const text of Object.values(RENDER_TEMPLATES)) {
+      const [want, got] = await Promise.all([recorded.renderBatch(text, probeRequests()), renderer.renderBatch(text, probeRequests())]);
+      const digest = (r: RenderResult) => (r.ok ? new Bun.CryptoHasher("sha256").update(r.output).digest("hex") : { failure: r.failure, message: r.message });
+      expect(got.map(digest)).toEqual(want.map((r) => (r.ok ? r.output : { failure: r.failure, message: r.message })));
+    }
+  }, 120_000);
 });

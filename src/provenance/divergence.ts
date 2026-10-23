@@ -7,12 +7,15 @@
 //    injected text a content_trigger gates (`detail.textSpan`) while its own span
 //    is the unchanged condition. A finding with no place in the text
 //    (unanalyzable, scanner_error) touches every change (Decisions 19:15);
-// 2. else MEDIUM when any literal text (text between tags, or a string literal
-//    inside one) was added, changed or removed;
+// 2. else MEDIUM when any literal (text between tags, a string literal or a
+//    number inside one) was added, changed or removed. A changed number is a
+//    changed threshold, which no fixed probe set can show harmless (Decisions 19:15);
 // 3. else the rewrite changes control flow only. It is LOW only when the
-//    sandboxed renderer gives identical output for both texts on every probe;
-//    with no renderer, an incomplete analysis or any failed render it cannot be
-//    shown harmless, so it stays MEDIUM (fail closed).
+//    sandboxed renderer gives identical output for both texts on every probe that
+//    renders, and every conversation shape renders at least once. A probe both
+//    texts refuse with the same render_error message counts as identical but not
+//    as rendered. With no renderer, an incomplete analysis or any other failed
+//    render it cannot be shown harmless, so it stays MEDIUM (fail closed).
 //
 // A whitespace-only difference is the ISC-24.2 variant and gives no finding, and
 // so does a `none` baseline.
@@ -22,7 +25,7 @@ import { WHOLE_TEMPLATE } from "../parse/parse.ts";
 import { preLex } from "../parse/prelexer.ts";
 import { LineMap } from "../parse/support.ts";
 import { clip } from "../rules/finalize.ts";
-import { sameIgnoringWhitespace } from "../whitespace.ts";
+import { sameIgnoringWhitespace, whitespaceKey } from "../whitespace.ts";
 import type { Baseline, ExtractedTemplate, Finding, RenderRequest, Renderer, RuleResult, Severity, Span } from "../types.ts";
 import { SEVERITY_RANK } from "../types.ts";
 
@@ -64,12 +67,14 @@ export async function registryDivergence(
     reason = `${ids.join(", ")} ${ids.length === 1 ? "fires" : "fire"} on added or changed lines`;
   } else if (literalsChanged(base, template.text)) {
     severity = "MEDIUM";
-    reason = "literal text was added, changed or removed";
+    reason = "literal text or a number was added, changed or removed";
   } else {
     const proof: Proof = !result?.complete ? { identical: false, why: analyzeError ? `analysis failed: ${analyzeError}` : "analysis incomplete" } : await sameOutput(base, template.text, renderer);
     probes = proof;
     severity = proof.identical ? "LOW" : "MEDIUM";
-    reason = proof.identical ? `control flow only, with identical output on ${proof.count} probes` : `control flow only, but identical output could not be shown: ${proof.why}`;
+    reason = proof.identical
+      ? `control flow only, with identical output on ${proof.rendered} of ${proof.total} probes${proof.skipped ? ` (${proof.skipped} refused identically by both)` : ""}`
+      : `control flow only, but identical output could not be shown: ${proof.why}`;
   }
 
   const span = firstChange(template.text, diff);
@@ -148,15 +153,18 @@ function overlaps(span: Span, r: { start: number; end: number }): boolean {
   return span.start < r.end && r.start < span.end;
 }
 
-// Each literal reduced to its non-whitespace runs, so moving text between a raw run and a string literal, or
-// re-indenting it, is not a literal change; whether such an edit changes output is the renderer's to show.
+// Each text run and string literal reduced to its ASCII-whitespace-separated runs, so moving text between a raw
+// run and a string literal, or re-indenting it, is not a literal change; whether such an edit changes output
+// is the renderer's to show. Numbers are kept as written.
 function literals(text: string): string[] | undefined {
   if (text.length > MAX_LITERAL_UNITS) return undefined;
   const out: string[] = [];
   for (const t of preLex(text).tokens) {
-    if (t.type !== "text" && t.type !== "string") continue;
-    const runs = t.value.split(/\s+/).filter(Boolean).join(" ");
-    if (runs) out.push(runs);
+    if (t.type === "number") out.push(`#${t.value}`);
+    else if (t.type === "text" || t.type === "string") {
+      const runs = whitespaceKey(t.value);
+      if (runs) out.push(runs);
+    }
   }
   return out;
 }
@@ -168,35 +176,48 @@ function literalsChanged(a: string, b: string): boolean {
   return la.length !== lb.length || la.some((s, i) => s !== lb[i]);
 }
 
-type Proof = { identical: true; count: number } | { identical: false; why: string; probe?: string };
+/** What the renderer showed. `rendered` probes gave identical output; `skipped` ones were refused identically by both texts. */
+type Proof =
+  | { identical: true; total: number; rendered: number; skipped: number }
+  | { identical: false; why: string; probe?: string; total?: number; rendered?: number; skipped?: number; unrendered?: string[] };
 
 async function sameOutput(a: string, b: string, renderer: Renderer | undefined): Promise<Proof> {
   if (!renderer) return { identical: false, why: "no renderer" };
   const requests = probeRequests();
+  const total = requests.length;
   let ra;
   let rb;
   try {
     [ra, rb] = await Promise.all([renderer.renderBatch(a, requests), renderer.renderBatch(b, requests)]);
   } catch (e) {
-    return { identical: false, why: `render failed: ${e instanceof Error ? e.message : String(e)}` };
+    return { identical: false, why: `render failed: ${e instanceof Error ? e.message : String(e)}`, total };
   }
-  if (ra.length !== requests.length || rb.length !== requests.length) return { identical: false, why: "the renderer answered a different number of probes" };
+  if (ra.length !== total || rb.length !== total) return { identical: false, why: "the renderer answered a different number of probes", total };
   let rendered = 0;
-  for (let i = 0; i < requests.length; i++) {
+  let skipped = 0;
+  const shapes = new Set<string>();
+  for (let i = 0; i < total; i++) {
     const x = ra[i]!;
     const y = rb[i]!;
     const id = requests[i]!.id;
-    if (x.id !== id || y.id !== id) return { identical: false, why: "the renderer answered probes out of order", probe: id };
+    const counts = { total, rendered, skipped, probe: id };
+    if (x.id !== id || y.id !== id) return { identical: false, why: "the renderer answered probes out of order", ...counts };
     // A trusted template may refuse a conversation on purpose (Gemma's raise_exception on a system turn). The
     // same refusal, word for word, is the same behavior; every other failure fails closed.
-    if (!x.ok && !y.ok && x.failure === "render_error" && y.failure === "render_error" && x.message === y.message) continue;
-    if (!x.ok) return { identical: false, why: `the baseline failed to render (${x.failure})`, probe: id };
-    if (!y.ok) return { identical: false, why: `the template failed to render (${y.failure})`, probe: id };
-    if (x.output !== y.output) return { identical: false, why: "output differs", probe: id };
+    if (!x.ok && !y.ok && x.failure === "render_error" && y.failure === "render_error" && x.message === y.message) {
+      skipped++;
+      continue;
+    }
+    if (!x.ok) return { identical: false, why: `the baseline failed to render (${x.failure})`, ...counts };
+    if (!y.ok) return { identical: false, why: `the template failed to render (${y.failure})`, ...counts };
+    if (x.output !== y.output) return { identical: false, why: "output differs", ...counts };
     rendered++;
+    shapes.add(shapeOf(id));
   }
-  if (rendered === 0) return { identical: false, why: "no probe rendered" };
-  return { identical: true, count: rendered };
+  // One rendered probe shows nothing about the shapes refused everywhere, so every shape must render somewhere.
+  const unrendered = SHAPE_NAMES.filter((name) => !shapes.has(name));
+  if (unrendered.length > 0) return { identical: false, why: `no probe of shape ${unrendered.join(", ")} rendered`, total, rendered, skipped, unrendered };
+  return { identical: true, total, rendered, skipped };
 }
 
 // ---- the probe set ----
@@ -222,30 +243,45 @@ const TOOLS = [
   },
 ];
 
-// One message, a short chat, a tool round trip, and fifty messages, so a gate on role, tool use or length is exercised.
-const CONVERSATIONS: Record<string, object[]> = {
+// Long enough to cross any content-length gate a stock template plausibly carries.
+const LONG_TEXT = "The quarterly report covers revenue, costs, hiring and the outlook for every region. ".repeat(150).trim();
+
+// The conversation shapes: one message, a short chat, a tool round trip, fifty messages and two very long
+// messages, so a gate on role, tool use, turn count or content length is exercised. Each also runs with a
+// system message first, since some templates refuse or reshape a system turn.
+const SHAPES: Record<string, object[]> = {
   one: [USER],
-  chat: [SYSTEM, USER, ASSISTANT, FOLLOW_UP],
-  tool: [SYSTEM, USER, TOOL_CALL, TOOL_RESULT, ASSISTANT],
-  long: [SYSTEM, ...Array.from({ length: 49 }, (_, i) => (i % 2 === 0 ? { role: "user", content: `Question ${i / 2 + 1}?` } : { role: "assistant", content: `Answer ${(i + 1) / 2}.` }))],
+  chat: [USER, ASSISTANT, FOLLOW_UP],
+  tool: [USER, TOOL_CALL, TOOL_RESULT, ASSISTANT],
+  long: Array.from({ length: 49 }, (_, i) => (i % 2 === 0 ? { role: "user", content: `Question ${i / 2 + 1}?` } : { role: "assistant", content: `Answer ${(i + 1) / 2}.` })),
+  "long-content": [
+    { role: "user", content: `Summarise this report. ${LONG_TEXT}` },
+    { role: "assistant", content: `Summary: ${LONG_TEXT}` },
+    FOLLOW_UP,
+  ],
 };
+const SHAPE_NAMES = Object.keys(SHAPES);
+const shapeOf = (id: string) => id.slice(0, id.indexOf("/"));
 // Ten years either side of now, so a date gate shows up as differing output.
 const DATES = ["2016-03-01T09:30:00Z", "2026-07-15T12:00:00Z", "2036-11-30T23:15:00Z"];
 
-/** Every conversation with tools present and absent and add_generation_prompt both ways, at three dates, under both environment profiles. */
+/** Every shape with and without a system message, tools present and absent, add_generation_prompt both ways, at three dates, under both environment profiles. Ids start with the shape name. */
 export function probeRequests(): RenderRequest[] {
   const out: RenderRequest[] = [];
-  for (const [name, messages] of Object.entries(CONVERSATIONS)) {
-    for (const tools of [false, true]) {
-      for (const add_generation_prompt of [false, true]) {
-        for (const now of DATES) {
-          for (const profile of ["hf-default", "jinja2-globals"] as const) {
-            out.push({
-              id: `${name}/${tools ? "tools" : "no-tools"}/${add_generation_prompt ? "gen" : "no-gen"}/${now.slice(0, 4)}/${profile}`,
-              context: { messages, add_generation_prompt, bos_token: "<s>", eos_token: "</s>", ...(tools ? { tools: TOOLS } : {}) },
-              profile,
-              now,
-            });
+  for (const [name, shape] of Object.entries(SHAPES)) {
+    for (const system of [false, true]) {
+      const messages = system ? [SYSTEM, ...shape] : shape;
+      for (const tools of [false, true]) {
+        for (const add_generation_prompt of [false, true]) {
+          for (const now of DATES) {
+            for (const profile of ["hf-default", "jinja2-globals"] as const) {
+              out.push({
+                id: `${name}/${system ? "system" : "no-system"}/${tools ? "tools" : "no-tools"}/${add_generation_prompt ? "gen" : "no-gen"}/${now.slice(0, 4)}/${profile}`,
+                context: { messages, add_generation_prompt, bos_token: "<s>", eos_token: "</s>", ...(tools ? { tools: TOOLS } : {}) },
+                profile,
+                now,
+              });
+            }
           }
         }
       }
