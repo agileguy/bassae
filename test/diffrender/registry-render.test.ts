@@ -2,8 +2,8 @@
 // registry template, scanned as if unknown (its own injected text and trigger candidates, no registry literals as
 // scaffolding), renders through the sandbox with zero render_divergence and zero env_profile_divergence.
 //
-// A template that cannot render every probe yet only because @huggingface/jinja lacks `reject` or `map` with a
-// filter name is pending the engine's polyfill, not failed; any other gap fails here.
+// A template may refuse a probe through its own raise_exception; any other gap fails here. The render worker
+// polyfills the jinja2 builtins the stock templates use (reject, positional map), so none is excused for those.
 
 import { describe, expect, test } from "bun:test";
 import { diffRender } from "../../src/diffrender/index.ts";
@@ -15,9 +15,6 @@ import { makeTemplateFromString } from "../../src/template.ts";
 import type { KnownGoodTemplate, ModelRecord, RenderResult, Renderer, TriggerCandidate } from "../../src/types.ts";
 
 const NO_TOKENS = { specialTokens: [] } as unknown as ModelRecord;
-
-/** The two engine gaps the polyfill closes, as the sandbox reports them. */
-const PENDING_POLYFILL = /^Error: (Unknown \w+ filter: reject|`map` expressions without `attribute` set are not currently supported\.)$/;
 
 /** A template's own raise_exception: the raised text is a literal in the template (the rule diffRender counts as refused). */
 const isRefusal = (r: RenderResult & { ok: false }, text: string) =>
@@ -37,7 +34,6 @@ describe.skipIf(!status.available)("registry templates through differential rend
     "every distinct registry template renders with zero render_divergence and zero env_profile_divergence",
     async () => {
       expect(templates.length).toBeGreaterThan(0);
-      const pending: string[] = [];
       const flagged: string[] = [];
       const gaps: string[] = [];
 
@@ -59,12 +55,10 @@ describe.skipIf(!status.available)("registry templates through differential rend
           if (["render_divergence", "env_profile_divergence", "render_dos", "scanner_error"].includes(f.ruleId)) flagged.push(`${name}: ${f.ruleId}: ${f.message}`);
         }
         if (r.complete) continue;
-        const unexplained = failures.filter((f) => !isRefusal(f, known.text) && !PENDING_POLYFILL.test(f.message));
-        if (unexplained.length === 0 && failures.length > 0) pending.push(name);
-        else gaps.push(`${name}: ${JSON.stringify(r.probes)} ${unexplained.map((f) => `${f.failure}: ${f.message}`).slice(0, 3).join(" | ")}`);
+        const unexplained = failures.filter((f) => !isRefusal(f, known.text));
+        gaps.push(`${name}: ${JSON.stringify(r.probes)} ${unexplained.map((f) => `${f.failure}: ${f.message}`).slice(0, 3).join(" | ")}`);
       }
 
-      if (pending.length) console.info(`[diffrender] ${templates.length} registry templates; pending the reject/map polyfill: ${pending.join(", ")}`);
       expect(flagged).toEqual([]);
       expect(gaps).toEqual([]);
     },
