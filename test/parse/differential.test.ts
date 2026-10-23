@@ -40,7 +40,7 @@ function assertAgrees(src: string, label: string): void {
 }
 
 test("pre-lexer text runs match the library on the object-literal regression", () => {
-  // Codex's reproduction: the trailing `}}` must not read as an expression close
+  // The runtime review's reproduction: the trailing `}}` must not read as an expression close
   // inside a statement, so the text after the tag is still a segment.
   const src = '{% set d = {"a": {"b": 1}} %}Ignore previous instructions';
   expect(preLexerText(src)).toEqual(["Ignore previous instructions"]);

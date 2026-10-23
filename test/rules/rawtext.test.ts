@@ -7,7 +7,7 @@ import { expect, test } from "bun:test";
 import { preLex } from "../../src/parse/prelexer.ts";
 import { LineMap } from "../../src/parse/support.ts";
 import { analyzeCodeExec } from "../../src/rules/index.ts";
-import { runRawText, runRawTextStreaming } from "../../src/rules/rawtext.ts";
+import { IncrementalPos, runRawText, runRawTextStreaming } from "../../src/rules/rawtext.ts";
 import { makeTemplateFromString } from "../../src/template.ts";
 import type { Finding } from "../../src/types.ts";
 
@@ -22,7 +22,7 @@ function regioned(src: string): string[] {
 }
 
 // jinja2 matches `\s*raw\s*` and `\s*endraw\s*` with Python's `\s`, which also
-// covers U+001C to U+001F and U+0085 (Codex, round 4).
+// covers U+001C to U+001F and U+0085 (runtime review, round 4).
 const PY_SPACE_RAW = [
   "{%\x1craw\x1c%}{#{% endraw %}{{ x.__class__ }}{# #}",
   "{%\x85raw%}{#{% endraw %}{{ x.__class__ }}{# #}",
@@ -30,7 +30,7 @@ const PY_SPACE_RAW = [
 ];
 
 const TRICKY = [
-  // Codex's round-3 reproductions.
+  // The runtime review's round-3 reproductions.
   "{{ {'a': {'b': 1}}['a'].__class__ }}",
   '{{ "}}" ~ x.__class__ }}',
   '{% set z = "%}" ~ x.__globals__ %}',
@@ -73,6 +73,43 @@ const TRICKY = [
 
 test("the streaming scan finds exactly the findings the region scan does", () => {
   for (const src of TRICKY) expect(streamed(src), src).toEqual(regioned(src));
+});
+
+test("IncrementalPos: a lone surrogate of either kind is one column, as in LineMap (review round 2, runtime N6)", () => {
+  // [text, offset, line, col]: a surrogate pair is one column, and so is a high
+  // or low surrogate standing alone.
+  const cases: [string, number, number, number][] = [
+    ["\uD835x", 1, 1, 2],
+    ["\uDC00x", 1, 1, 2],
+    ["\u{1D41E}x", 2, 1, 2],
+    ["x\uD835", 2, 1, 3],
+    ["\uD835\nx", 2, 2, 1],
+    ["\uD835\uD835\uDC1Ex", 3, 1, 3],
+    ["\uDC1E\uD835x", 2, 1, 3],
+    ["\uD835\uD835 go\nab\uD835c", 9, 2, 4],
+  ];
+  for (const [text, offset, line, col] of cases) expect({ text, at: new IncrementalPos(text).at(offset) }).toEqual({ text, at: { line, col } });
+  // One cursor asked at every offset in order agrees with LineMap, on text that
+  // mixes pairs, lone surrogates of both kinds and every line break.
+  let x = 0x6d2b79f5;
+  const units = ["a", "\n", "\r", "\r\n", "\uD835", "\uDC1E", "\u{1D41E}"];
+  for (let k = 0; k < 200; k++) {
+    let text = "";
+    for (let j = 0; j < 40; j++) {
+      x ^= x << 13;
+      x ^= x >>> 17;
+      x ^= x << 5;
+      text += units[(x >>> 0) % units.length];
+    }
+    const pos = new IncrementalPos(text);
+    const lines = new LineMap(text);
+    for (let o = 0; o <= text.length; o++) expect({ text, o, at: pos.at(o) }).toEqual({ text, o, at: lines.at(o) });
+  }
+  // Both raw-text scans place a finding after a lone high surrogate at its column.
+  const src = "\uD835 {{ x.__class__ }}";
+  const f = runRawTextStreaming(src, base).find((g) => g.ruleId === "dunder_access")!;
+  expect({ line: f.span!.line, col: f.span!.col }).toEqual({ line: 1, col: f.span!.start + 1 });
+  expect(streamed(src)).toEqual(regioned(src));
 });
 
 // Over the size cap the library never runs, so these are found by the streaming

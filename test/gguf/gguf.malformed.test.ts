@@ -73,7 +73,7 @@ test("each length cap fires on its own, even when the file holds every declared 
   }
 });
 
-// Gemini R1: a cap trip used to stop the walk, so a pad before the template hid it.
+// contracts R1: a cap trip used to stop the walk, so a pad before the template hid it.
 const zeros = (n: number) => new Uint8Array(n);
 const pads: Record<string, (w: Writer) => Writer> = {
   "u8 array one past the length cap": (w) => w.str("pad").u32(T.ARRAY).u32(T.U8).u64(MAX_ARRAY_LENGTH + 1).bytes(zeros(MAX_ARRAY_LENGTH + 1)),

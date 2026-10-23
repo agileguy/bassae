@@ -1,0 +1,29 @@
+{
+  "transforms": [
+    {
+      "id": "strip-past-think",
+      "description": "An assistant message's content keeps only the text after its last </think>, with leading newlines removed; the reasoning before it is re-emitted inside <think> only for turns after the last user query, and dropped from earlier turns.",
+      "source": "mlx-community/Qwen3-0.6B-4bit@73e3e38d981303bc594367cd910ea6eb48349da8:tokenizer_config.json chat_template lines 34-41"
+    },
+    {
+      "id": "strip-gemma-thinking-channel",
+      "description": "A past model turn's content drops every <|channel>...<channel|> thinking block (macro strip_thinking) and is then trimmed.",
+      "source": "mlx-community/gemma-4-e4b-it-4bit@475b9088d29754a3379866cf5aeb6b41acd313c2:chat_template.jinja lines 148-158"
+    },
+    {
+      "id": "trim-content",
+      "description": "Message content, or each text part of it, is rendered through |trim, so leading and trailing whitespace is removed.",
+      "source": "mlx-community/gemma-3-1b-it-4bit@2d44e83dc9e80843d22fb941d3d699a0b1351aa6:tokenizer_config.json chat_template lines 29 and 35"
+    },
+    {
+      "id": "fold-system-into-first-user",
+      "description": "A leading system message is not rendered under its own role: its content, followed by a blank line, is prefixed to the first user turn.",
+      "source": "mlx-community/gemma-3-1b-it-4bit@2d44e83dc9e80843d22fb941d3d699a0b1351aa6:tokenizer_config.json chat_template lines 2-14 and 27"
+    },
+    {
+      "id": "drop-past-analysis",
+      "description": "A past assistant turn renders only its content, on the final channel; its thinking (the analysis channel) is dropped. A tool-call turn's analysis is kept only while no later assistant turn without tool calls follows.",
+      "source": "mlx-community/gpt-oss-120b-MXFP4-Q8@81e5ac3ad0af6efb1298a8e8c7a10ed2990c137b:chat_template.jinja lines 273-295 and 312-314"
+    }
+  ]
+}

@@ -1,27 +1,39 @@
-// Runs the code-execution rules over every distinct chat template on this
-// machine and prints HIGH and MEDIUM counts per template. Read-only: it never
-// writes under the scanned trees.
+// Runs the code-execution and injection rules over every distinct chat template
+// on this machine and prints HIGH and MEDIUM counts per template. Read-only: it
+// never writes under the scanned trees.
 //
-//   bun scripts/corpus-scan.ts [--dump <dir>] [--verbose] [root ...]
+//   bun scripts/corpus-scan.ts [--dump <dir>] [--verbose] [--differential] [--no-registry] [root ...]
 //
-// Roots default to ~/.cache/huggingface/hub and ~/.omlx. It has its own small
-// walker so it doesn't depend on the HF reader being built in parallel.
+// Roots default to ~/.cache/huggingface/hub and ~/.omlx. Models are found and
+// read by the real readers (discover, readHfModel, readGgufModel), so every
+// template is scanned with scaffolding built from its own model's special
+// tokens. A template shared by several models is scanned once per model and
+// reported with the worst injection result. A template that matches the
+// known-good registry is scanned as the pipeline will scan it: its registry
+// literals are scaffolding (ISC-17.1) and an exact match is known-good (ISC-12).
+// --no-registry scans every template as unknown, to see the raw rule output.
 
-import { readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { join } from "node:path";
 import { tokenize } from "@huggingface/jinja";
-import { analyzeCodeExec } from "../src/rules/index.ts";
+import { discover } from "../src/discover.ts";
+import { readGgufModel } from "../src/gguf/index.ts";
+import { readHfModel } from "../src/hf/index.ts";
 import { preLex } from "../src/parse/prelexer.ts";
-import { makeTemplate, makeTemplateFromString } from "../src/template.ts";
-import type { ExtractedTemplate, SourceKind } from "../src/types.ts";
+import { analyzeCodeExec } from "../src/rules/index.ts";
+import { analyzeInjection, buildScaffolding } from "../src/rules/injection.ts";
+import { loadRegistry } from "../src/registry/index.ts";
+import type { ExtractedTemplate, ModelRecord, RuleResult } from "../src/types.ts";
 
 const args = process.argv.slice(2);
 const verbose = args.includes("--verbose");
 const differential = args.includes("--differential");
+const registry = args.includes("--no-registry") ? undefined : loadRegistry();
 const dumpAt = args.indexOf("--dump");
 const dumpDir = dumpAt >= 0 ? args[dumpAt + 1] : undefined;
 const roots = args.filter((a, i) => !a.startsWith("--") && !(dumpAt >= 0 && i === dumpAt + 1));
+if (roots.length === 0) roots.push(join(homedir(), ".cache/huggingface/hub"), join(homedir(), ".omlx"));
 
 // --differential: confirm the pre-lexer segments text exactly where the library
 // does, across every corpus template (ISC-12 pre-lexer sync). Trimmed per run,
@@ -34,87 +46,36 @@ function libraryText(src: string): string[] | null {
     return null;
   }
 }
-if (roots.length === 0) roots.push(join(homedir(), ".cache/huggingface/hub"), join(homedir(), ".omlx"));
 
-const found: ExtractedTemplate[] = [];
-const seenDirs = new Set<string>();
-
-function walk(dir: string): void {
-  let real: string;
+const discovery = await discover(roots);
+const models: ModelRecord[] = [];
+for (const m of discovery.models) {
+  const at = m.paths[0] ?? m.id;
   try {
-    real = realpathSync(dir);
-  } catch {
-    return;
-  }
-  if (seenDirs.has(real)) return;
-  seenDirs.add(real);
-  for (const name of readdirSync(dir)) {
-    if (name === ".no_exist") continue;
-    const path = join(dir, name);
-    let st;
-    try {
-      st = statSync(path);
-    } catch {
-      continue;
-    }
-    if (st.isDirectory()) walk(path);
-    else if (st.isFile()) readSources(path, dir);
+    models.push(m.format === "gguf" ? await readGgufModel(at) : await readHfModel(at));
+  } catch (e) {
+    console.log(`unreadable ${at.replace(homedir(), "~")}: ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 
-function add(kind: SourceKind, path: string, name: string, key: string | undefined, value: unknown): void {
-  const source = { kind, path, realPath: realpathSync(path), name, key };
-  if (typeof value === "string") found.push(makeTemplateFromString(source, value));
-}
-
-function readJson(path: string): unknown {
-  try {
-    return JSON.parse(readFileSync(path, "utf8"));
-  } catch {
-    return undefined;
+// Every distinct template, with each model that carries it.
+const bySha = new Map<string, { template: ExtractedTemplate; models: ModelRecord[] }>();
+let sources = 0;
+for (const model of models) {
+  for (const t of model.templates) {
+    sources++;
+    const entry = bySha.get(t.sha256) ?? { template: t, models: [] };
+    if (!entry.models.includes(model)) entry.models.push(model);
+    bySha.set(t.sha256, entry);
   }
-}
-
-function readSources(path: string, dir: string): void {
-  const name = basename(path);
-  if (name === "chat_template.jinja" || (basename(dir) === "additional_chat_templates" && name.endsWith(".jinja"))) {
-    const kind = name === "chat_template.jinja" ? "chat_template_jinja" : "additional_chat_templates";
-    const bytes = new Uint8Array(readFileSync(path));
-    if (bytes.length > 0) {
-      const source = { kind, path, realPath: realpathSync(path), name: kind === "chat_template_jinja" ? "default" : name.slice(0, -6) } as const;
-      found.push(makeTemplate(source, bytes));
-    }
-    return;
-  }
-  if (name !== "tokenizer_config.json" && name !== "processor_config.json" && name !== "chat_template.json") return;
-  const kind: SourceKind =
-    name === "tokenizer_config.json" ? "tokenizer_config" : name === "processor_config.json" ? "processor_config" : "chat_template_json";
-  const json = readJson(path) as { chat_template?: unknown } | undefined;
-  const ct = json?.chat_template;
-  if (typeof ct === "string") add(kind, path, "default", "chat_template", ct);
-  else if (Array.isArray(ct)) {
-    ct.forEach((entry, i) => {
-      const e = entry as { name?: unknown; template?: unknown };
-      add(kind, path, typeof e.name === "string" ? e.name : `#${i}`, `chat_template[${i}].template`, e.template);
-    });
-  }
-}
-
-for (const root of roots) walk(root);
-
-const bySha = new Map<string, ExtractedTemplate[]>();
-for (const t of found) {
-  const list = bySha.get(t.sha256) ?? [];
-  list.push(t);
-  bySha.set(t.sha256, list);
 }
 
 if (differential) {
   let checked = 0;
   let mismatches = 0;
   const GENERATION_TAG = /\{%-?\s*(?:end)?generation\s*-?%\}/;
-  for (const [sha, list] of bySha) {
-    const src = list[0]!.text;
+  for (const [sha, { template }] of bySha) {
+    const src = template.text;
     if (GENERATION_TAG.test(src)) continue;
     const lib = libraryText(src);
     if (lib === null) continue;
@@ -122,37 +83,63 @@ if (differential) {
     const mine = preLex(src).textSegments.map((s) => s.value.trim()).filter(Boolean);
     if (JSON.stringify(mine) !== JSON.stringify(lib)) {
       mismatches++;
-      console.log(`MISMATCH ${sha.slice(0, 12)} ${list[0]!.source.path.replace(homedir(), "~")}`);
+      console.log(`MISMATCH ${sha.slice(0, 12)} ${template.source.path.replace(homedir(), "~")}`);
     }
   }
   console.log(`differential: ${checked} templates checked, ${mismatches} mismatches`);
   process.exit(mismatches === 0 ? 0 : 1);
 }
 
-let totalHigh = 0;
-let totalMedium = 0;
-let incomplete = 0;
-console.log(`${found.length} template sources, ${bySha.size} distinct templates\n`);
-console.log("HIGH  MED  done  sha256        name        first path");
-for (const [sha, list] of [...bySha].sort((a, b) => a[1][0]!.source.path.localeCompare(b[1][0]!.source.path))) {
-  const t = list[0]!;
-  const result = analyzeCodeExec({ template: t, scaffolding: new Set(), knownGood: false });
-  const high = result.findings.filter((f) => f.severity === "HIGH");
-  const medium = result.findings.filter((f) => f.severity === "MEDIUM");
-  totalHigh += high.length;
-  totalMedium += medium.length;
-  if (!result.complete) incomplete++;
+function counts(r: RuleResult): { high: number; medium: number } {
+  return { high: r.findings.filter((f) => f.severity === "HIGH").length, medium: r.findings.filter((f) => f.severity === "MEDIUM").length };
+}
+
+const totals = { ceHigh: 0, ceMed: 0, ceIncomplete: 0, injHigh: 0, injMed: 0, injIncomplete: 0 };
+console.log(`${models.length} models, ${sources} template sources, ${bySha.size} distinct templates\n`);
+console.log("code-exec       injection");
+console.log("HIGH  MED done  HIGH  MED done  registry    sha256        name        first path");
+for (const [sha, { template: t, models: carriers }] of [...bySha].sort((a, b) => a[1].template.source.path.localeCompare(b[1].template.source.path))) {
+  const match = registry?.match(t) ?? { kind: "none" as const };
+  const knownGood = match.kind === "exact";
+  const known = match.kind === "none" ? undefined : match.known;
+  const ce = analyzeCodeExec({ template: t, scaffolding: new Set(), knownGood });
+  // The worst injection result across the models that carry this template, each
+  // with scaffolding from its own special tokens.
+  let inj: RuleResult | undefined;
+  for (const model of carriers) {
+    const r = analyzeInjection({ template: t, scaffolding: buildScaffolding(model, known), knownGood, known });
+    if (!inj || counts(r).high > counts(inj).high || (counts(r).high === counts(inj).high && !r.complete)) inj = r;
+  }
+  inj ??= { findings: [], complete: true };
+  const c1 = counts(ce);
+  const c2 = counts(inj);
+  totals.ceHigh += c1.high;
+  totals.ceMed += c1.medium;
+  totals.injHigh += c2.high;
+  totals.injMed += c2.medium;
+  if (!ce.complete) totals.ceIncomplete++;
+  if (!inj.complete) totals.injIncomplete++;
   const where = t.source.path.replace(homedir(), "~");
+  const n = (x: number) => String(x).padStart(4);
   console.log(
-    `${String(high.length).padStart(4)} ${String(medium.length).padStart(4)}  ${result.complete ? "yes " : "NO  "}  ${sha.slice(0, 12)}  ${t.source.name.padEnd(10)}  ${where}${list.length > 1 ? ` (+${list.length - 1} more)` : ""}`,
+    `${n(c1.high)} ${n(c1.medium)} ${ce.complete ? "yes " : "NO  "} ${n(c2.high)} ${n(c2.medium)} ${inj.complete ? "yes " : "NO  "} ${match.kind.padEnd(10)}  ${sha.slice(0, 12)}  ${t.source.name.padEnd(10)}  ${where}${carriers.length > 1 ? ` (+${carriers.length - 1} more models)` : ""}`,
   );
+  // With no declared special tokens the scaffolding is only role names and
+  // delimiters, so every control token the template writes reads as text.
+  for (const model of carriers) {
+    if (model.specialTokens.length === 0) console.log(`        note: no special tokens declared by ${model.id.replace(homedir(), "~")} (tokenizer files missing?)`);
+  }
   if (verbose) {
-    for (const other of list.slice(1)) console.log(`        also ${other.source.path.replace(homedir(), "~")}`);
-    for (const f of result.findings) {
+    for (const f of [...ce.findings, ...inj.findings]) {
       const at = f.span ? `${f.span.line}:${f.span.col}` : "-";
       console.log(`        ${f.severity} ${f.ruleId} ${at} ${f.message} ${JSON.stringify(f.excerpt ?? "")}`);
     }
   }
   if (dumpDir) writeFileSync(join(dumpDir, `${sha.slice(0, 12)}.jinja`), t.bytes);
 }
-console.log(`\ntotal: ${totalHigh} HIGH, ${totalMedium} MEDIUM, ${incomplete} incomplete, across ${bySha.size} distinct templates`);
+for (const f of discovery.findings) console.log(`walk: ${f.severity} ${f.ruleId} ${f.message}`);
+console.log(
+  `\ncode-exec: ${totals.ceHigh} HIGH, ${totals.ceMed} MEDIUM, ${totals.ceIncomplete} incomplete` +
+    `\ninjection: ${totals.injHigh} HIGH, ${totals.injMed} MEDIUM, ${totals.injIncomplete} incomplete` +
+    `\nacross ${bySha.size} distinct templates`,
+);

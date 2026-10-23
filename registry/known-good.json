@@ -1,0 +1,284 @@
+{
+  "entries": [
+    {
+      "family": "functiongemma",
+      "repo": "mlx-community/functiongemma-270m-it-bf16",
+      "revision": "bb327a9ad61044e1496a2bee2365a6b6a6684c72",
+      "path": "chat_template.jinja",
+      "templateName": "default",
+      "sha256": "db61fb01017bd82401d3ffca4f8e066cd56ff6d38d2a30c4058770c0bf7ab49b"
+    },
+    {
+      "family": "gemma-3",
+      "repo": "mlx-community/gemma-3-1b-it-4bit",
+      "revision": "2d44e83dc9e80843d22fb941d3d699a0b1351aa6",
+      "path": "tokenizer_config.json",
+      "templateName": "default",
+      "sha256": "7de1c58e208eda46e9c7f86397df37ec49883aeece39fb961e0a6b24088dd3c4"
+    },
+    {
+      "family": "gemma-3n",
+      "repo": "mlx-community/gemma-3n-E4B-it-4bit",
+      "revision": "505468a22e5703ff090e222aae9beedec49b383f",
+      "path": "chat_template.jinja",
+      "templateName": "default",
+      "sha256": "ac03dcb3b09726f1e50ac55ae58fc8d5930eadc3b3a12cb04286dc1d82ac8001"
+    },
+    {
+      "family": "gemma-4",
+      "repo": "ggml-org/gemma-4-E2B-it-GGUF",
+      "revision": "b4243c156154b6dca9324415f8c7ccc098b4aed1",
+      "path": "gemma-4-E2B-it-Q8_0.gguf",
+      "templateName": "default",
+      "sha256": "0a2c8073c878ab1da004bee933a998606537bbb62016310352c7285c3f01c5b5"
+    },
+    {
+      "family": "gemma-4",
+      "repo": "ggml-org/gemma-4-E4B-it-GGUF",
+      "revision": "b8093469224f83f5c38f691eb906c380e9e63114",
+      "path": "gemma-4-E4B-it-Q8_0.gguf",
+      "templateName": "default",
+      "sha256": "0a2c8073c878ab1da004bee933a998606537bbb62016310352c7285c3f01c5b5"
+    },
+    {
+      "family": "gemma-4",
+      "repo": "google/gemma-4-26B-A4B-it",
+      "revision": "4d7ae4984b7db7de8f8457170b3f1a419ee76d52",
+      "path": "chat_template.jinja",
+      "templateName": "default",
+      "sha256": "ae53464bf3be25802b3a5b37def7fd89667067d7577049b3b2d74c4d8de4c6d4"
+    },
+    {
+      "family": "gemma-4",
+      "repo": "google/gemma-4-E4B-it",
+      "revision": "ee0ef6023621cff504d758262d4e04895a5af4a2",
+      "path": "chat_template.jinja",
+      "templateName": "default",
+      "sha256": "0a2c8073c878ab1da004bee933a998606537bbb62016310352c7285c3f01c5b5"
+    },
+    {
+      "family": "gemma-4",
+      "repo": "lmstudio-community/gemma-4-26B-A4B-it-QAT-MLX-4bit",
+      "revision": "aa5e2e50376f54254d503276ca2222ea8569b95e",
+      "path": "chat_template.jinja",
+      "templateName": "default",
+      "sha256": "29af862bccabb14b90a4ff951bcd14c33fe74b651c5f07fc7f2e9aa46a59fe7c"
+    },
+    {
+      "family": "gemma-4",
+      "repo": "lmstudio-community/gemma-4-26B-A4B-it-QAT-MLX-4bit",
+      "revision": "aa5e2e50376f54254d503276ca2222ea8569b95e",
+      "path": "tokenizer_config.json",
+      "templateName": "default",
+      "sha256": "ae53464bf3be25802b3a5b37def7fd89667067d7577049b3b2d74c4d8de4c6d4"
+    },
+    {
+      "family": "gemma-4",
+      "repo": "mlx-community/gemma-4-26b-a4b-it-8bit",
+      "revision": "33c6d23798a0af159529890f79329206dbfbd73c",
+      "path": "chat_template.jinja",
+      "templateName": "default",
+      "sha256": "36e3a42e5cf14cd0020e72d92e1fdd9970f59b82170e421f0cbe1bb42bead3f0"
+    },
+    {
+      "family": "gemma-4",
+      "repo": "mlx-community/gemma-4-26b-a4b-it-bf16",
+      "revision": "c5e94f24a28a9b8f075dbfe0ba0395d3b88e85fc",
+      "path": "chat_template.jinja",
+      "templateName": "default",
+      "sha256": "85a08664d16d8f3be4416c92427b3ac10df1024ac566cc0b4bc3bab409393f98"
+    },
+    {
+      "family": "gemma-4",
+      "repo": "mlx-community/gemma-4-31b-it-8bit",
+      "revision": "f5f3dc92ab4af76724c36c21eb6bedadb3a851be",
+      "path": "chat_template.jinja",
+      "templateName": "default",
+      "sha256": "36e3a42e5cf14cd0020e72d92e1fdd9970f59b82170e421f0cbe1bb42bead3f0"
+    },
+    {
+      "family": "gemma-4",
+      "repo": "mlx-community/gemma-4-e2b-it-4bit",
+      "revision": "238767527555cb75a05732a84dff5d6ba0dd6809",
+      "path": "chat_template.jinja",
+      "templateName": "default",
+      "sha256": "2f1b4d75d067bae3fe44e676721c7f077d243bc007156cb9c2f8b5836613d082"
+    },
+    {
+      "family": "gemma-4",
+      "repo": "mlx-community/gemma-4-e2b-it-4bit",
+      "revision": "2c3e507453b4f218d05fe3cc97bea5c5a654257e",
+      "path": "chat_template.jinja",
+      "templateName": "default",
+      "sha256": "2f1b4d75d067bae3fe44e676721c7f077d243bc007156cb9c2f8b5836613d082"
+    },
+    {
+      "family": "gemma-4",
+      "repo": "mlx-community/gemma-4-e4b-it-4bit",
+      "revision": "475b9088d29754a3379866cf5aeb6b41acd313c2",
+      "path": "chat_template.jinja",
+      "templateName": "default",
+      "sha256": "2f1b4d75d067bae3fe44e676721c7f077d243bc007156cb9c2f8b5836613d082"
+    },
+    {
+      "family": "gemma-4",
+      "repo": "mlx-community/gemma-4-e4b-it-4bit",
+      "revision": "deb1db712068b1c9f83fb1c97f08c1204b9459a1",
+      "path": "chat_template.jinja",
+      "templateName": "default",
+      "sha256": "2f1b4d75d067bae3fe44e676721c7f077d243bc007156cb9c2f8b5836613d082"
+    },
+    {
+      "family": "glm-4.5",
+      "repo": "lmstudio-community/GLM-4.5-Air-MLX-4bit",
+      "revision": "92ce339f9fe1bbb3afa840d46cad1988b6a0e0bd",
+      "path": "chat_template.jinja",
+      "templateName": "default",
+      "sha256": "44f815868bf02fa458dd2f741a338046f4bf45f398eb6d067766726b9d96cce3"
+    },
+    {
+      "family": "glm-4.5",
+      "repo": "lmstudio-community/GLM-4.5-Air-MLX-4bit",
+      "revision": "92ce339f9fe1bbb3afa840d46cad1988b6a0e0bd",
+      "path": "tokenizer_config.json",
+      "templateName": "default",
+      "sha256": "44f815868bf02fa458dd2f741a338046f4bf45f398eb6d067766726b9d96cce3"
+    },
+    {
+      "family": "gpt-oss",
+      "repo": "mlx-community/gpt-oss-120b-MXFP4-Q8",
+      "revision": "81e5ac3ad0af6efb1298a8e8c7a10ed2990c137b",
+      "path": "chat_template.jinja",
+      "templateName": "default",
+      "sha256": "a4c9919cbbd4acdd51ccffe22da049264b1b73e59055fa58811a99efbd7c8146"
+    },
+    {
+      "family": "gpt-oss",
+      "repo": "openai/gpt-oss-120b",
+      "revision": "b5c939de8f754692c1647ca79fbf85e8c1e70f8a",
+      "path": "chat_template.jinja",
+      "templateName": "default",
+      "sha256": "a4c9919cbbd4acdd51ccffe22da049264b1b73e59055fa58811a99efbd7c8146"
+    },
+    {
+      "family": "lfm2",
+      "repo": "LiquidAI/LFM2-1.2B-Tool-GGUF",
+      "revision": "e7ec4149433c75d4bb53a0742ee1ebde7fcbd183",
+      "path": "LFM2-1.2B-Tool-Q8_0.gguf",
+      "templateName": "default",
+      "sha256": "89e790f027916b5a2bca145a6a8454e06ffc7a5043bf3b6d97829aff86bb543f"
+    },
+    {
+      "family": "lfm2",
+      "repo": "LiquidAI/LFM2-1.2B-Tool",
+      "revision": "6d24c6b7471fcbcec084935e377a5302f4b84389",
+      "path": "chat_template.jinja",
+      "templateName": "default",
+      "sha256": "89e790f027916b5a2bca145a6a8454e06ffc7a5043bf3b6d97829aff86bb543f"
+    },
+    {
+      "family": "qwen2.5",
+      "repo": "mlx-community/Qwen2.5-0.5B-Instruct-4bit",
+      "revision": "a5339a4131f135d0fdc6a5c8b5bbed2753bbe0f3",
+      "path": "tokenizer_config.json",
+      "templateName": "default",
+      "sha256": "d5495a1e5db0611132a97e46a65dbb64a642a499421228b9c8b93229097fa9a4"
+    },
+    {
+      "family": "qwen2.5",
+      "repo": "mlx-community/Qwen2.5-3B-Instruct-4bit",
+      "revision": "4f83f8f146fdf28b512a06562b671d7af4fab457",
+      "path": "tokenizer_config.json",
+      "templateName": "default",
+      "sha256": "d5495a1e5db0611132a97e46a65dbb64a642a499421228b9c8b93229097fa9a4"
+    },
+    {
+      "family": "qwen2.5",
+      "repo": "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+      "revision": "9217f5db79a29953eb74d5343926648285ec7e67",
+      "path": "qwen2.5-0.5b-instruct-q8_0.gguf",
+      "templateName": "default",
+      "sha256": "d5495a1e5db0611132a97e46a65dbb64a642a499421228b9c8b93229097fa9a4"
+    },
+    {
+      "family": "qwen2.5",
+      "repo": "Qwen/Qwen2.5-0.5B-Instruct",
+      "revision": "7ae557604adf67be50417f59c2c2f167def9a775",
+      "path": "tokenizer_config.json",
+      "templateName": "default",
+      "sha256": "cd8e9439f0570856fd70470bf8889ebd8b5d1107207f67a5efb46e342330527f"
+    },
+    {
+      "family": "qwen3-coder",
+      "repo": "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+      "revision": "6e302ea604ad9ab206367e2c501d1571023e7b6d",
+      "path": "chat_template.jinja",
+      "templateName": "default",
+      "sha256": "672e747c77e990320152343b0a4951222e40de5645297905d89afba05586d827"
+    },
+    {
+      "family": "qwen3-embedding",
+      "repo": "mlx-community/Qwen3-Embedding-4B-4bit-DWQ",
+      "revision": "b5d88f1fe49b50d2ac01b4692ca2d387f14f9c72",
+      "path": "chat_template.jinja",
+      "templateName": "default",
+      "sha256": "44d5f08f3f72b837eaad09f13a54c1f9f4eb58d75240334548b7fd52a5437fa5"
+    },
+    {
+      "family": "qwen3.5",
+      "repo": "mlx-community/Qwen3.5-0.8B-MLX-bf16",
+      "revision": "7aef04e9adfd926ce0da9da376fe9610c8818a58",
+      "path": "chat_template.jinja",
+      "templateName": "default",
+      "sha256": "273d8e0e683b885071fb17e08d71e5f2a5ddfb5309756181681de4f5a1822d80"
+    },
+    {
+      "family": "qwen3.6",
+      "repo": "mlx-community/Qwen3.6-35B-A3B-bf16",
+      "revision": "04bbe07c3ed2d93cbf832f523fea344bca1d0fcf",
+      "path": "chat_template.jinja",
+      "templateName": "default",
+      "sha256": "e84f32a23fdda27689f868aa4a1a5621f41133e51a48d7f3efcbea2839574259"
+    },
+    {
+      "family": "qwen3",
+      "repo": "mlx-community/Qwen3-0.6B-4bit",
+      "revision": "73e3e38d981303bc594367cd910ea6eb48349da8",
+      "path": "tokenizer_config.json",
+      "templateName": "default",
+      "sha256": "87a2728cb8dc9fe424d624542f6060ec05a1d285ebbec578bb078900e33396b5"
+    },
+    {
+      "family": "qwen3",
+      "repo": "mlx-community/Qwen3-1.7B-4bit",
+      "revision": "3b1b1768f8f8cf8351c712464f906e86c2b8269e",
+      "path": "tokenizer_config.json",
+      "templateName": "default",
+      "sha256": "87a2728cb8dc9fe424d624542f6060ec05a1d285ebbec578bb078900e33396b5"
+    },
+    {
+      "family": "qwen3",
+      "repo": "mlx-community/Qwen3-8B-4bit",
+      "revision": "545dc4251c05440727734bcd94334791f6ab0192",
+      "path": "tokenizer_config.json",
+      "templateName": "default",
+      "sha256": "87a2728cb8dc9fe424d624542f6060ec05a1d285ebbec578bb078900e33396b5"
+    },
+    {
+      "family": "qwen3",
+      "repo": "Qwen/Qwen3-0.6B-GGUF",
+      "revision": "23749fefcc72300e3a2ad315e1317431b06b590a",
+      "path": "Qwen3-0.6B-Q8_0.gguf",
+      "templateName": "default",
+      "sha256": "57f1fd00f0013a2be96aa79b857391f27e23df5b5f847072b524c897e24d0361"
+    },
+    {
+      "family": "xlam-2",
+      "repo": "Salesforce/xLAM-2-1b-fc-r",
+      "revision": "6870fcf102f434bd01819302d85780b8e767925d",
+      "path": "tokenizer_config.json",
+      "templateName": "default",
+      "sha256": "0ce792efd121e97f1b88a984ec8ea85a67e148eacdb1f311228cf6d980b34bc7"
+    }
+  ]
+}
