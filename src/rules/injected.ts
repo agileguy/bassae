@@ -48,6 +48,7 @@ import {
   elementField,
   factsFrom,
   FLAG_FILTERS,
+  flagNumbers,
   genPolarity,
   isRuntime,
   keyed,
@@ -347,7 +348,13 @@ class Interp {
           const inner: Sink = { lits: [], data: "none", truth: "none" };
           this.exec(s.body, c, inner);
           const f = s.filter as Node;
-          this.emit(this.applyFilter({ lits: inner.lits, data: inner.data, truth: inner.truth }, filterName(f), filterArgs(f), c, f), c, sink, s);
+          // `replace` on a body of plain text works out the text it leaves, so
+          // a closer it removes is not printed (review round 2, security N4).
+          // Other filters keep the body's own text.
+          const body = (s.body as Node[]) ?? [];
+          const plain = filterName(f) === "replace" && body.every((b) => b?.type === "StringLiteral");
+          const konst = plain ? body.map((b) => String(b.value)).join("") : undefined;
+          this.emit(this.applyFilter({ lits: inner.lits, data: inner.data, truth: inner.truth, konst }, filterName(f), filterArgs(f), c, f), c, sink, s);
           break;
         }
         default:
@@ -381,7 +388,7 @@ class Interp {
     const oa: Sink = { lits: [], data: "none", truth: "none" };
     this.exec(s.body, body, ob);
     this.exec(s.alternate, alt, oa);
-    this.spend(this.joinBranches(c.st, sb, sa, tc) + ob.lits.length + oa.lits.length);
+    this.spend(this.joinBranches(c.st, sb, sa, tc, yes, no) + ob.lits.length + oa.lits.length);
     // A literal both branches print, with no test between the branch and the
     // print, is there whichever way the test goes: it does not depend on it.
     const inB = new Set(ob.lits.map(printKey));
@@ -395,13 +402,18 @@ class Interp {
   // Where an `if`'s branches meet, each variable either branch set takes the
   // join of both branches' values. A literal only one branch's value holds is
   // there only when the test went that way (`set x = '...'` then `if not T`
-  // `set x = ''`), so it takes the test, as a print in one branch does.
-  private joinBranches(into: State, a: State, b: State, test: Cond | undefined): number {
+  // `set x = ''`), so it takes the test, as a print in one branch does. Each
+  // literal is in the arm that left it, so a closer one branch overwrites does
+  // not close a header (review round 2, security N4).
+  private joinBranches(into: State, a: State, b: State, test: Cond | undefined, yes: Frame, no: Frame): number {
     let copied = 0;
     for (const k of new Set([...a.own.keys(), ...b.own.keys()])) {
       const va = a.get(k);
       const vb = b.get(k);
-      const v = va && vb && va !== vb ? join(this.oneSided(va, vb, test), this.oneSided(vb, va, test)) : (va ?? vb);
+      let v: Val | undefined;
+      if (va && vb) v = va === vb ? va : join(inArm(this.oneSided(va, vb, test), yes), inArm(this.oneSided(vb, va, test), no));
+      else if (va) v = inArm(va, yes);
+      else if (vb) v = inArm(vb, no);
       if (v) into.own.set(k, v);
       copied += (va?.lits.length ?? 0) + (vb?.lits.length ?? 0);
     }
@@ -455,9 +467,11 @@ class Interp {
     if (filter) loop = strongest(loop, this.testCond(filter, { ...c, st: layer }));
     const inner = { cond: strongest(c.cond, loop), emitCond: strongest(c.emitCond, loop), fresh: true };
     const [each, none] = arms(c.path);
-    // A filter that holds only with the flag set makes the body a
+    // A filter that holds only with the flag set, or a count of passes above 0
+    // only with it (`range(add_generation_prompt|int)`), makes the body a
     // generation-prompt branch, and its `else` the arm exclusive with it.
-    const gen = filter && this.genOf(filter, { ...c, st: layer }) === "body" ? this.genId(s) : undefined;
+    const flagged = (filter && this.genOf(filter, { ...c, st: layer }) === "body") || this.flagRange(iterNode, c);
+    const gen = flagged ? this.genId(s) : undefined;
     this.exec(s.body, { ...c, ...inner, st: layer, path: each, gen: gen ?? c.gen }, sink);
     const next = new Map(back ?? []);
     let grew = false;
@@ -476,21 +490,25 @@ class Interp {
     }
     const els = new State(head);
     this.exec(s.defaultBlock, { ...c, ...inner, st: els, path: none, genElse: gen ?? c.genElse }, sink);
-    this.escape(c.st, [head, layer, els], false);
+    this.escape(c.st, [head, layer, els], false, [none, each, none]);
   }
 
   // After a loop or a macro, only namespace attributes and mutated lists outlive
   // its layers, each as the join of what every way out left. `weak` keeps the
-  // value from before too, for a call that may not have run.
-  private escape(into: State, exits: State[], weak: boolean): void {
+  // value from before too, for a call that may not have run, in a block of its
+  // own below `here`. A loop's ways out are its body or its `else`: each
+  // literal is in the arm that left it (review round 2, security N4).
+  private escape(into: State, exits: State[], weak: boolean, ways?: readonly Frame[], here?: Frame): void {
     const keys = new Set<string>();
     for (const x of exits) for (const k of x.own.keys()) if (k.includes(".") || this.mutated.has(k)) keys.add(k);
     for (const k of keys) {
-      let v = weak ? into.get(k) : undefined;
-      for (const x of exits) {
-        const xv = x.get(k);
+      const before = weak ? into.get(k) : undefined;
+      let v = before && inArm(before, { up: here ?? ROOT });
+      exits.forEach((x, i) => {
+        let xv = x.get(k);
+        if (xv && ways) xv = inArm(xv, ways[i]!);
         if (xv) v = v && v !== xv ? join(v, xv) : xv;
-      }
+      });
       if (v) into.own.set(k, v);
     }
   }
@@ -670,8 +688,14 @@ class Interp {
         return { lits: [], data: "none", truth: "none", konst: Number(node.value) };
       case "Identifier":
         return this.ident(node, c);
-      case "MemberExpression":
-        return this.member(node, c);
+      case "MemberExpression": {
+        const picked = this.flagPick(node, c);
+        if (picked) return picked;
+        const v = this.member(node, c);
+        // An entry that holds the flag is the flag (`set g = d.g`), read off a
+        // variable or a literal only, so a chain is not evaluated twice a step.
+        return !v.genFlag && HOLDERS.has((node.object as Node)?.type) && this.holdsFlag(node, c) ? { ...v, genFlag: true } : v;
+      }
       case "CallExpression":
         return this.call(node, c);
       case "FilterExpression": {
@@ -1025,7 +1049,7 @@ class Interp {
     const inner: Ctx = { cond: c.cond, emitCond: c.emitCond, facts: NO_FACTS, st: layer, scope: { macro: name, caller }, gen: c.gen, genElse: c.genElse, path: c.path, stack: [...c.stack, name] };
     const sink: Sink = { lits: [], data: "none", truth: "none" };
     this.exec(m.body, inner, sink);
-    this.escape(c.st, [layer], true);
+    this.escape(c.st, [layer], true, undefined, c.path);
     return { lits: sink.lits, data: sink.data, truth: sink.truth };
   }
 
@@ -1052,7 +1076,7 @@ class Interp {
     };
     const sink: Sink = { lits: [], data: "none", truth: "none" };
     this.exec(cr.body, inner, sink);
-    this.escape(c.st, [layer], true);
+    this.escape(c.st, [layer], true, undefined, c.path);
     return { lits: sink.lits, data: sink.data, truth: sink.truth };
   }
 
@@ -1327,6 +1351,19 @@ class Interp {
       return { lits: this.folded(lits, konst, n), keys: concatKeys(l, r), data, truth: stronger(l.truth, r.truth), gate, konst };
     }
     if (o === "*") {
+      // `'text' * n` with a known count is the text n times, or none. With
+      // the flag as the count, the text is printed only in the generation
+      // prompt (review round 2, security N4).
+      const [text, count, countNode] = typeof l.konst === "string" ? [l, r, n.right as Node] : [r, l, n.left as Node];
+      const times = typeof count.konst === "boolean" ? Number(count.konst) : count.konst;
+      if (typeof text.konst === "string" && typeof times === "number" && Number.isInteger(times) && text.konst.length * Math.max(0, times) <= MAX_KONST) {
+        const konst = this.fold(text.konst.repeat(Math.max(0, times)));
+        if (konst !== undefined) return { lits: konst === "" ? [] : this.folded(text.lits, konst, n), data: "none", truth: "none", gate, konst };
+      }
+      if (typeof text.konst === "string" && this.flagCount(countNode, c)) {
+        const v = genArm(inArm(text, arms(c.path)[0]), this.genId(n), undefined);
+        return { lits: v.lits, data, truth: stronger(l.truth, r.truth), gate, genFlag: text.konst !== "" ? true : undefined };
+      }
       // `'text' * n`: the count decides whether the text is printed at all.
       const lits = [...this.choose(l.lits, this.selCond(r, n.right as Node)), ...this.choose(r.lits, this.selCond(l, n.left as Node))];
       return { lits, data, truth: stronger(l.truth, r.truth), gate };
@@ -1399,16 +1436,21 @@ class Interp {
     return cond;
   }
 
-  // Literals a choice decides: each takes its test, with a new provenance.
+  // Literals a choice decides: each takes its test, with a new provenance, and
+  // is in a block of its own, so a chosen closer closes nothing (review round
+  // 2, security N4).
   private choose(lits: Lit[], cond: Cond | undefined): Lit[] {
     if (!cond) return lits;
-    return lits.map((l) => ({ ...l, cond: strongest(l.cond, cond), via: ++this.vias }));
+    return lits.map((l) => ({ ...l, cond: strongest(l.cond, cond), via: ++this.vias, at: { up: l.at ?? ROOT } }));
   }
 
   // `s.replace(old, new)` and `s|replace(old, new)`: `new` is printed only
   // where `s` holds `old`, so it depends on what `s` is; text of `s`
   // survives only where `old` does not match it.
-  private replaced(s: Val, a: Val[], argNodes: Node[], at: Node): Pick<Val, "lits" | "data" | "truth"> {
+  private replaced(s: Val, a: Val[], argNodes: Node[], at: Node): Pick<Val, "lits" | "data" | "truth" | "konst"> {
+    // Constant text and arguments: the replaced text, or none (review round 2, security N4).
+    const konst = this.fold(replaceKonst(s.konst, a));
+    if (konst !== undefined) return { lits: konst === "" ? [] : this.folded([...s.lits, ...(a[1]?.lits ?? [])], konst, at), data: "none", truth: "none", konst };
     const old = argNodes[0] ? this.selCond(a[0]!, argNodes[0]) : undefined;
     const into = strongest(old, condOf(s.data === "presence" ? "none" : s.data, this.exprSpan(at)));
     return { lits: [...this.choose(s.lits, old), ...this.choose(a[1]?.lits ?? [], into)], data: s.data, truth: s.data };
@@ -1424,11 +1466,20 @@ class Interp {
     return konst;
   }
 
+  // The folded text is there only where every piece is: in the deepest block
+  // of theirs (review round 2, security N4). Pieces with one text are one piece
+  // made on different paths, in the block either is in.
   private folded(lits: Lit[], konst: string | undefined, at: Node): Lit[] {
     if (konst === undefined || lits.length === 0) return lits;
     let cond: Cond | undefined;
-    for (const l of lits) cond = strongest(cond, l.cond);
-    return [{ text: konst, span: this.exprSpan(at), cond, folded: true }];
+    const pieces = new Map<string, Frame | undefined>();
+    for (const l of lits) {
+      cond = strongest(cond, l.cond);
+      pieces.set(l.text, pieces.has(l.text) ? either(pieces.get(l.text), l.at) : l.at);
+    }
+    let made: Frame | undefined;
+    for (const f of pieces.values()) if (f) made = made ? placed(f, made) : f;
+    return [{ text: konst, span: this.exprSpan(at), cond, folded: true, at: made }];
   }
 
   // ---- the generation flag ----
@@ -1444,13 +1495,60 @@ class Interp {
   private isFlag(x: Node, c: Ctx): boolean {
     if (!FLAG_NODES.has(x.type)) return false;
     if (this.eval(x, c).genFlag) return true;
-    if (x.type !== "MemberExpression") return false;
+    return x.type === "MemberExpression" && this.holdsFlag(x, c);
+  }
+
+  // A read of a list, tuple or dict literal's entry where it holds the flag.
+  private holdsFlag(x: Node, c: Ctx): boolean {
     const prop = x.property as Node;
     let key: unknown;
     if (!x.computed) key = prop?.type === "Identifier" ? String(prop.value) : undefined;
     else if (prop?.type === "UnaryExpression" && String((prop.operator as { value?: unknown })?.value) === "-") key = -Number((prop.argument as Node | undefined)?.value);
     else key = this.eval(prop, c).konst;
     return (typeof key === "string" || typeof key === "number") && this.eval(x.object, c).genAt?.includes(key) === true;
+  }
+
+  // True when `x` is a count above 0 only with the flag set
+  // (`add_generation_prompt|int`), so a loop over `range(x)` or text repeated
+  // `x` times is there only in the generation prompt.
+  private flagCount(x: Node, c: Ctx): boolean {
+    const k = flagNumbers(x, (y) => this.isFlag(y, c));
+    return k !== undefined && k.set.every((v) => v >= 1) && k.unset.every((v) => v <= 0);
+  }
+
+  private flagRange(iter: Node, c: Ctx): boolean {
+    const callee = iter?.type === "CallExpression" ? (iter.callee as Node) : undefined;
+    const args = (iter?.args as Node[] | undefined) ?? [];
+    if (callee?.type !== "Identifier" || callee.value !== "range" || args.length !== 1) return false;
+    return !this.lookup("range", c) && !this.macros.has("range") && this.flagCount(args[0]!, c);
+  }
+
+  // An entry of a list of constants picked by the flag as a number
+  // (`['', X][add_generation_prompt|int]`): the one for the flag set is
+  // printed only in the generation prompt, the one for it unset only in the
+  // arm exclusive with it (review round 2, security N4).
+  private flagPick(n: Node, c: Ctx): Val | undefined {
+    const prop = n.property as Node;
+    if (!n.computed || (prop?.type !== "Identifier" && prop?.type !== "FilterExpression")) return undefined;
+    const k = flagNumbers(prop, (y) => this.isFlag(y, c));
+    if (!k) return undefined;
+    const o = this.eval(n.object, c);
+    const items = o.konstList;
+    if (!items) return undefined;
+    const entry = (i: number): string => (Number.isInteger(i) ? items[i < 0 ? i + items.length : i] : undefined) ?? "";
+    const set = new Set(k.set.map(entry));
+    const unset = new Set(k.unset.map(entry));
+    const id = this.genId(n);
+    const [yes, no] = arms(c.path);
+    const lits = o.lits.flatMap((l): Lit[] => {
+      if (set.has(l.text) && unset.has(l.text)) return [l];
+      if (set.has(l.text)) return [{ ...l, at: placed(l.at, yes), gen: l.gen ?? id }];
+      if (unset.has(l.text)) return [{ ...l, at: placed(l.at, no), genElse: l.genElse ?? id }];
+      return [];
+    });
+    const one = set.size === 1 && unset.size === 1 && [...set][0] === [...unset][0] ? [...set][0] : undefined;
+    const flag = [...set].every((x) => x !== "") && [...unset].every((x) => x === "");
+    return { lits, data: "none", truth: "none", gate: o.gate, konst: one, genFlag: flag ? true : undefined };
   }
 
   // A test's value: the flag when the test holds only with the flag set.
@@ -1552,6 +1650,20 @@ function element(v: Val): Val {
 
 function boolVal(cls: TestClass): Val {
   return { lits: [], data: cls, truth: cls };
+}
+
+// What an entry holding the flag is read off when the read is evaluated.
+const HOLDERS = new Set(["Identifier", "ArrayLiteral", "TupleLiteral", "ObjectLiteral"]);
+
+// `s.replace(old, new[, count])` on constants, as Python does it.
+function replaceKonst(s: unknown, a: Val[]): string | undefined {
+  const [old, by, count] = [a[0]?.konst, a[1]?.konst, a[2]?.konst];
+  if (typeof s !== "string" || typeof old !== "string" || old === "" || typeof by !== "string") return undefined;
+  if (a.length > 3 || (a.length === 3 && !Number.isInteger(count))) return undefined;
+  const parts = s.split(old);
+  const n = a.length === 3 ? (count as number) : -1;
+  if (n < 0 || n >= parts.length - 1) return parts.join(by);
+  return parts.slice(0, n + 1).join(by) + old + parts.slice(n + 1).join(old);
 }
 
 // Expressions isFlag evaluates. A test or comparison reaches the flag through
@@ -1791,7 +1903,8 @@ function unionLits(a: Lit[], b: Lit[]): Lit[] {
     } else {
       const cur = out[i]!;
       const cond = strongest(cur.cond, l.cond);
-      if (cond !== cur.cond) out[i] = { ...cur, cond };
+      const at = either(cur.at, l.at);
+      if (cond !== cur.cond || at !== cur.at) out[i] = { ...cur, cond, at };
     }
   }
   return out;
@@ -1818,16 +1931,23 @@ function join(a: Val, b: Val): Val {
     macro: a.macro === b.macro ? a.macro : undefined,
     fns: a.fns || b.fns ? [...new Set([...(a.fns ?? []), ...(b.fns ?? [])])].sort() : undefined,
     genFlag: a.genFlag && b.genFlag ? true : undefined,
+    genAt: bothAt(a.genAt, b.genAt),
     pairs: a.pairs && b.pairs ? true : undefined,
     nsInit: a.nsInit ?? b.nsInit,
   };
+}
+
+// The entries both values hold the flag at (review round 2, security N4).
+function bothAt(a: (string | number)[] | undefined, b: (string | number)[] | undefined): (string | number)[] | undefined {
+  const at = a && b ? a.filter((k) => b.includes(k)) : undefined;
+  return at?.length ? at : undefined;
 }
 
 function sameVal(a: Val, b: Val): boolean {
   if (a.lits.length !== b.lits.length || (a.keys?.length ?? 0) !== (b.keys?.length ?? 0)) return false;
   if (a.data !== b.data || a.truth !== b.truth || a.gate?.test !== b.gate?.test) return false;
   if (!sameFields(a.fields, b.fields) || a.rest !== b.rest || a.konst !== b.konst || a.ns !== b.ns || a.macro !== b.macro || a.pairs !== b.pairs) return false;
-  if (String(a.fns) !== String(b.fns) || a.genFlag !== b.genFlag) return false;
+  if (String(a.fns) !== String(b.fns) || a.genFlag !== b.genFlag || String(a.genAt) !== String(b.genAt)) return false;
   if ((a.konstList === undefined) !== (b.konstList === undefined)) return false;
   for (let i = 0; i < a.lits.length; i++) if (a.lits[i]!.cond?.test !== b.lits[i]!.cond?.test) return false;
   // A key's condition can grow on its own (`selectattr` by a value a later
@@ -2330,15 +2450,28 @@ function closesTurn(text: string): boolean {
 // the header (review round 2, security N4). A header such a closer leaves open
 // is not hidden by a later one either.
 function openHeader(lits: Lit[], res: Residue[]): { index: number; at: number } | undefined {
-  const closers = new Set<Frame>();
+  const closed = new Set<Frame>();
+  // The first arm of each fork found closed. A closer on both arms closes the
+  // block holding them (review round 2, security N4).
+  const half = new Map<object, Frame>();
+  const close = (f: Frame): void => {
+    for (let x: Frame | undefined = f; x && !closed.has(x); x = x.up) {
+      closed.add(x);
+      if (x.fork === undefined) return;
+      if (!half.has(x.fork)) {
+        half.set(x.fork, x);
+        return;
+      }
+    }
+  };
   for (let i = lits.length - 1; i >= 0; i--) {
     const text = lits[i]!.text;
     const where = lits[i]!.at ?? ROOT;
     const at = res[i]!.assistantEnd;
-    if (at >= 0 && !closesTurn(text.slice(at)) && !heldBy(where, closers)) return { index: i, at };
+    if (at >= 0 && !closesTurn(text.slice(at)) && !heldBy(where, closed)) return { index: i, at };
     if (closesTurn(text)) {
-      if (where === ROOT) return undefined;
-      closers.add(where);
+      close(where);
+      if (closed.has(ROOT)) return undefined;
     }
   }
   return undefined;
@@ -2375,6 +2508,27 @@ function placed(made: Frame | undefined, here: Frame): Frame {
   if (!made || encloses(made, here)) return here;
   if (encloses(here, made)) return made;
   return { up: here };
+}
+
+// The block of one literal a value holds, made in `a` on some paths and in `b`
+// on others: the block both arms of one fork make up, the outer of the two,
+// or else a block of its own where they meet. Unset is outside every block.
+function either(a: Frame | undefined, b: Frame | undefined): Frame | undefined {
+  if (a === b || !a || !b) return a === b ? a : undefined;
+  if (encloses(a, b)) return a;
+  if (encloses(b, a)) return b;
+  if (a.fork !== undefined && a.fork === b.fork) return a.up;
+  const up = new Set<Frame>();
+  for (let x: Frame | undefined = a; x; x = x.up) up.add(x);
+  let meet: Frame | undefined = b;
+  while (meet && !up.has(meet)) meet = meet.up;
+  return { up: meet ?? ROOT };
+}
+
+// `v` as one arm left it: each literal is printed only in `arm`.
+function inArm(v: Val, arm: Frame): Val {
+  const mark = (l: Lit): Lit => ({ ...l, at: placed(l.at, arm) });
+  return { ...v, lits: v.lits.map(mark), keys: v.keys?.map(mark) };
 }
 
 // True when no render prints in both blocks: they part at two arms of one fork.

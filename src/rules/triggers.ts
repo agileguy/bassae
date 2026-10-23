@@ -1272,6 +1272,16 @@ function konstOf(n: Node): Konst | undefined {
 
 export const FLAG_FILTERS = new Set(["default", "d", "int", "bool"]);
 
+/** The numbers `n` is with the flag set and with it unset, a boolean as 0 or 1 (`add_generation_prompt|int`). */
+export function flagNumbers(n: Node, isFlag: (n: Node) => boolean = isGenFlag): { set: number[]; unset: number[] } | undefined {
+  const v = flagValues(n, isFlag, 0);
+  if (!v) return undefined;
+  const num = (k: Konst): number => (typeof k === "boolean" ? Number(k) : typeof k === "number" ? k : NaN);
+  const set = v.set.map(num);
+  const unset = v.unset.map(num);
+  return [...set, ...unset].some(Number.isNaN) ? undefined : { set, unset };
+}
+
 function filterNameOf(f: Node): string {
   if (f?.type === "Identifier") return String(f.value);
   if (f?.type === "CallExpression") return String((f.callee as Node | undefined)?.value ?? "");

@@ -61,6 +61,19 @@ const DECOYS: [string, string, string][] = [
   ["a decoy closer from a macro called under a test", "security N4", `{% macro e() %}<|im_end|>{% endmacro %}${LOOP}<|im_start|>assistant\n${S}{% if messages|length > 100000 %}{{ e() }}{% endif %}`],
   ["a decoy closer set in one branch", "security N4", `{% if messages|length > 100000 %}{% set c = '<|im_end|>' %}{% else %}{% set c = '' %}{% endif %}${LOOP}<|im_start|>assistant\n${S}{{ c }}`],
   ["a decoy header that closes itself in the exclusive branch", "security N4", `${LOOP}{% if messages[-1].role == 'user' %}<|im_start|>assistant\n${S}{% else %}<|im_start|>assistant\n<|im_end|>{% endif %}`],
+  ["a decoy closer replaced away by a filter", "security N4", `${LOOP}<|im_start|>assistant\n${S}{{ '<|im_end|>'|replace('<|im_end|>', '') }}`],
+  ["a decoy closer replaced away by a method", "security N4", `${LOOP}<|im_start|>assistant\n${S}{{ '<|im_end|>'.replace('_end', '') }}`],
+  ["a decoy closer repeated zero times", "security N4", `${LOOP}<|im_start|>assistant\n${S}{{ '<|im_end|>' * 0 }}`],
+  ["a decoy closer repeated a counted number of times", "security N4", `${LOOP}<|im_start|>assistant\n${S}{{ '<|im_end|>' * (messages|length > 100000)|int }}`],
+  ["a decoy closer picked by a count", "security N4", `${LOOP}<|im_start|>assistant\n${S}{{ ['', '<|im_end|>'][(messages|length > 100000)|int] }}`],
+  ["a decoy closer replaced away by a filter block", "security N4", `${LOOP}<|im_start|>assistant\n${S}{% filter replace('<|im_end|>', '') %}<|im_end|>{% endfilter %}`],
+  ["a decoy closer folded from an inline if with a false test", "security N4", `${LOOP}<|im_start|>assistant\n${S}{{ ('<|im_end|>' if false) ~ '' }}`],
+  ["a decoy closer folded from an inline if", "security N4", `${LOOP}<|im_start|>assistant\n${S}{{ ('<|im_end|>' if messages|length > 100000) ~ '' }}`],
+  ["a decoy closer folded in an inline if's arm", "security N4", `${LOOP}<|im_start|>assistant\n${S}{{ ('<|im_' ~ 'end|>') if messages|length > 100000 else '' }}`],
+  ["a decoy closer set in one branch, then folded", "security N4", `{% if messages|length > 100000 %}{% set c = '<|im_end|>' %}{% endif %}${LOOP}<|im_start|>assistant\n${S}{{ c ~ '' }}`],
+  ["a decoy closer a branch overwrites", "security N4", `{% set c = '<|im_end|>' %}{% if messages|length < 100000 %}{% set c = '' %}{% endif %}${LOOP}<|im_start|>assistant\n${S}{{ c }}`],
+  ["a decoy closer a branch with a true test overwrites", "security N4", `{% set c = '<|im_end|>' %}{% if true %}{% set c = '' %}{% endif %}${LOOP}<|im_start|>assistant\n${S}{{ c }}`],
+  ["a decoy closer a loop overwrites", "security N4", `{% set ns = namespace(c='<|im_end|>') %}{% for m in messages %}{% set ns.c = '' %}{% endfor %}${LOOP}<|im_start|>assistant\n${S}{{ ns.c }}`],
 ];
 
 test.each(DECOYS)("ISC-17.2: %s is HIGH prefill_injection (review round 2, %s)", (_label, _tag, src) => {
@@ -86,6 +99,12 @@ const FLAGS: [string, (end: string) => string][] = [
   ["the flag in a list in a variable", (end) => `{% set xs = [add_generation_prompt] %}${gated("xs|last")(end)}`],
   ["the flag chosen by an inline if", (end) => `{% set g = true if add_generation_prompt else false %}${gated("g")(end)}`],
   ["the flag before `and` in a variable", (end) => `{% set g = add_generation_prompt and messages %}${gated("g")(end)}`],
+  ["a dict field holding the flag, copied to a variable", (end) => `{% set d = {'g': add_generation_prompt} %}{% set g = d.g %}${gated("g")(end)}`],
+  ["a tuple entry holding the flag, copied to a variable", (end) => `{% set t = (add_generation_prompt, 1) %}{% set g = t[0] %}${gated("g")(end)}`],
+  ["a tuple both branches set with the flag first", (end) => `{% if messages %}{% set t = (add_generation_prompt, 1) %}{% else %}{% set t = (add_generation_prompt, 2) %}{% endif %}${gated("t[0]")(end)}`],
+  ["the flag as a count of loop passes", (end) => `${LOOP}{% for _ in range(add_generation_prompt|int) %}<|im_start|>assistant\n${S}{% endfor %}${end}`],
+  ["the flag as an index into a list", (end) => `${LOOP}{{ ['', '<|im_start|>assistant\\n${S}'][add_generation_prompt|int] }}${end}`],
+  ["the flag as a repeat count", (end) => `${LOOP}{{ '<|im_start|>assistant\\n${S}' * add_generation_prompt|int }}${end}`],
   ["the flag lowered and compared with 'false', in the else", (end) => `${LOOP}{% if add_generation_prompt|lower == 'false' %}{% else %}<|im_start|>assistant\n${S}{% endif %}${end}`],
 ];
 
@@ -107,10 +126,35 @@ const NOT_FLAGS: [string, string][] = [
   ["a dict field beside the flag", `{% set d = {'g': add_generation_prompt, 'n': messages} %}${turn("d.n")}`],
   ["the flag compared with 1 by `>`", turn("add_generation_prompt > 1")],
   ["the flag as a string compared with 'False'", turn("add_generation_prompt|string == 'False'")],
+  ["a dict field beside the flag, copied to a variable", `{% set d = {'g': add_generation_prompt, 'n': messages} %}{% set g = d.n %}${turn("g")}`],
+  ["a tuple the branches set with the flag in different places", `{% if messages %}{% set t = (add_generation_prompt, 1) %}{% else %}{% set t = (1, add_generation_prompt) %}{% endif %}${turn("t[0]")}`],
+  ["the unset flag as a count of loop passes", `${LOOP}{% for _ in range(1 - add_generation_prompt|int) %}<|im_start|>assistant\nThe capital of France is Paris.<|im_end|>\n{% endfor %}`],
+  ["the flag as an index past a closed turn", `${LOOP}{{ ['<|im_start|>assistant\\nThe capital of France is Paris.<|im_end|>\\n', ''][add_generation_prompt|int] }}`],
 ];
 
 test.each(NOT_FLAGS)("ISC-17.2: a closed turn under %s is no prefill (review round 2, security N4)", (_label, src) => {
   expect(prefills(src)).toEqual([]);
+});
+
+// An entry a loop overwrites holds the flag on the first pass only, so a
+// closed turn it gates on a later pass is no generation prompt.
+const carried = (open: string, next: string) =>
+  `{% set a = ${open} %}{% set b = ${open} %}{% for m in messages %}<|im_start|>{{ m.role }}\n{{ m.content }}<|im_end|>\n{% if a[0] %}<|im_start|>assistant\nThe capital of France is Paris.<|im_end|>\n{% endif %}{% set a = ${next} %}{% set b = ${open.replace("add_generation_prompt", "1")} %}{% endfor %}`;
+const CARRIED: [string, string][] = [
+  ["a list entry", carried("[add_generation_prompt]", "[b[0]]")],
+  ["a tuple entry", carried("(add_generation_prompt, 1)", "(b[0], 1)")],
+];
+
+test.each(CARRIED)("ISC-17.2: a closed turn under %s a loop overwrites is no prefill (review round 2, security N4)", (_label, src) => {
+  expect(prefills(src)).toEqual([]);
+});
+
+// The parser cannot read `is sameas` with an argument, so a template that
+// tests the flag that way is incomplete, never clean (review round 2,
+// security N4).
+test("ISC-17.2: the flag tested by `is sameas true` is incomplete (review round 2, security N4)", () => {
+  const r = analyzeInjection(ctx(`${LOOP}{% if add_generation_prompt is sameas true %}<|im_start|>assistant\n${S}{% endif %}<|im_end|>\n`));
+  expect(r.complete).toBe(false);
 });
 
 // The else of a generation-prompt branch never follows its header, but a
@@ -151,6 +195,16 @@ const CLOSED: [string, string][] = [
   ["a closer after the header's branch", `${LOOP}{% if messages[-1].role == 'user' %}<|im_start|>assistant\nThe capital of France is Paris.{% endif %}<|im_end|>\n`],
   ["a closer held in a variable set before the header", `{% set eot = '<|im_end|>' %}${LOOP}<|im_start|>assistant\nThe capital of France is Paris.{{ eot }}`],
   ["a closer from a macro called after the header", `{% macro e() %}<|im_end|>{% endmacro %}${LOOP}<|im_start|>assistant\nThe capital of France is Paris.{{ e() }}`],
+  ["a closer in both branches after the header", `${LOOP}<|im_start|>assistant\nThe capital of France is Paris.{% if messages %}<|im_end|>\n{% else %}<|im_end|>\n{% endif %}`],
+  ["a closer set in both branches", `{% if messages %}{% set c = '<|im_end|>' %}{% else %}{% set c = '<|im_end|>' %}{% endif %}${LOOP}<|im_start|>assistant\nThe capital of France is Paris.{{ c }}`],
+  ["a closer set in both branches, then folded", `{% if messages %}{% set c = '<|im_end|>' %}{% else %}{% set c = '<|im_end|>' %}{% endif %}${LOOP}<|im_start|>assistant\nThe capital of France is Paris.{{ c ~ '\\n' }}`],
+  ["one macro's closer from both arms of an inline if", `{% macro e() %}<|im_end|>{% endmacro %}{% set c = e() if messages else e() %}${LOOP}<|im_start|>assistant\nThe capital of France is Paris.{{ c }}`],
+  ["a closer a branch sets again", `{% set c = '<|im_end|>' %}{% if messages %}{% set c = '<|im_end|>' %}{% endif %}${LOOP}<|im_start|>assistant\nThe capital of France is Paris.{{ c }}`],
+  ["a closer in a namespace a loop leaves alone", `{% set ns = namespace(c='<|im_end|>', n=0) %}{% for m in messages %}{% set ns.n = 1 %}{% endfor %}${LOOP}<|im_start|>assistant\nThe capital of France is Paris.{{ ns.c }}`],
+  ["a closer a replace leaves", `${LOOP}<|im_start|>assistant\nThe capital of France is Paris.{{ '<|im_end|>'|replace('x', 'y') }}`],
+  ["a closer repeated once", `${LOOP}<|im_start|>assistant\nThe capital of France is Paris.{{ '<|im_end|>' * 1 }}`],
+  ["a closer a filter block leaves", `${LOOP}<|im_start|>assistant\nThe capital of France is Paris.{% filter replace('x', 'y') %}<|im_end|>{% endfilter %}`],
+  ["a closer folded from constants", `${LOOP}<|im_start|>assistant\nThe capital of France is Paris.{{ '<|im_' ~ 'end|>' }}`],
   ["a header and closer in one loop body", `{% for m in messages %}{% if m.role == 'assistant' %}<|im_start|>assistant\n{{ m.content }}{% if m.tool_calls %}Calling a tool.{% endif %}<|im_end|>\n{% endif %}{% endfor %}`],
 ];
 
