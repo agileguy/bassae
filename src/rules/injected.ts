@@ -7,11 +7,14 @@
 // carry to the output, and how strongly it depends on runtime input. Literals
 // reach the output through text, `{{ }}`, set and set blocks, namespace
 // attributes, macro parameters and bodies, `caller()`, `~`/`+`/`%`, joins,
-// filters and string methods, so all of those carry them. Variables are
-// flow-insensitive: a name holds the join of every value ever assigned to it,
-// computed to a fixpoint, so a loop-carried or later-assigned value is never
-// missed. Macros are inlined at every call site, so their emissions inherit the
-// call site's conditions (ISC-18).
+// filters and string methods, so all of those carry them. Variables follow
+// jinja2's scoping: a `set` replaces the value on the path it is on, `if`
+// branches join where they meet, and what a `for` body or a macro sets is gone
+// after it, except namespace attributes and mutated lists. A loop's body starts
+// from the join of its entry and what the body left on earlier passes, computed
+// to a fixpoint, so a loop-carried value is never missed. Macros are inlined at
+// every call site, so their emissions inherit the call site's conditions
+// (ISC-18).
 //
 // The walk is bounded: a work budget over every node visit, a cap on literals
 // per value, a cap on macro inlining depth (a recursive macro is unrolled
@@ -29,6 +32,7 @@ import {
   elementField,
   factsFrom,
   genPolarity,
+  isRuntime,
   KEY_FIELD,
   listOf,
   mapFields,
@@ -39,6 +43,7 @@ import {
   sameFields,
   stronger,
   strongest,
+  truthOf,
   unionFields,
   valueField,
   type Cond,
@@ -67,7 +72,7 @@ export interface Extraction {
 // pass. The corpus maximum is under 200K (gpt-oss inlines its schema renderer
 // at each tool parameter).
 const WORK_BUDGET = 3_000_000;
-// Flow-insensitive variables converge in two or three passes on the corpus.
+// Loop back edges converge in two or three passes on the corpus.
 const MAX_PASSES = 8;
 // Macro inlining depth, and how often one macro may sit on the stack (a
 // recursive macro is unrolled this many times; deeper calls add nothing new).
@@ -124,45 +129,67 @@ interface Caller {
 }
 
 interface Scope {
-  /** The macro whose body is running; its locals are keyed `macro::name`. */
+  /** The macro whose body is running: its namespaces are named apart from the caller's. */
   macro?: string;
-  params: Map<string, Val>;
   caller?: Caller;
 }
 
-/** The variables a `for` binds. They shadow every other binding of the name inside the body and are gone after it, as in jinja2. */
-interface LoopScope {
-  id: number;
-  names: ReadonlySet<string>;
-  parent?: LoopScope;
+/**
+ * The variables on one path through the template, in layers: an `if` branch, a
+ * `for` body and a macro call each write to their own layer over the one they
+ * started from, and a read looks down through the layers.
+ */
+class State {
+  readonly own = new Map<string, Val>();
+  constructor(readonly parent?: State) {}
+
+  get(key: string): Val | undefined {
+    for (let s: State | undefined = this; s; s = s.parent) {
+      const v = s.own.get(key);
+      if (v !== undefined) return v;
+    }
+    return undefined;
+  }
 }
 
 interface Ctx {
+  /** Every test this point sits under. An assignment here carries it (implicit flow). */
   cond?: Cond;
+  /** The tests text printed here takes at once: those of enclosing loops and calls. An `if` adds its own test at its join, to the text only one branch prints. */
+  emitCond?: Cond;
+  /** Inside a loop body within the innermost `if` branch: text printed here is under a test that branch does not see. */
+  fresh?: boolean;
   facts: Facts;
+  st: State;
   scope?: Scope;
-  loops?: LoopScope;
   gen?: number;
   genElse?: number;
   stack: readonly string[];
 }
 
+/** What a block prints: its literals, what the printed text reveals, and what its emptiness reveals. */
 interface Sink {
   lits: Lit[];
   data: TestClass;
+  truth: TestClass;
 }
 
 class Interp {
-  private readonly env = new Map<string, Val>();
   private readonly macros = new Map<string, Node>();
   private readonly called = new Set<string>();
   private readonly textSpans: Map<Node, Span>;
   private readonly exprSpans = new Map<Node, Span>();
   private readonly genIds = new Map<Node, number>();
-  private readonly loopIds = new Map<Node, number>();
+  // What each `for` body left in its variables, joined over every pass: the
+  // values its next iteration starts from.
+  private readonly backs = new Map<Node, Map<string, Val>>();
+  // Variables a mutating method changed (`xs.append(x)`). The list is shared,
+  // so the change outlives the loop or macro it was made in.
+  private readonly mutated = new Set<string>();
   private work = 0;
   private changed = false;
   private outputLits = 0;
+  private vias = 0;
   complete = true;
   readonly nondet = new Map<string, Trigger>();
 
@@ -176,11 +203,10 @@ class Interp {
 
   run(): Lit[] {
     const body = (this.outcome.program!.body as Node[]) ?? [];
-    const root: Ctx = { facts: NO_FACTS, stack: [] };
     let converged = false;
     for (let pass = 0; pass < MAX_PASSES && this.complete; pass++) {
       this.changed = false;
-      this.exec(body, root, { lits: [], data: "none" });
+      this.exec(body, { facts: NO_FACTS, st: new State(), stack: [] }, { lits: [], data: "none", truth: "none" });
       if (!this.changed) {
         converged = true;
         break;
@@ -188,19 +214,19 @@ class Interp {
     }
     if (!converged) this.complete = false;
     this.called.clear();
-    const out: Sink = { lits: [], data: "none" };
+    const out: Sink = { lits: [], data: "none", truth: "none" };
     this.outputLits = 0;
-    this.exec(body, root, out);
+    this.exec(body, { facts: NO_FACTS, st: new State(), stack: [] }, out);
     // A macro no one calls emits nothing, but `random` or a clock test inside it
     // is still a use (ISC-18.1). Walk each one once with unknown arguments.
     for (const [name, m] of this.macros) {
       if (this.called.has(name)) continue;
-      const params = new Map<string, Val>();
+      const st = new State();
       for (const p of (m.args as Node[]) ?? []) {
         const id = p?.type === "KeywordArgumentExpression" ? (p.key as Node) : p;
-        if (id?.type === "Identifier") params.set(String(id.value), runtimeVal(rootField(""), undefined));
+        if (id?.type === "Identifier") st.own.set(String(id.value), runtimeVal(rootField(""), undefined));
       }
-      this.exec((m.body as Node[]) ?? [], { facts: NO_FACTS, scope: { macro: name, params }, stack: [name] }, { lits: [], data: "none" });
+      this.exec((m.body as Node[]) ?? [], { facts: NO_FACTS, st, scope: { macro: name }, stack: [name] }, { lits: [], data: "none", truth: "none" });
     }
     return out.lits;
   }
@@ -238,9 +264,9 @@ class Interp {
           if (s.value) v = this.eval(s.value, c);
           else {
             // A set block captures its body; the text is emitted where the name is printed.
-            const inner: Sink = { lits: [], data: "none" };
+            const inner: Sink = { lits: [], data: "none", truth: "none" };
             this.exec(s.body, { ...c, gen: undefined, genElse: undefined }, inner);
-            v = { lits: inner.lits, data: inner.data, truth: inner.data };
+            v = { lits: inner.lits, data: inner.data, truth: inner.truth };
           }
           this.assignTo(s.assignee as Node, v, c);
           break;
@@ -255,10 +281,10 @@ class Interp {
           break;
         }
         case "FilterStatement": {
-          const inner: Sink = { lits: [], data: "none" };
+          const inner: Sink = { lits: [], data: "none", truth: "none" };
           this.exec(s.body, c, inner);
           const f = s.filter as Node;
-          this.emit(this.applyFilter({ lits: inner.lits, data: inner.data, truth: inner.data }, filterName(f), filterArgs(f), c, f), c, sink);
+          this.emit(this.applyFilter({ lits: inner.lits, data: inner.data, truth: inner.truth }, filterName(f), filterArgs(f), c, f), c, sink);
           break;
         }
         default:
@@ -269,9 +295,12 @@ class Interp {
 
   private execIf(s: Node, c: Ctx, sink: Sink): void {
     const test = s.test as Node;
-    const cond = strongest(c.cond, this.testCond(test, c));
-    const body: Ctx = { ...c, cond, facts: factsFrom(test, true, c.facts) };
-    const alt: Ctx = { ...c, cond, facts: factsFrom(test, false, c.facts) };
+    const tc = this.testCond(test, c);
+    const cond = strongest(c.cond, tc);
+    const sb = new State(c.st);
+    const sa = new State(c.st);
+    const body: Ctx = { ...c, cond, fresh: false, st: sb, facts: factsFrom(test, true, c.facts) };
+    const alt: Ctx = { ...c, cond, fresh: false, st: sa, facts: factsFrom(test, false, c.facts) };
     const polarity = genPolarity(test);
     if (polarity) {
       let id = this.genIds.get(s);
@@ -284,8 +313,27 @@ class Interp {
         body.genElse = id;
       }
     }
-    this.exec(s.body, body, sink);
-    this.exec(s.alternate, alt, sink);
+    const ob: Sink = { lits: [], data: "none", truth: "none" };
+    const oa: Sink = { lits: [], data: "none", truth: "none" };
+    this.exec(s.body, body, ob);
+    this.exec(s.alternate, alt, oa);
+    joinLayers(c.st, sb, sa);
+    // A literal both branches print, with no test between the branch and the
+    // print, is there whichever way the test goes: it does not depend on it.
+    const inB = new Set(ob.lits.map(printKey));
+    const inA = new Set(oa.lits.map(printKey));
+    for (const l of ob.lits) this.repush(l, !inA.has(printKey(l)), tc, c, sink);
+    for (const l of oa.lits) this.repush(l, !inB.has(printKey(l)), tc, c, sink);
+    sink.data = stronger(sink.data, stronger(ob.data, oa.data));
+    sink.truth = stronger(sink.truth, stronger(ob.truth, oa.truth));
+  }
+
+  // Move a literal printed in an `if` branch out to the enclosing sink, under
+  // the test when only that branch prints it.
+  private repush(l: Lit, oneSided: boolean, test: Cond | undefined, c: Ctx, sink: Sink): void {
+    const cond = oneSided ? strongest(l.cond, test) : l.cond;
+    if (cond) sink.truth = stronger(sink.truth, cond.test);
+    sink.lits.push({ ...l, cond, via: oneSided || c.fresh ? ++this.vias : l.via });
   }
 
   private execFor(s: Node, c: Ctx, sink: Sink): void {
@@ -296,30 +344,74 @@ class Interp {
       iterNode = iterNode.lhs as Node;
     }
     const it = this.eval(iterNode, c);
-    let id = this.loopIds.get(s);
-    if (id === undefined) this.loopIds.set(s, (id = this.loopIds.size));
-    const scoped: Ctx = { ...c, loops: { id, names: new Set(loopNames(s.loopvar as Node)), parent: c.loops } };
-    this.bindLoopVar(s.loopvar as Node, it, scoped);
+    const names = loopNames(s.loopvar as Node);
+    // The loop's own layer holds what the body sets, across iterations. It
+    // starts from the entry values joined with what the body left on earlier
+    // passes: the start of a later iteration.
+    const head = new State(c.st);
+    const back = this.backs.get(s);
+    if (back) {
+      for (const [k, v] of back) {
+        const e = c.st.get(k);
+        head.own.set(k, e ? join(e, v) : v);
+      }
+    }
+    const layer = new State(head);
+    this.bindLoopVar(s.loopvar as Node, it, { ...c, st: layer });
     // The body runs only when the iterable is non-empty, so it depends on the
     // iterable's emptiness, and on what chose the iterable. The `else` block
     // runs when it is empty, without the loop variables.
     let loop = strongest(condOf(it.truth, this.exprSpan(iterNode)), it.gate);
-    if (filter) loop = strongest(loop, this.testCond(filter, scoped));
-    this.exec(s.body, { ...scoped, cond: strongest(c.cond, loop) }, sink);
-    this.exec(s.defaultBlock, { ...c, cond: strongest(c.cond, loop) }, sink);
+    if (filter) loop = strongest(loop, this.testCond(filter, { ...c, st: layer }));
+    const inner = { cond: strongest(c.cond, loop), emitCond: strongest(c.emitCond, loop), fresh: true };
+    this.exec(s.body, { ...c, ...inner, st: layer }, sink);
+    const next = new Map(back ?? []);
+    let grew = false;
+    for (const [k, v] of layer.own) {
+      if (names.includes(k)) continue;
+      const p = next.get(k);
+      const j = p ? join(p, v) : v;
+      if (!p || !sameVal(p, j)) {
+        next.set(k, j);
+        grew = true;
+      }
+    }
+    if (grew) {
+      this.backs.set(s, next);
+      this.changed = true;
+    }
+    const els = new State(head);
+    this.exec(s.defaultBlock, { ...c, ...inner, st: els }, sink);
+    this.escape(c.st, [head, layer, els], false);
+  }
+
+  // After a loop or a macro, only namespace attributes and mutated lists outlive
+  // its layers, each as the join of what every way out left. `weak` keeps the
+  // value from before too, for a call that may not have run.
+  private escape(into: State, exits: State[], weak: boolean): void {
+    const keys = new Set<string>();
+    for (const x of exits) for (const k of x.own.keys()) if (k.includes(".") || this.mutated.has(k)) keys.add(k);
+    for (const k of keys) {
+      let v = weak ? into.get(k) : undefined;
+      for (const x of exits) {
+        const xv = x.get(k);
+        if (xv) v = v && v !== xv ? join(v, xv) : xv;
+      }
+      if (v) into.own.set(k, v);
+    }
   }
 
   private bindLoopVar(lv: Node, it: Val, c: Ctx): void {
     if (lv?.type === "Identifier") {
-      this.assign(this.key(String(lv.value), c), elemOf(it), c);
+      this.assign(String(lv.value), elemOf(it), c);
     } else if (lv?.type === "TupleLiteral" || lv?.type === "ArrayLiteral") {
       const names = ((lv.value as Node[]) ?? []).filter((x) => x?.type === "Identifier");
       if (it.pairs && names.length === 2) {
-        this.assign(this.key(String(names[0]!.value), c), keysOf(it), c);
-        this.assign(this.key(String(names[1]!.value), c), valuesOf(it), c);
+        this.assign(String(names[0]!.value), keysOf(it), c);
+        this.assign(String(names[1]!.value), valuesOf(it), c);
       } else {
         const e = elemOf(it);
-        for (const n of names) this.assign(this.key(String(n.value), c), elemOf(e), c);
+        for (const n of names) this.assign(String(n.value), elemOf(e), c);
       }
     }
   }
@@ -328,6 +420,9 @@ class Interp {
     for (const l of v.lits) this.pushLit(l, c, sink);
     if (v.keys) for (const l of v.keys) this.pushLit(l, c, sink);
     sink.data = stronger(sink.data, v.data);
+    // Whether the output is empty reveals whether each printed value is, and
+    // the tests that chose to print it.
+    if (isRuntime(v)) sink.truth = stronger(sink.truth, stronger(truthOf(v), c.cond?.test ?? "none"));
   }
 
   private pushLit(l: Lit, c: Ctx, sink: Sink): void {
@@ -338,24 +433,15 @@ class Interp {
       this.complete = false;
       return;
     }
-    sink.lits.push({ text: l.text, span: l.span, cond: strongest(l.cond, c.cond), gen: l.gen ?? c.gen, genElse: l.genElse ?? c.genElse });
+    const cond = strongest(l.cond, c.emitCond);
+    if (cond) sink.truth = stronger(sink.truth, cond.test);
+    sink.lits.push({ text: l.text, span: l.span, cond, via: c.fresh ? ++this.vias : l.via, gen: l.gen ?? c.gen, genElse: l.genElse ?? c.genElse });
   }
 
   // ---- variables ----
 
-  private key(name: string, c: Ctx): string {
-    for (let l = c.loops; l; l = l.parent) if (l.names.has(name)) return `for#${l.id}::${name}`;
-    return c.scope?.macro ? `${c.scope.macro}::${name}` : name;
-  }
-
   private lookup(name: string, c: Ctx): Val | undefined {
-    for (let l = c.loops; l; l = l.parent) if (l.names.has(name)) return this.env.get(`for#${l.id}::${name}`) ?? EMPTY;
-    // A macro's own `set` shadows its parameter of the same name, as in jinja2.
-    if (c.scope?.macro) {
-      const local = this.env.get(`${c.scope.macro}::${name}`);
-      if (local) return local;
-    }
-    return c.scope?.params.get(name) ?? this.env.get(name);
+    return c.st.get(name);
   }
 
   private macroNamed(name: string, c: Ctx): string | undefined {
@@ -368,13 +454,11 @@ class Interp {
     if (!target || typeof target !== "object") return;
     if (target.type === "Identifier") {
       const name = String(target.value);
-      this.assign(this.key(name, c), v, c, this.lookup(name, c));
+      this.assign(name, v, c, c.st.get(name));
     } else if (target.type === "MemberExpression") {
       // `set ns.attr = v`: the namespace's attribute slot.
-      const prop = target.property as Node;
-      const attr = !target.computed && prop?.type === "Identifier" ? String(prop.value) : undefined;
-      const o = this.eval(target.object, c);
-      if (o.ns !== undefined && attr !== undefined) this.assign(`${o.ns}.${attr}`, v, c, this.env.get(`${o.ns}.${attr}`));
+      const k = this.slot(target, c);
+      if (k !== undefined) this.assign(k, v, c, c.st.get(k));
     } else if (target.type === "TupleLiteral" || target.type === "ArrayLiteral") {
       const e = elemOf(v);
       for (const n of (target.value as Node[]) ?? []) this.assignTo(n, e, c);
@@ -387,24 +471,43 @@ class Interp {
   // literal the variable already held, read back through `before` (`set c =
   // c.split('</think>')[-1]`), keeps its own conditions: the test can keep or
   // drop that text but did not put it there.
-  private assign(key: string, v: Val, c: Ctx, before?: Val): void {
+  // A mutating method weakly updates its receiver (it may not have run), and
+  // the change outlives the scope it was made in.
+  private assign(key: string, v: Val, c: Ctx, before?: Val, mutate = false): void {
     const held = before && c.cond && before.lits.length > 0 ? new Set([...before.lits, ...(before.keys ?? [])]) : undefined;
-    let w = withCond(v, c.cond, held);
+    let w = c.cond ? this.under(v, c.cond, held) : v;
     if (w.nsInit) {
       const init = w.nsInit;
-      w = { ...w, ns: key, nsInit: undefined };
-      for (const [attr, av] of init) this.assign(`${key}.${attr}`, av, c);
+      const id = c.scope?.macro ? `${c.scope.macro}::${key}` : key;
+      w = { ...w, ns: id, nsInit: undefined };
+      for (const [attr, av] of init) this.assign(`${id}.${attr}`, av, c);
     }
-    const prev = this.env.get(key);
-    const next = prev ? join(prev, w) : w;
-    if (next.lits.length > MAX_LITS) {
-      next.lits = next.lits.slice(0, MAX_LITS);
+    if (mutate) {
+      this.mutated.add(key);
+      if (before) w = join(before, w);
+    }
+    if (w.lits.length > MAX_LITS) {
+      w = { ...w, lits: w.lits.slice(0, MAX_LITS) };
       this.complete = false;
     }
-    if (!prev || !sameVal(prev, next)) {
-      this.env.set(key, next);
-      this.changed = true;
-    }
+    c.st.own.set(key, w);
+  }
+
+  // The key of a namespace attribute, `ns.attr`, when `target` names one.
+  private slot(target: Node, c: Ctx): string | undefined {
+    const prop = target.property as Node;
+    const attr = !target.computed && prop?.type === "Identifier" ? String(prop.value) : undefined;
+    const o = this.eval(target.object, c);
+    return o.ns !== undefined && attr !== undefined ? `${o.ns}.${attr}` : undefined;
+  }
+
+  // `v` under one more test: on its gate, and on every literal not in `held`.
+  // Each literal it touches gets a new provenance even when the test is a
+  // constant, so a literal printed on both sides of an `if` is only taken as
+  // printed either way when no test stands between the two prints.
+  private under(v: Val, cond: Cond | undefined, held?: ReadonlySet<Lit>): Val {
+    const mark = (l: Lit): Lit => (held?.has(l) ? l : { ...l, cond: strongest(l.cond, cond), via: ++this.vias });
+    return { ...v, lits: v.lits.map(mark), keys: v.keys?.map(mark), gate: strongest(v.gate, cond) };
   }
 
   // ---- expressions ----
@@ -444,12 +547,12 @@ class Interp {
         const cond = this.testCond(test, c);
         const t = this.eval(node.trueExpr, { ...c, facts: factsFrom(test, true, c.facts) });
         const f = this.eval(node.falseExpr, { ...c, facts: factsFrom(test, false, c.facts) });
-        return withCond(join(t, f), cond);
+        return this.under(join(t, f), cond);
       }
       case "SelectExpression": {
         // `x if c` with no else.
         const test = node.test as Node;
-        return withCond(this.eval(node.lhs, { ...c, facts: factsFrom(test, true, c.facts) }), this.testCond(test, c));
+        return this.under(this.eval(node.lhs, { ...c, facts: factsFrom(test, true, c.facts) }), this.testCond(test, c));
       }
       case "ArrayLiteral":
       case "TupleLiteral": {
@@ -526,7 +629,7 @@ class Interp {
       keyGate = strongest(kv.gate, condOf(kv.data === "presence" ? "none" : kv.data, this.exprSpan(prop)));
     }
     if (o.ns !== undefined && typeof key === "string") {
-      const v = this.env.get(`${o.ns}.${key}`);
+      const v = c.st.get(`${o.ns}.${key}`);
       return v ? refine(v, pathOf(n), c) : EMPTY;
     }
     if (o.macro !== undefined) return EMPTY;
@@ -570,7 +673,7 @@ class Interp {
             const nd = condOf("nondeterministic", this.exprSpan(n));
             let v: Val = EMPTY;
             for (const a of args) v = join(v, this.eval(a, c));
-            return { ...withCond(v, nd), data: "nondeterministic", truth: "nondeterministic" };
+            return { ...this.under(v, nd), data: "nondeterministic", truth: "nondeterministic" };
           }
           case "raise_exception":
             // The message goes to the exception, never into the prompt.
@@ -623,37 +726,46 @@ class Interp {
       const id = kw ? (p.key as Node) : p;
       return { name: id?.type === "Identifier" ? String(id.value) : "", def: kw ? (p.value as Node) : undefined };
     });
-    const params = new Map<string, Val>();
+    // The parameters are the macro's own layer; its `set` shadows them.
+    const layer = new State(c.st);
     let pos = 0;
     for (const a of argNodes) {
-      if (a?.type === "KeywordArgumentExpression") params.set(String((a.key as Node).value), this.eval(a.value, c));
-      else if (pos < formals.length) params.set(formals[pos++]!.name, this.eval(a, c));
+      if (a?.type === "KeywordArgumentExpression") layer.own.set(String((a.key as Node).value), this.eval(a.value, c));
+      else if (pos < formals.length) layer.own.set(formals[pos++]!.name, this.eval(a, c));
       else this.eval(a, c);
     }
-    for (const f of formals) if (!params.has(f.name)) params.set(f.name, f.def ? this.eval(f.def, c) : EMPTY);
+    for (const f of formals) if (!layer.own.has(f.name)) layer.own.set(f.name, f.def ? this.eval(f.def, c) : EMPTY);
     // The body runs under the call site's conditions: its text inherits them.
-    const inner: Ctx = { cond: c.cond, facts: NO_FACTS, scope: { macro: name, params, caller }, gen: c.gen, genElse: c.genElse, stack: [...c.stack, name] };
-    const sink: Sink = { lits: [], data: "none" };
+    const inner: Ctx = { cond: c.cond, emitCond: c.emitCond, facts: NO_FACTS, st: layer, scope: { macro: name, caller }, gen: c.gen, genElse: c.genElse, stack: [...c.stack, name] };
+    const sink: Sink = { lits: [], data: "none", truth: "none" };
     this.exec(m.body, inner, sink);
-    return { lits: sink.lits, data: sink.data, truth: sink.data };
+    this.escape(c.st, [layer], true);
+    return { lits: sink.lits, data: sink.data, truth: sink.truth };
   }
 
   private callCaller(args: Node[], c: Ctx): Val {
     const cr = c.scope?.caller;
     if (!cr || c.stack.length >= MAX_MACRO_DEPTH) return EMPTY;
-    const params = new Map(cr.ctx.scope?.params ?? []);
+    const layer = new State(cr.ctx.st);
     let pos = 0;
     for (const a of args) {
       const v = this.eval(a, c);
       const p = cr.params[pos++];
       const id = p?.type === "KeywordArgumentExpression" ? (p.key as Node) : p;
-      if (id?.type === "Identifier") params.set(String(id.value), v);
+      if (id?.type === "Identifier") layer.own.set(String(id.value), v);
     }
-    const scope: Scope = { macro: cr.ctx.scope?.macro, params, caller: cr.ctx.scope?.caller };
-    const inner: Ctx = { ...cr.ctx, cond: strongest(c.cond, cr.ctx.cond), scope, stack: [...c.stack, "caller()"] };
-    const sink: Sink = { lits: [], data: "none" };
+    const inner: Ctx = {
+      ...cr.ctx,
+      cond: strongest(c.cond, cr.ctx.cond),
+      emitCond: strongest(c.emitCond, cr.ctx.emitCond),
+      fresh: false,
+      st: layer,
+      stack: [...c.stack, "caller()"],
+    };
+    const sink: Sink = { lits: [], data: "none", truth: "none" };
     this.exec(cr.body, inner, sink);
-    return { lits: sink.lits, data: sink.data, truth: sink.data };
+    this.escape(c.st, [layer], true);
+    return { lits: sink.lits, data: sink.data, truth: sink.truth };
   }
 
   private method(r: Val, m: string, argNodes: Node[], c: Ctx, receiver: Node): Val {
@@ -703,8 +815,9 @@ class Interp {
       case "update":
       case "add": {
         // A mutating method: the receiver now holds the argument too.
-        const v = a[a.length - 1] ?? EMPTY;
-        this.assignTo(receiver, { ...v, konst: undefined, konstList: undefined, ns: undefined, macro: undefined, path: undefined }, c);
+        const v = { ...(a[a.length - 1] ?? EMPTY), konst: undefined, konstList: undefined, ns: undefined, macro: undefined, path: undefined };
+        const k = receiver?.type === "Identifier" ? String(receiver.value) : receiver?.type === "MemberExpression" ? this.slot(receiver, c) : undefined;
+        if (k !== undefined) this.assign(k, v, c, c.st.get(k), true);
         return EMPTY;
       }
       case "pop":
@@ -724,7 +837,7 @@ class Interp {
       case "default":
       case "d": {
         // The default is printed only when the operand is undefined: a presence test.
-        const dv = withCond(a[0] ?? EMPTY, condOf("presence", this.exprSpan(fnode)));
+        const dv = this.under(a[0] ?? EMPTY, condOf("presence", this.exprSpan(fnode)));
         return join(o, dv);
       }
       case "join": {
@@ -820,7 +933,7 @@ class Interp {
       case "random": {
         this.flagNondet(fnode, "uses the `random` filter");
         const nd = condOf("nondeterministic", this.exprSpan(fnode));
-        return { ...withCond({ ...keep, lits: [...o.lits, ...(o.keys ?? [])] }, nd), data: "nondeterministic", truth: "nondeterministic" };
+        return { ...this.under({ ...keep, lits: [...o.lits, ...(o.keys ?? [])] }, nd), data: "nondeterministic", truth: "nondeterministic" };
       }
       default:
         return keep;
@@ -835,7 +948,7 @@ class Interp {
       const l = this.eval(n.left, c);
       const lc = this.testCond(n.left as Node, c);
       const r = this.eval(n.right, { ...c, facts: factsFrom(n.left as Node, o === "and", c.facts) });
-      return join(l, withCond(r, lc));
+      return join(l, this.under(r, lc));
     }
     if (o === "in" || o === "not in" || o === "==" || o === "!=" || o === "<" || o === ">" || o === "<=" || o === ">=") {
       return boolVal(this.testClass(n, c));
@@ -941,12 +1054,18 @@ function refine(v: Val, path: string | undefined, c: Ctx): Val {
   return { ...v, path, shape };
 }
 
-/** `v` under one more condition: on its gate, and on every literal not in `held`. */
-function withCond(v: Val, cond: Cond | undefined, held?: ReadonlySet<Lit>): Val {
-  if (!cond) return v;
-  const lits = v.lits.map((l) => (held?.has(l) || strongest(l.cond, cond) === l.cond ? l : { ...l, cond: strongest(l.cond, cond) }));
-  const keys = v.keys?.map((l) => (held?.has(l) || strongest(l.cond, cond) === l.cond ? l : { ...l, cond: strongest(l.cond, cond) }));
-  return { ...v, lits, keys, gate: strongest(v.gate, cond) };
+/** Where two branches meet: each variable either branch set takes the join of both branches' values. */
+function joinLayers(into: State, a: State, b: State): void {
+  for (const k of new Set([...a.own.keys(), ...b.own.keys()])) {
+    const va = a.get(k);
+    const vb = b.get(k);
+    const v = va && vb && va !== vb ? join(va, vb) : (va ?? vb);
+    if (v) into.own.set(k, v);
+  }
+}
+
+function printKey(l: Lit): string {
+  return `${litKey(l)}:${l.via ?? ""}`;
 }
 
 /** The names a `for` target binds: `x`, or `k, v`. */
