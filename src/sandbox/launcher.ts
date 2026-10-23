@@ -5,8 +5,8 @@ import { dlopen, FFIType, ptr } from "bun:ffi";
 import { existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { constants } from "node:os";
 import { dirname, join } from "node:path";
-import type { RenderFailure, RenderLimits, RenderRequest, RenderResult } from "../types.ts";
-import { clip, decodeChild, encode, MEMORY_EXIT_CODE } from "./protocol.ts";
+import { CAP_FAILURES, type RenderFailure, type RenderLimits, type RenderRequest, type RenderResult } from "../types.ts";
+import { clip, decodeChild, encode, MEMORY_EXIT_CODE, TIMEOUT_EXIT_CODE } from "./protocol.ts";
 
 export type SandboxKind = "sandbox-exec" | "bwrap";
 
@@ -72,6 +72,13 @@ const CHILD_ENV = {
 
 const STARTUP_MS = 10_000;
 const POLL_MS = 10;
+// The worker keeps the time cap by its own clock. This side's clock is the backstop, for a worker that cannot:
+// it waits the cap and this grace for each step, counting only time this process was awake to see it, at most
+// CREDIT_MS a poll, so a scanner whose event loop was held up elsewhere has not been waiting on the worker.
+const GRACE_MS = 1000;
+const CREDIT_MS = 50;
+// How long a worker this side has killed gets for its last lines to be read, before the breach is judged without them.
+const DRAIN_MS = 1000;
 // Consecutive memory samples that may fail before the worker counts as over the cap.
 const RSS_MISSES = 3;
 const STDERR_KEEP = 2048;
@@ -171,8 +178,8 @@ process.on("exit", killLive);
 // if we had not been here, and cannot come back to us. Nothing runs on SIGKILL or an OOM kill: bwrap's
 // --die-with-parent covers Linux. On macOS the orphaned worker runs on until it next writes to its
 // dead parent, at the end of the step it is in, and dies of the broken pipe. A step that never ends
-// dies at the worker's own CPU limit: 1.5 × timeoutMs and a second, rounded up to a whole second, so
-// an orphan costs less than 1.5 × timeoutMs + 2 s of CPU time.
+// dies by the worker's own clock at timeoutMs, and failing that at its own CPU limit: 1.5 × timeoutMs
+// and a second, rounded up to a whole second, so an orphan costs less than 1.5 × timeoutMs + 2 s of CPU time.
 let handlingSignals = false;
 function killLiveOnSignals(): void {
   if (handlingSignals) return;
@@ -314,9 +321,11 @@ async function keepHead(stream: ReadableStream<Uint8Array>): Promise<string> {
 }
 
 /**
- * Runs one sandboxed worker over the requests until they are all answered or one of them breaks a cap.
- * On a breach the worker is killed and the in-flight request fails; the caller starts a fresh worker for the rest.
+ * Runs one sandboxed worker over the requests until they are all answered, one of them breaks a cap, or the
+ * worker dies. On a breach the worker is killed and the in-flight request fails, and the caller renders nothing
+ * more for the template; after any other death the caller starts a fresh worker for the rest.
  * A breach before the template has parsed fails every request at once, since no fresh worker would parse it faster.
+ * A breach before the worker has read its batch is a failure to start, not a cap breach: no request had begun.
  */
 export async function runWorker(
   template: string,
@@ -332,10 +341,10 @@ export async function runWorker(
   // JSON escaping can grow output up to six-fold. Past that, plus room for the envelope and a message,
   // nothing the worker sends between two results is well-formed, whatever kind of line it is.
   const perRequest = limits.maxOutputBytes * 6 + 65536;
-  // The worker's own CPU limit per step, the backstop for an orphan. GC and JIT threads count towards
+  // The worker's own CPU limit per step, the backstop behind its clock. GC and JIT threads count towards
   // CPU time too, and a render that allocates hard uses about 1.3 s of CPU a second, so the limit allows
-  // half as much again as the timeout, and a second. The parent's timer then fires first at any timeout,
-  // and whether a render timed out does not turn on how busy a machine's GC threads are (ISC-31).
+  // half as much again as the timeout, and a second. The worker's clock then ends a step first at any
+  // timeout, and whether a render timed out does not turn on how busy a machine's GC threads are (ISC-31).
   const cpuMs = Math.ceil(limits.timeoutMs * 1.5) + 1000;
 
   return new Promise<WorkerRun>((resolve) => {
@@ -346,14 +355,19 @@ export async function runWorker(
     let settled = false;
     let ended = false;
     let misses = 0;
-    let timer: Timer | undefined;
     let poll: Timer | undefined;
+    let drain: Timer | undefined;
+    // Awake time since the worker's last line, by the backstop clock.
+    let waited = 0;
+    let tick = performance.now();
+    // A breach seen from this side, held while the killed worker's last lines are read.
+    let seen: { failure: RenderFailure; message: string; answered: number } | undefined;
 
     const settle = (sandboxError?: string) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
       clearInterval(poll);
+      clearTimeout(drain);
       proc.kill("SIGKILL");
       resolve(sandboxError === undefined ? { results } : { results, sandboxError: clip(sandboxError) });
     };
@@ -367,41 +381,66 @@ export async function runWorker(
       settle();
     };
 
-    // The parse gets the full timeout from the ready line, and each render from the line before it.
-    const arm = () => {
-      clearTimeout(timer);
-      timer = !ready
-        ? setTimeout(() => settle(`worker did not start within ${STARTUP_MS}ms`), STARTUP_MS)
-        : setTimeout(() => fail("timeout", `${parsed ? "render" : "template parse"} exceeded ${limits.timeoutMs}ms`), limits.timeoutMs);
+    /**
+     * A breach seen from this side: the backstop clock, or the memory poll. The worker is killed first and its last
+     * lines read, so the breach falls on the request it was on when it died, not on one it had already answered.
+     */
+    const breach = (failure: RenderFailure, message: string) => {
+      if (settled || seen) return;
+      seen = { failure, message, answered: results.length };
+      clearInterval(poll);
+      proc.kill("SIGKILL");
+      drain = setTimeout(judge, DRAIN_MS);
     };
+    const judge = () => {
+      if (settled || !seen) return;
+      // The answer was on its way when this side's clock ran out: the worker's clock says how long that render took.
+      if (seen.failure === "timeout" && results.length > seen.answered) return settle();
+      fail(seen.failure, seen.message);
+    };
+
+    const step = (name: string, ms: number) => (ms > limits.timeoutMs ? `${name} took ${Math.round(ms)}ms by the worker's clock, cap ${limits.timeoutMs}ms` : undefined);
 
     const onLine = (line: string) => {
       if (settled) return;
       const message = decodeChild(line);
+      waited = 0;
       if (!ready && message?.t === "ready") {
         ready = true;
-        return arm();
+        return;
       }
       if (ready && !parsed && message?.t === "parsed") {
+        const slow = step("template parse", message.ms);
+        if (slow) return fail("timeout", slow);
         parsed = true;
-        return arm();
+        return;
       }
       const expected = requests[results.length];
       if (!parsed || message?.t !== "res" || message.result.id !== expected?.id) return fail("render_error", "worker protocol error");
       const result = message.result;
       const bytes = result.ok ? Buffer.byteLength(result.output) : 0;
+      const slow = step("render", message.ms);
       results.push(
         bytes > limits.maxOutputBytes
           ? { id: result.id, ok: false, failure: "output_limit", message: `output is ${bytes} bytes, cap ${limits.maxOutputBytes}` }
-          : result,
+          : slow
+            ? { id: result.id, ok: false, failure: "timeout", message: slow }
+            : result,
       );
       budget.left = perRequest;
-      if (results.length === requests.length) settle();
-      else arm();
+      const last = results[results.length - 1]!;
+      // The first cap breach ends the run, so the worker renders nothing after it.
+      if (results.length === requests.length || (!last.ok && CAP_FAILURES.has(last.failure))) settle();
     };
 
-    arm();
     poll = setInterval(() => {
+      const now = performance.now();
+      waited += Math.min(now - tick, CREDIT_MS);
+      tick = now;
+      if (!ready && waited > STARTUP_MS) return settle(`worker did not start within ${STARTUP_MS}ms`);
+      if (ready && waited > limits.timeoutMs + GRACE_MS) {
+        return breach("timeout", `${parsed ? "render" : "template parse"} exceeded ${limits.timeoutMs}ms, and the worker did not stop itself`);
+      }
       let bytes: number | undefined;
       try {
         bytes = rss(proc.pid);
@@ -410,15 +449,17 @@ export async function runWorker(
       }
       if (bytes === undefined) {
         // Once stdout has ended the worker is on its way out, and the exit path below says why.
-        if (!ended && ++misses >= RSS_MISSES) fail("memory", `worker resident memory could not be read ${RSS_MISSES} times in a row`);
+        if (!ended && ++misses >= RSS_MISSES) breach("memory", `worker resident memory could not be read ${RSS_MISSES} times in a row`);
         return;
       }
       misses = 0;
-      if (bytes > limits.maxRssBytes) fail("memory", `worker resident memory ${mib(bytes)} exceeded the ${mib(limits.maxRssBytes)} cap`);
+      if (bytes > limits.maxRssBytes) breach("memory", `worker resident memory ${mib(bytes)} exceeded the ${mib(limits.maxRssBytes)} cap`);
     }, POLL_MS);
     // A broken pipe reads as end of stream; the exit path then reports it.
     readLines(proc.stdout, budget, onLine).catch(() => false).then(async (overflowed) => {
       if (settled) return;
+      // This side killed the worker, so how it died says nothing; what it said before it died is all read.
+      if (seen) return judge();
       if (overflowed) return fail("output_limit", `worker sent more than ${perRequest} bytes for one request`);
       ended = true;
       const code = await proc.exited;
@@ -430,6 +471,9 @@ export async function runWorker(
       if (proc.signalCode === "SIGXCPU" || (kind === "bwrap" && code === 128 + constants.signals.SIGXCPU)) {
         return fail("timeout", `worker exceeded its ${cpuMs}ms CPU limit`);
       }
+      if (proc.signalCode === null && code === TIMEOUT_EXIT_CODE) {
+        return fail("timeout", `${parsed ? "render" : "template parse"} exceeded ${limits.timeoutMs}ms by the worker's clock`);
+      }
       // The worker's memory watchdog got there before this side's poll did.
       if (proc.signalCode === null && code === MEMORY_EXIT_CODE) {
         return fail("memory", `worker resident memory exceeded the ${mib(limits.maxRssBytes)} cap, by its own reading`);
@@ -437,9 +481,9 @@ export async function runWorker(
       fail("render_error", `worker exited (${proc.signalCode ?? `code ${code}`})${detail ? `: ${detail}` : ""}`);
     });
 
-    // The worker reads everything up front. A worker that dies early is reported by the exit path above.
+    // The worker reads everything before its ready line. A worker that dies early is reported by the exit path above.
     try {
-      proc.stdin.write(encode({ t: "init", template, maxOutputBytes: limits.maxOutputBytes, cpuMs, maxRssBytes: limits.maxRssBytes }));
+      proc.stdin.write(encode({ t: "init", template, maxOutputBytes: limits.maxOutputBytes, timeoutMs: limits.timeoutMs, cpuMs, maxRssBytes: limits.maxRssBytes }));
       for (const request of requests) proc.stdin.write(encode({ t: "req", request }));
       Promise.resolve(proc.stdin.end()).catch(() => {});
     } catch {

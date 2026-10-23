@@ -1,14 +1,15 @@
 // Runs inside the OS sandbox. Parses one template and renders it once per request.
-// The launcher enforces the time and memory caps from outside; this side only reports
-// what it can see: parse failures, render errors, stack overflows and oversized output.
-// It also limits its own CPU time, because the launcher's caps die with the launcher.
+// It times each step by its own clock and ends itself once one runs past the time cap, so a
+// busy parent cannot make a quick render look slow; the launcher's clock is only a backstop.
+// It reports what else it can see: parse failures, render errors, stack overflows and oversized
+// output. It also watches its own memory and CPU time, because the launcher's caps die with the launcher.
 
 import { Template } from "@huggingface/jinja";
 import { dlopen, FFIType, ptr, type FFIFunction } from "bun:ffi";
 import type { RenderFailure, RenderRequest, RenderResult } from "../types.ts";
 import { installPolyfills } from "./polyfills.ts";
 import { profileGlobals } from "./profiles.ts";
-import { clip, encode, MEMORY_EXIT_CODE, type ChildMessage, type InitMessage, type RequestMessage } from "./protocol.ts";
+import { clip, encode, MEMORY_EXIT_CODE, TIMEOUT_EXIT_CODE, type ChildMessage, type InitMessage, type RequestMessage } from "./protocol.ts";
 
 // macOS has no parent-death signal, so a parent killed with SIGKILL would leave a hung render running
 // for good. RLIMIT_CPU is the backstop: re-armed before the parse and before each render, it lets the
@@ -61,24 +62,43 @@ function limitCpu(ms: number, totalMs?: number): void {
   if (libc.setrlimit(RLIMIT_CPU, ptr(rlimit)) !== 0) throw new Error("setrlimit(RLIMIT_CPU) failed");
 }
 
-// The parent polls this process's resident memory from outside, and that cap dies with the parent too. A thread
-// of the worker's own is the backstop, as RLIMIT_CPU is for time: it polls the same figure and ends the process
-// once it passes the cap. RLIMIT_AS cannot do this, since JSC reserves far more address space than it uses, and
-// macOS enforces no RSS limit. process.exit from a thread ends only the thread, so the thread calls _exit itself.
-// It loads before the ready line for the same reason the CPU backstop does, and learns the cap from the init line.
+// A thread of the worker's own keeps the time cap, and backs the parent's memory cap, which dies with the parent.
+// The main thread marks when each step starts; the thread ends the process once a step has run past the cap by
+// that clock, whatever the parent's event loop is doing. It also polls resident memory and ends the process past
+// the cap. RLIMIT_AS cannot do that, since JSC reserves far more address space than it uses, and macOS enforces no
+// RSS limit. process.exit from a thread ends only the thread, so the thread calls _exit itself. It loads before
+// the ready line for the same reason the CPU backstop does, and learns the caps from the init line.
 const watchdog = new Worker(
   URL.createObjectURL(
     new Blob([
       `const { dlopen, FFIType } = require("bun:ffi");
 const { _exit } = dlopen(${JSON.stringify(LIBC)}, { _exit: { args: [FFIType.i32], returns: FFIType.void } }).symbols;
-onmessage = ({ data: cap }) => {
-  setInterval(() => { if (process.memoryUsage.rss() > cap) _exit(${MEMORY_EXIT_CODE}); }, 10);
+onmessage = ({ data: { maxRssBytes, timeoutMs, started, origin } }) => {
+  const step = new Int32Array(started);
+  setInterval(() => {
+    if (process.memoryUsage.rss() > maxRssBytes) _exit(${MEMORY_EXIT_CODE});
+    const at = Atomics.load(step, 0);
+    if (at > 0 && performance.timeOrigin + performance.now() - origin - (at - 1) > timeoutMs) _exit(${TIMEOUT_EXIT_CODE});
+  }, 10);
   postMessage("armed");
 };
 postMessage("loaded");`,
     ]),
   ),
 );
+// When the step in progress started, in whole ms of the main thread's clock plus one; 0 between steps.
+const started = new Int32Array(new SharedArrayBuffer(4));
+
+/** Runs one step on the clock the watchdog keeps, and says how long it took. */
+function timed<T>(fn: () => T): [T, number] {
+  const start = performance.now();
+  Atomics.store(started, 0, Math.floor(start) + 1);
+  try {
+    return [fn(), performance.now() - start];
+  } finally {
+    Atomics.store(started, 0, 0);
+  }
+}
 const fromWatchdog = (expected: string) =>
   new Promise<void>((resolve, reject) => {
     watchdog.onmessage = ({ data }) => (data === expected ? resolve() : reject(new Error(`memory watchdog said ${String(data)}`)));
@@ -100,8 +120,8 @@ globalThis.Date = new Proxy(RealDate, {
   },
 });
 
-// Each line must reach the parent before the next step starts, because the parent
-// times the parse from the ready line and each render from the line before it.
+// Each line must reach the parent before the next step starts, because the parent's
+// backstop clock runs from the line before.
 async function send(message: ChildMessage): Promise<void> {
   await Bun.write(Bun.stdout, encode(message));
 }
@@ -134,32 +154,55 @@ function render(template: Template, request: RenderRequest, maxOutputBytes: numb
   }
 }
 
+/** Stdin a line at a time, so a batch is never held whole as one string. */
+async function* lines(): AsyncGenerator<string> {
+  const decoder = new TextDecoder();
+  let parts: Uint8Array[] = [];
+  for await (const chunk of Bun.stdin.stream()) {
+    let start = 0;
+    for (let nl = chunk.indexOf(0x0a); nl >= 0; nl = chunk.indexOf(0x0a, start)) {
+      parts.push(chunk.subarray(start, nl));
+      yield decoder.decode(Buffer.concat(parts));
+      parts = [];
+      start = nl + 1;
+    }
+    if (start < chunk.length) parts.push(chunk.slice(start));
+  }
+  if (parts.length > 0) yield decoder.decode(Buffer.concat(parts));
+}
+
 installPolyfills();
 
-await send({ t: "ready" });
+const input = lines();
+const init = JSON.parse((await input.next()).value ?? "") as InitMessage;
+watchdog.postMessage({ maxRssBytes: init.maxRssBytes, timeoutMs: init.timeoutMs, started: started.buffer, origin: performance.timeOrigin });
+await fromWatchdog("armed");
+// Armed, it need not keep the process alive once the last result is out.
+watchdog.unref();
 
-const [head = "", ...rest] = (await Bun.stdin.text()).split("\n").filter(Boolean);
-const init = JSON.parse(head) as InitMessage;
-const requests = rest.map((line) => (JSON.parse(line) as RequestMessage).request);
+// The batch is read and parsed before the ready line, a request at a time and under the memory watchdog, so a
+// batch too big to hold fails to start, and is never charged to the first request as a cap breach.
+const requests: RenderRequest[] = [];
+for await (const line of input) if (line) requests.push((JSON.parse(line) as RequestMessage).request);
 
 // The soft limit covers one step at a time; the hard limit, the parse and every render. Each step's soft limit
 // rounds up to a whole second, so the hard limit allows a second more per step, and the second it keeps clear.
 limitCpu(init.cpuMs, (requests.length + 1) * (init.cpuMs + 1000) + 1000);
-watchdog.postMessage(init.maxRssBytes);
-await fromWatchdog("armed");
-// Armed, it need not keep the process alive once the last result is out.
-watchdog.unref();
-let template: Template | undefined;
+await send({ t: "ready" });
+
 let parseFailure = { failure: "parse" as RenderFailure, message: "" };
-try {
-  template = new Template(init.template);
-} catch (e) {
-  parseFailure = failure(e, "parse");
-}
-await send({ t: "parsed" });
+const [template, parseMs] = timed((): Template | undefined => {
+  try {
+    return new Template(init.template);
+  } catch (e) {
+    parseFailure = failure(e, "parse");
+    return undefined;
+  }
+});
+await send({ t: "parsed", ms: parseMs });
 
 for (const request of requests) {
   limitCpu(init.cpuMs);
-  const result: RenderResult = template ? render(template, request, init.maxOutputBytes) : { id: request.id, ok: false, ...parseFailure };
-  await send({ t: "res", result });
+  const [result, ms] = timed((): RenderResult => (template ? render(template, request, init.maxOutputBytes) : { id: request.id, ok: false, ...parseFailure }));
+  await send({ t: "res", result, ms });
 }

@@ -4,11 +4,11 @@
 
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
-import { diffRender } from "../../src/diffrender/index.ts";
+import { diffRender, diffRenderWith, OUTPUT_BUDGET } from "../../src/diffrender/index.ts";
 import { buildProbes } from "../../src/diffrender/probes.ts";
 import { createRenderer, sandboxAvailable } from "../../src/sandbox/index.ts";
 import { makeTemplateFromString } from "../../src/template.ts";
-import type { DiffRenderInput, RenderRequest, RenderResult, Renderer } from "../../src/types.ts";
+import { CAP_FAILURES, DEFAULT_RENDER_LIMITS, type DiffRenderInput, type IntegrityIssue, type RenderRequest, type RenderResult, type Renderer } from "../../src/types.ts";
 
 const FIXTURES = join(import.meta.dir, "fixtures", "probes");
 const fixture = (name: string) => Bun.file(join(FIXTURES, `${name}.jinja`)).text();
@@ -53,11 +53,14 @@ describe("render_dos (ISC-43)", () => {
     expect(r.probes).toEqual({ total: TOTAL, rendered: 0, refused: 0, failed: TOTAL });
   });
 
-  for (const cap of ["memory", "output_limit", "stack"] as const) {
-    test(`a ${cap} breach is render_dos too`, async () => {
+  // Every failure in the shared set, so a cap added there cannot reach a finding without a name.
+  for (const cap of CAP_FAILURES) {
+    test(`a ${cap} breach is render_dos, and its message names the cap`, async () => {
       const { renderer } = scripted((r) => fail(r.id, cap));
       const r = await diffRender(input("{{ x }}"), renderer, []);
       expect(r.findings.map((f) => [f.ruleId, (f.detail as { cap?: string }).cap])).toEqual([["render_dos", cap]]);
+      expect(r.findings[0]!.message).toMatch(/hit the (time|memory|output) cap \(|hit the stack/);
+      expect(r.findings[0]!.message).not.toContain("undefined");
     });
   }
 
@@ -72,6 +75,43 @@ describe("render_dos (ISC-43)", () => {
     expect(r.complete).toBe(false);
   });
 
+  test("the finding says how many probes rendered and whether any rendered after the breach", async () => {
+    // As the sandbox does: the first breach ends the batch, and what follows is skipped.
+    const stopping = scripted((r, label) => (label === "count:50" ? fail(r.id, "memory") : undefined));
+    const inner = stopping.renderer.renderBatch;
+    stopping.renderer.renderBatch = async (template, requests) => {
+      const results = await inner(template, requests);
+      const at = results.findIndex((x) => !x.ok && x.failure === "memory");
+      return at < 0 ? results : results.map((x, i) => (i <= at ? x : fail(x.id, "skipped", "not attempted")));
+    };
+    const r = await diffRender(input("{{ x }}"), stopping.renderer, []);
+    const dos = r.findings.find((f) => f.ruleId === "render_dos")!;
+    expect(dos.message).toContain(`${r.probes.rendered} of ${TOTAL} probes rendered before it and none after`);
+    expect(dos.detail).toMatchObject({ rendered: r.probes.rendered, total: TOTAL, renderedAfter: 0 });
+    expect(r.probes.rendered).toBeLessThan(TOTAL - 1);
+
+    // A renderer that carries on past the breach is reported as it behaved, never as if it had stopped.
+    const carrying = await diffRender(input("{{ x }}"), scripted((x, label) => (label === "count:50" ? fail(x.id, "memory") : undefined)).renderer, []);
+    const after = carrying.findings.find((f) => f.ruleId === "render_dos")!;
+    const renderedAfter = (after.detail as { renderedAfter: number }).renderedAfter;
+    expect(renderedAfter).toBeGreaterThan(0);
+    expect(after.message).toContain(`${TOTAL - 1} of ${TOTAL} probes rendered, ${renderedAfter} of them after it`);
+  });
+
+  test("a sandbox failure in the second batch stops the third (fatal, whatever the batch size)", async () => {
+    const { renderer, batches } = scripted((r, label) => (label === "one/system/no-tools/no-gen" ? fail(r.id, "sandbox", "worker did not start") : undefined));
+    const r = await diffRender(input("{{ x }}"), renderer, []);
+    expect(batches).toHaveLength(2);
+    expect(r.findings).toEqual([]);
+    expect(r.complete).toBe(false);
+  });
+
+  test("a parse failure in the second batch stops the third", async () => {
+    const { renderer, batches } = scripted((r, label) => (label === "one/system/no-tools/no-gen" ? fail(r.id, "parse", "SyntaxError") : undefined));
+    await diffRender(input("{{ x }}"), renderer, []);
+    expect(batches).toHaveLength(2);
+  });
+
   test("explain probes go before vary probes, the first one alone", async () => {
     const { renderer, batches } = scripted();
     await diffRender(input("{{ x }}"), renderer, []);
@@ -83,13 +123,7 @@ describe("render_dos (ISC-43)", () => {
     expect(batches.flat().map((r) => r.profile).filter((p) => p === "jinja2-globals")).toHaveLength(TOTAL);
   });
 
-  test("renders the fail-fast rule skipped are failures but not a breach of their own", async () => {
-    const { renderer } = scripted((r) =>
-      r.profile === "jinja2-globals" ? fail(r.id, "timeout", "not attempted: the 2 renders before it timed out on this template") : undefined,
-    );
-    const r = await diffRender(input("{{ x }}"), renderer, []);
-    expect(r.findings).toEqual([]);
-    expect(r.probes.rendered).toBe(TOTAL);
+  test("renders the sandbox skipped after a breach are failures but not a breach of their own", async () => {
     const skipped = await diffRender(input("{{ x }}"), scripted((r) => fail(r.id, "skipped")).renderer, []);
     expect(skipped.findings).toEqual([]);
     expect(skipped.probes.failed).toBe(TOTAL);
@@ -115,6 +149,55 @@ describe("render_dos (ISC-43)", () => {
     const r = await diffRender(input("{{ x }}"), renderer, []);
     expect(r.complete).toBe(false);
     expect(r.probes.failed).toBe(TOTAL);
+  });
+});
+
+describe("bounded cost (Decisions 02:58)", () => {
+  const gaps = (r: object) => (r as { gaps?: string[] }).gaps ?? [];
+
+  test("output past the template's budget is never asked for, so never held: the result is incomplete, and says why", async () => {
+    // Every render comes back at the output cap, different under each profile: 52 MiB in all, against a 32 MiB budget.
+    const cap = DEFAULT_RENDER_LIMITS.maxOutputBytes;
+    const fill = { "hf-default": "h".repeat(cap - 64), "jinja2-globals": "j".repeat(cap - 64) };
+    let produced = 0;
+    let largestAsk = 0;
+    const { renderer } = scripted((r) => {
+      produced += fill[r.profile].length;
+      return { id: r.id, ok: true, output: fill[r.profile] };
+    });
+    const asking: Renderer = {
+      renderBatch: (template, requests) => {
+        largestAsk = Math.max(largestAsk, requests.length);
+        return renderer.renderBatch(template, requests);
+      },
+    };
+    const r = await diffRender(input("{{ x }}"), asking, []);
+    expect(produced).toBeLessThanOrEqual(OUTPUT_BUDGET);
+    expect(largestAsk * cap).toBeLessThanOrEqual(OUTPUT_BUDGET);
+    expect(r.findings.filter((f) => f.ruleId === "render_dos")).toEqual([]);
+    expect(r.complete).toBe(false);
+    expect(r.probes.failed).toBeGreaterThan(0);
+    expect(gaps(r)).toEqual([expect.stringMatching(/^the 32 MiB output budget was spent, so \d+ of 26 probes were not rendered under both profiles$/)]);
+  });
+
+  test("an output the two profiles share is held once, so a template within the budget renders whole", async () => {
+    // 26 probes of 1 MiB, the same under both profiles: 26 MiB held once, 52 MiB if held twice.
+    const out = "s".repeat(DEFAULT_RENDER_LIMITS.maxOutputBytes - 64);
+    const r = await diffRender(input("{{ x }}"), scripted((req) => ({ id: req.id, ok: true, output: out })).renderer, []);
+    expect(r.complete).toBe(true);
+    expect(gaps(r)).toEqual([]);
+    expect(r.probes.rendered).toBe(TOTAL);
+  });
+
+  test("integrity issues are kept as counts and a few samples, however many a check finds", async () => {
+    const flood = (): IntegrityIssue[] => Array.from({ length: 1000 }, (_, index) => ({ ruleId: "content_integrity", message: `content ${index} is missing`, index }));
+    const r = await diffRenderWith(input("{{ x }}"), scripted().renderer, [], { checkContent: flood, checkTools: () => [] });
+    const content = r.findings.find((f) => f.ruleId === "content_integrity")!;
+    // The scripted renderer prints the same under both profiles, so each probe's output is checked once.
+    expect(content.detail).toMatchObject({ probeCount: TOTAL, issueCount: TOTAL * 1000 });
+    const listed = (content.detail as { probes: { issues: unknown[] }[] }).probes;
+    expect(listed).toHaveLength(20);
+    expect(listed.every((p) => p.issues.length === 5)).toBe(true);
   });
 });
 
@@ -191,6 +274,13 @@ describe.skipIf(!status.available)("render_dos through the sandboxed renderer", 
     ["endless-range", ["memory", "timeout"]],
     ["endless-loop", ["timeout"]],
     ["recursive-macro", ["stack", "timeout"]],
+    // The runtime review's templates. `dict` exists only under jinja2-globals, so the hf-default render fails at
+    // once and the jinja2-globals one hangs: a fail-fast rule that an error in between resets let 16 and 32
+    // timeouts through, 32 s and 65 s.
+    ["alternating-hang", ["timeout"]],
+    ["alternating-hang-tools", ["timeout"]],
+    // Ordinary until the 50-message probe, which runs range(10**10): six memory breaches in one batch before.
+    ["count-gated-range", ["memory", "timeout"]],
   ] as const) {
     test(
       `${name}: one HIGH render_dos, about one cap of wall time, and the next template still renders`,
@@ -202,6 +292,7 @@ describe.skipIf(!status.available)("render_dos through the sandboxed renderer", 
         expect(dos).toHaveLength(1);
         expect(dos[0]!.severity).toBe("HIGH");
         expect(caps as readonly string[]).toContain((dos[0]!.detail as { cap: string }).cap);
+        expect(dos[0]!.message).toContain("none after");
         expect(r.complete).toBe(false);
         // One 2 s cap plus a spawn, never one cap per probe.
         expect(elapsed).toBeLessThan(5_000);
