@@ -446,6 +446,29 @@ describe.skipIf(!live)("the memory cap fails closed (ISC-43)", () => {
   );
 
   test(
+    "a batch is split by size, so no worker has to hold more than 16 MiB of requests",
+    async () => {
+      // 48 MiB of requests, which one worker cannot hold under a 96 MiB cap; 16 MiB at a time, it can. The template
+      // tests the string but never copies it, as the library's slicing and length filter do.
+      const big = "x".repeat(7 * 2 ** 20);
+      const requests = Array.from({ length: 7 }, (_, i) => req(`r${i}`, { big }));
+      const results = await renderer.renderBatch("{% if big %}big{% endif %}", requests, { maxRssBytes: 96 * 2 ** 20 });
+      expect(results).toEqual(requests.map((r) => ok(r.id, "big")));
+    },
+    SLOW,
+  );
+
+  test(
+    "a request bigger than a batch goes alone, and the rest still go together",
+    async () => {
+      const requests = [req("small"), req("huge", { big: "y".repeat(20 * 2 ** 20) }), req("after")];
+      const results = await renderer.renderBatch("{% if big %}big{% else %}none{% endif %}", requests);
+      expect(results).toEqual([ok("small", "none"), ok("huge", "big"), ok("after", "none")]);
+    },
+    SLOW,
+  );
+
+  test(
     "a memory reader that throws counts as unreadable instead of escaping",
     async () => {
       const broken = createRenderer({

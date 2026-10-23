@@ -6,26 +6,32 @@ import { runWorker, type WorkerOptions } from "./launcher.ts";
 export { sandboxAvailable } from "./launcher.ts";
 export type { SandboxKind, SandboxStatus, WorkerOptions } from "./launcher.ts";
 
-function serializable(request: RenderRequest): boolean {
+/** The bytes a request takes on the pipe, or undefined when it cannot cross it. */
+function size(request: RenderRequest): number | undefined {
   try {
-    JSON.stringify(request);
-    return true;
+    return Buffer.byteLength(JSON.stringify(request));
   } catch {
-    return false;
+    return undefined;
   }
 }
+
+// A worker reads and holds its whole batch before it renders, so a batch is cut at this much request JSON: about
+// 45 MiB of worker at its peak, well under the 256 MiB memory cap. A request bigger than that goes alone.
+const MAX_BATCH_BYTES = 16 * 2 ** 20;
 
 const isBreach = (r: RenderResult) => !r.ok && CAP_FAILURES.has(r.failure);
 
 // After the first cap breach nothing more renders for the template (Decisions 02:58), whatever the renders between
 // would have done: a render that fails at once must not buy a hostile template another timeout. The rest of the
 // batch is `skipped`, not the cap: those requests never ran, so they breached nothing of their own.
-async function renderAll(template: string, requests: RenderRequest[], limits: RenderLimits, options: WorkerOptions): Promise<RenderResult[]> {
+async function renderAll(template: string, requests: RenderRequest[], sizes: number[], limits: RenderLimits, options: WorkerOptions): Promise<RenderResult[]> {
   const results: RenderResult[] = [];
   while (results.length < requests.length) {
+    let end = results.length + 1;
+    for (let bytes = sizes[results.length]!; end < requests.length && bytes + sizes[end]! <= MAX_BATCH_BYTES; end++) bytes += sizes[end]!;
     let sandboxError: string | undefined;
     try {
-      const run = await runWorker(template, requests.slice(results.length), limits, options);
+      const run = await runWorker(template, requests.slice(results.length, end), limits, options);
       // A breach before the template parsed fails every request the worker had; the first one carries it, as any other breach.
       const at = run.results.findIndex(isBreach);
       if (at >= 0) {
@@ -62,10 +68,12 @@ export function createRenderer(options: WorkerOptions = {}): Renderer {
         maxOutputBytes: limits.maxOutputBytes ?? DEFAULT_RENDER_LIMITS.maxOutputBytes,
       };
       // A request that cannot cross the pipe fails on its own; the rest still render.
-      const rejected = requests.map((r): RenderResult | undefined =>
-        serializable(r) ? undefined : { id: r.id, ok: false, failure: "render_error", message: "request is not JSON-serializable" },
+      const sizes = requests.map(size);
+      const rejected = requests.map((r, i): RenderResult | undefined =>
+        sizes[i] !== undefined ? undefined : { id: r.id, ok: false, failure: "render_error", message: "request is not JSON-serializable" },
       );
-      const rendered = await renderAll(template, requests.filter((_, i) => !rejected[i]), caps, options);
+      const kept = sizes.flatMap((bytes) => (bytes === undefined ? [] : [bytes]));
+      const rendered = await renderAll(template, requests.filter((_, i) => !rejected[i]), kept, caps, options);
       let next = 0;
       return rejected.map((r) => r ?? rendered[next++]!);
     },
