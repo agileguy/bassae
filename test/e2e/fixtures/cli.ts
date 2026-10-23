@@ -11,6 +11,10 @@ import type { ScanReport } from "../../../src/types.ts";
 export const ROOT = join(import.meta.dir, "..", "..", "..");
 export const CLI = join(ROOT, "src", "cli.ts");
 
+// A whole-tree scan runs the real command and renders every template in the sandbox: about 3 s on a CI runner,
+// so a test running two would pass Bun's 5 s default only on a fast machine.
+export const SCAN_TIMEOUT = 60_000;
+
 // A HOME with no model stores in it. Not a makeTree tree: each test file's removeTrees must not take it away.
 const HOME = mkdtempSync(join(realpathSync(tmpdir()), "bassae-e2e-home-"));
 process.on("exit", () => rmSync(HOME, { recursive: true, force: true }));

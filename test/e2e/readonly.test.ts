@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { buildGguf, typicalKvs } from "../gguf/builder.ts";
 import { link, makeTree, removeTrees } from "../helpers/tree.ts";
 import { snapshotTree } from "../scan/fixtures/pipeline.ts";
-import { bassae, reportOf } from "./fixtures/cli.ts";
+import { bassae, reportOf, SCAN_TIMEOUT } from "./fixtures/cli.ts";
 import { statusTree } from "./fixtures/trees.ts";
 
 afterAll(removeTrees);
@@ -34,4 +34,4 @@ test("ISC-35: a full scan of a mixed tree, human then --json, changes nothing un
   expect(report.models.some((m) => m.paths.includes(join(root, "omlx", "tuned")))).toBe(true);
 
   expect(snapshotTree(root)).toEqual(before);
-});
+}, SCAN_TIMEOUT);

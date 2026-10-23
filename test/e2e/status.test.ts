@@ -5,7 +5,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import { sandboxAvailable } from "../../src/sandbox/index.ts";
 import { makeTree, removeTrees } from "../helpers/tree.ts";
-import { bassae, reportOf, type Run, schemaErrors } from "./fixtures/cli.ts";
+import { bassae, reportOf, type Run, schemaErrors, SCAN_TIMEOUT } from "./fixtures/cli.ts";
 import { EXPECTED, type Fixture, LFM2, modelAt, statusTree } from "./fixtures/trees.ts";
 
 afterAll(removeTrees);
@@ -42,28 +42,28 @@ describe.skipIf(!sandbox.available)("ISC-42: one fixture per status, through bas
     }
     expect(model.templates).toHaveLength(1);
     expect<string>(model.templates[0]!.status).toBe(EXPECTED[fixture]);
-  });
+  }, SCAN_TIMEOUT);
 
   test("known-good is the registry's own bytes; the variant differs in whitespace only", async () => {
     const good = modelAt(reportOf(await scanJson(dir("known-good"))), dir("known-good")).templates[0]!;
     expect(good).toMatchObject({ findings: [], gaps: [], sha256: LFM2.sha256, registry: { kind: "exact", entry: { sha256: LFM2.sha256 } } });
     const variant = modelAt(reportOf(await scanJson(dir("known-good-variant"))), dir("known-good-variant")).templates[0]!;
     expect(variant).toMatchObject({ findings: [], gaps: [], registry: { kind: "whitespace" } });
-  });
+  }, SCAN_TIMEOUT);
 
   test("each findings fixture carries the severity its rule gives", async () => {
     const severity = async (f: Fixture) => modelAt(reportOf(await scanJson(dir(f))), dir(f)).templates[0]!;
     expect(await severity("findings-high")).toMatchObject({ severity: "HIGH", findings: [{ ruleId: "dunder_access" }] });
     expect(await severity("findings-medium")).toMatchObject({ severity: "MEDIUM", findings: [{ ruleId: "unbaselined_text" }] });
     expect(await severity("findings-low")).toMatchObject({ severity: "LOW", findings: [{ ruleId: "registry_divergence" }], baseline: { kind: "registry" } });
-  });
+  }, SCAN_TIMEOUT);
 
   test("ISC-42.1: a probe the scanner cannot build leaves the template incomplete, not clean", async () => {
     const t = modelAt(reportOf(await scanJson(dir("incomplete"))), dir("incomplete")).templates[0]!;
     expect(t.findings).toEqual([]);
     expect(t.probes.failed).toBeGreaterThan(0);
     expect(t.gaps).toEqual([expect.stringMatching(/^differential rendering incomplete: /)]);
-  });
+  }, SCAN_TIMEOUT);
 
   test("ISC-42.1: a template that refuses every probe leaves nothing checked, so it is incomplete", async () => {
     const t = modelAt(reportOf(await scanJson(dir("incomplete-refuses"))), dir("incomplete-refuses")).templates[0]!;
@@ -71,25 +71,25 @@ describe.skipIf(!sandbox.available)("ISC-42: one fixture per status, through bas
     expect(t.probes).toMatchObject({ rendered: 0, failed: 0 });
     expect(t.probes.refused).toBe(t.probes.total);
     expect(t.gaps).toEqual([expect.stringMatching(/^differential rendering incomplete: /)]);
-  });
+  }, SCAN_TIMEOUT);
 
   test("the whole tree: every template gets exactly one status, and the summary counts them", async () => {
     const report = reportOf(await scanJson(root));
     expect(report.models).toHaveLength(FIXTURES.length);
     for (const f of FIXTURES) expect(modelAt(report, dir(f)).status).toBe(EXPECTED[f]);
     expect(report.summary.statuses).toEqual({ "known-good": 1, "known-good-variant": 1, "clean-unverified": 1, findings: 3, incomplete: 2, no_template: 1 });
-  });
+  }, SCAN_TIMEOUT);
 });
 
 describe.skipIf(!sandbox.available)("ISC-27: real --json output validates against schema/report.schema.json", () => {
   test.each(FIXTURES)("%s", async (fixture) => {
     expect(schemaErrors(await scanJson(dir(fixture)))).toEqual([]);
-  });
+  }, SCAN_TIMEOUT);
 
   test("the mixed tree", async () => {
     expect(schemaErrors(await scanJson(root))).toEqual([]);
     expect(schemaErrors(await scanJson(dir("findings-high"), dir("incomplete"), dir("findings-medium")))).toEqual([]);
-  });
+  }, SCAN_TIMEOUT);
 });
 
 describe.skipIf(!sandbox.available)("ISC-28: the exit code from the real binary", () => {
@@ -110,7 +110,7 @@ describe.skipIf(!sandbox.available)("ISC-28: the exit code from the real binary"
     const run = await scanJson(dir(fixture));
     expect(run.code).toBe(CODES[fixture]);
     expect<number>(reportOf(run).exitCode).toBe(run.code);
-  });
+  }, SCAN_TIMEOUT);
 
   test.each([
     ["HIGH, incomplete and MEDIUM", ["findings-high", "incomplete", "findings-medium"], 2],

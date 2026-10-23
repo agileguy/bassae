@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { arr, buildGguf, str, T, typicalKvs } from "../gguf/builder.ts";
 import { link, makeTree, removeTrees } from "../helpers/tree.ts";
 import { snapshotTree } from "../scan/fixtures/pipeline.ts";
-import { bassae } from "./fixtures/cli.ts";
+import { bassae, SCAN_TIMEOUT } from "./fixtures/cli.ts";
 import { sha256 } from "./fixtures/trees.ts";
 
 afterAll(removeTrees);
@@ -59,7 +59,7 @@ describe("ISC-29: --extract writes <sha256-12>_<name>.jinja with the exact bytes
       expect(sha256(readFileSync(join(out("two"), name)))).toBe(sha256(bytes));
       expect(run.stdout).toContain(`wrote ${join(out("two"), name)}\n`);
     }
-  });
+  }, SCAN_TIMEOUT);
 });
 
 describe("ISC-29.1: an --out under the scanned model is refused with exit 3, and nothing is written", () => {
@@ -111,5 +111,5 @@ describe("ISC-35: --extract to an outside --out leaves the model untouched", () 
     expect(run.code).toBe(0);
     expect(readdirSync(out(`again-${name}`)).length).toBeGreaterThan(0);
     expect(snapshotTree(model(name))).toEqual(before);
-  });
+  }, SCAN_TIMEOUT);
 });

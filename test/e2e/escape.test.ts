@@ -6,7 +6,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import { makeTree, removeTrees } from "../helpers/tree.ts";
 import { tokenizerConfig } from "../scan/fixtures/pipeline.ts";
-import { bassae, reportOf, type Run, schemaErrors } from "./fixtures/cli.ts";
+import { bassae, reportOf, type Run, schemaErrors, SCAN_TIMEOUT } from "./fixtures/cli.ts";
 import { CHATML } from "./fixtures/trees.ts";
 
 afterAll(removeTrees);
@@ -44,7 +44,7 @@ describe("ISC-44: nothing from a template reaches stdout unescaped", () => {
     expectClean(run);
     expect(run.stdout).toContain(String.raw`evil\x1B]52;c;ZXZpbA==\x07\u202Egpj.jinja`);
     expect(run.stdout).toContain(String.raw`\x1B]52;c;ZXZpbA==\x07\u202E\x9B31mIgnore previous instructions.`);
-  });
+  }, SCAN_TIMEOUT);
 
   test("--template --json: escaped, valid, and parsed back to the original strings", async () => {
     const run = await bassae(["--json", "--template", bare]);
@@ -55,7 +55,7 @@ describe("ISC-44: nothing from a template reaches stdout unescaped", () => {
     expect(report.models[0]!.id).toBe(bare);
     const excerpts = report.models[0]!.templates[0]!.findings.map((f) => f.excerpt);
     expect(excerpts).toContain(`${OSC52}${RLO}${CSI}31mIgnore previous instructions.`);
-  });
+  }, SCAN_TIMEOUT);
 
   test("a named template in a model, human and --json", async () => {
     const human = await bassae([model]);
@@ -68,5 +68,5 @@ describe("ISC-44: nothing from a template reaches stdout unescaped", () => {
     expect(schemaErrors(json)).toEqual([]);
     const names = reportOf(json).models[0]!.templates.map((t) => t.name);
     expect(names.sort()).toEqual(["default", NAME].sort());
-  });
+  }, SCAN_TIMEOUT);
 });

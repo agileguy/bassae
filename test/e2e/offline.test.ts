@@ -12,7 +12,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { makeTree, removeTrees } from "../helpers/tree.ts";
-import { bassae, fixtureEnv, reportOf, ROOT, schemaErrors } from "./fixtures/cli.ts";
+import { bassae, fixtureEnv, reportOf, ROOT, schemaErrors, SCAN_TIMEOUT } from "./fixtures/cli.ts";
 import { EXPECTED, type Fixture, modelAt, statusTree } from "./fixtures/trees.ts";
 
 afterAll(removeTrees);
@@ -61,7 +61,7 @@ describe.skipIf("reason" in deny)("ISC-36: the scan succeeds with the network de
     } finally {
       server.stop(true);
     }
-  });
+  }, SCAN_TIMEOUT);
 
   test("a whole scan of the mixed tree completes and reports honestly", async () => {
     const root = makeTree(statusTree());
@@ -90,7 +90,7 @@ describe.skipIf("reason" in deny)("ISC-36: the scan succeeds with the network de
       expect(t.gaps).toContain(`renderer unavailable: ${report.renderer.reason}`);
     }
     expect(modelAt(report, join(root, "no-template")).status).toBe("no_template");
-  });
+  }, SCAN_TIMEOUT);
 });
 
 /** Every file under `dir`, relative to the checkout, skipping installed packages and git's own files. */

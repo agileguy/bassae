@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { sandboxAvailable } from "../../src/sandbox/index.ts";
 import type { ScanReport } from "../../src/types.ts";
 import { makeTree, removeTrees } from "../helpers/tree.ts";
-import { bassae, reportOf, type Run } from "./fixtures/cli.ts";
+import { bassae, reportOf, type Run, SCAN_TIMEOUT } from "./fixtures/cli.ts";
 import { CHATML_HIGH, CHATML_MEDIUM, type Fixture, modelAt, positionOf, statusTree } from "./fixtures/trees.ts";
 
 afterAll(removeTrees);
@@ -50,7 +50,7 @@ describe.skipIf(!sandbox.available)("ISC-26: the human report on the mixed tree"
   beforeAll(async () => {
     human = await bassae([root]);
     report = reportOf(await bassae(["--json", root]));
-  });
+  }, SCAN_TIMEOUT);
 
   test("exits 2 as the JSON report does, and ends in the summary line", () => {
     expect(human.code).toBe(2);
