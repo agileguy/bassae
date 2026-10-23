@@ -107,6 +107,30 @@ export function units(text: string, dateProbe = false): Set<string> {
 }
 
 /**
+ * Adds every unit of an explain probe's template text to `explained`, as printed and with month and weekday names
+ * masked: what units(text, false) and units(text, true) hold together, from one pass over the runs. A unit with no
+ * date word in it is the same either way, so it is added once.
+ */
+export function addExplained(explained: Set<string>, text: string): void {
+  for (const run of runs(text)) {
+    let prev = "";
+    let prevMasked = "";
+    for (let i = 0; i < run.length; i++) {
+      const word = run[i]!;
+      const masked = isDateWord(word) ? DATE_MASK : word;
+      explained.add(word);
+      if (masked !== word) explained.add(masked);
+      if (i > 0) {
+        explained.add(`${prev} ${word}`);
+        if (masked !== word || prevMasked !== prev) explained.add(`${prevMasked} ${masked}`);
+      }
+      prev = word;
+      prevMasked = masked;
+    }
+  }
+}
+
+/**
  * The units of a vary probe's template text that `explained` does not hold, in order. A pair is listed only when
  * both its words are explained, since a new word already says what the pair would. On a date probe, month and
  * weekday names are masked first, so `explained` must hold the masked units of the explain probes too.

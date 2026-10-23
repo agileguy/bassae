@@ -30,7 +30,7 @@ import type {
 import { CAP_FAILURES, DEFAULT_RENDER_LIMITS } from "../types.ts";
 import { checkContent } from "./integrity.ts";
 import { buildProbes, readsTools, REFERENCE_DATE } from "./probes.ts";
-import { templateText, unexplained as unexplainedUnits, units, words } from "./residue.ts";
+import { addExplained, templateText, unexplained as unexplainedUnits, words } from "./residue.ts";
 import { checkTools } from "./tools.ts";
 
 const PROFILES: readonly EnvProfile[] = ["hf-default", "jinja2-globals"];
@@ -335,11 +335,13 @@ function renderDivergence(input: DiffRenderInput, probes: readonly Probe[], outc
   const explained = new Set<string>();
   for (const [i, o] of outcomes.entries()) {
     if (probes[i]!.role !== "explain") continue;
+    // An output the other profile printed too has the same units, so it is read once.
+    const seen = new Set<string>();
     for (const profile of PROFILES) {
       const r = o[profile];
-      if (!r?.ok) continue;
-      const text = templateText(r.output, probes[i]!.inputs);
-      for (const dateProbe of [false, true]) for (const u of units(text, dateProbe)) explained.add(u);
+      if (!r?.ok || seen.has(r.output)) continue;
+      seen.add(r.output);
+      addExplained(explained, templateText(r.output, probes[i]!.inputs));
     }
   }
 
