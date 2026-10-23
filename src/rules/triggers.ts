@@ -255,6 +255,8 @@ export interface Val {
   nsInit?: Map<string, Val>;
   /** A macro, by name. */
   macro?: string;
+  /** The clock or chance as a value (`set f = strftime_now`): calling the value calls them. */
+  fns?: string[];
   /** `.items()` / `|dictsort`: a two-name loop gets keys and values. */
   pairs?: boolean;
 }

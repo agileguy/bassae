@@ -209,6 +209,9 @@ class Interp {
   // Macros the template used as values (`set f = m`, `[m]`, `{'k': m}`). A
   // call the extraction cannot resolve may reach any of them.
   private readonly escaped = new Set<string>();
+  // The same for strftime_now and random put in a list or dict, or passed to
+  // a function: a call through a value the walk lost track of may be them.
+  private readonly escapedFns = new Set<string>();
   private work = 0;
   private changed = false;
   private outputLits = 0;
@@ -665,6 +668,7 @@ class Interp {
         let allKonst = true;
         for (const el of (node.value as Node[]) ?? []) {
           const e = this.eval(el, c);
+          this.holds(e);
           if (typeof e.konst === "string") konsts.push(e.konst);
           else allKonst = false;
           v = join(v, { ...e, konst: undefined, konstList: undefined, ns: undefined, macro: undefined, path: undefined });
@@ -680,6 +684,7 @@ class Interp {
             const kv = this.eval(k, c);
             keys.push(...kv.lits);
             const vv = this.eval(val, c);
+            this.holds(vv);
             v = join(v, { ...vv, konst: undefined, konstList: undefined, ns: undefined, macro: undefined, path: undefined, fields: undefined });
           }
         }
@@ -718,6 +723,8 @@ class Interp {
       return { ...EMPTY, macro: name };
     }
     if (name === "random") this.flagNondet(n, "uses `random`");
+    // The clock and chance are values too: `set f = strftime_now` then `f()`.
+    if (NONDET_FNS.has(name)) return { ...EMPTY, fns: [name] };
     if (BUILTINS.has(name)) return EMPTY;
     return refine(runtimeVal(rootField(name), name), name, c);
   }
@@ -797,7 +804,9 @@ class Interp {
             const keys: Lit[] = [];
             for (const a of args) {
               if (a?.type === "KeywordArgumentExpression") keys.push({ text: String((a.key as Node).value), span: this.exprSpan(a.key as Node) });
-              v = join(v, { ...this.eval(a, c), konst: undefined, fields: undefined, path: undefined });
+              const av = this.eval(a, c);
+              this.holds(av);
+              v = join(v, { ...av, konst: undefined, fields: undefined, path: undefined });
             }
             return { ...v, keys, truth: "none" };
           }
@@ -811,26 +820,52 @@ class Interp {
       const lits: Lit[] = [...(bound?.lits ?? []), ...(bound?.keys ?? [])];
       for (const a of args) {
         const v = this.eval(a, c);
+        this.holds(v);
         data = stronger(data, v.data);
         gate = strongest(gate, v.gate);
         lits.push(...v.lits, ...(v.keys ?? []));
       }
       if (name === "random") this.flagNondet(callee, "calls `random`");
       const out: Val = { lits, data, truth: data, gate };
-      // A local that is not a known macro may hold one taken from a list or dict.
-      return bound ? join(out, this.callEscaped(args, c, bound.gate)) : out;
+      // A local that is not a known macro may hold one taken from a list or
+      // dict, or the clock bound to it.
+      return bound ? join(join(out, this.callFns(bound.fns, n)), this.callEscaped(args, c, bound.gate)) : out;
     }
     if (callee?.type === "MemberExpression") {
       const r = this.eval(callee.object, c);
       const prop = callee.property as Node;
       const method = !callee.computed && prop?.type === "Identifier" ? String(prop.value) : prop?.type === "StringLiteral" ? String(prop.value) : "";
       const out = this.method(r, method, args, c, callee.object as Node);
-      // `d.k()` with no such string, list or dict method: an entry holding a macro.
-      return KNOWN_METHODS.has(method) ? out : join(out, this.callEscaped(args, c, r.gate));
+      if (KNOWN_METHODS.has(method)) return out;
+      // `d.k()` with no such string, list or dict method: an entry holding a
+      // macro or the clock.
+      const slot = r.ns !== undefined ? c.st.get(`${r.ns}.${method}`)?.fns : undefined;
+      return join(join(out, this.callFns([...(r.fns ?? []), ...(slot ?? [])], n)), this.callEscaped(args, c, r.gate));
     }
     const fv = this.eval(callee, c);
-    for (const a of args) this.eval(a, c);
-    return this.callEscaped(args, c, fv.gate);
+    for (const a of args) this.holds(this.eval(a, c));
+    return join(this.callFns(fv.fns, n), this.callEscaped(args, c, fv.gate));
+  }
+
+  // A call through a value that may be strftime_now or random, or one the
+  // walk lost track of after either went into a list, dict or function.
+  private callFns(fns: string[] | undefined, at: Node): Val {
+    let v: Val = EMPTY;
+    for (const f of new Set([...(fns ?? []), ...this.escapedFns])) {
+      if (f === "random") this.flagNondet(at, "calls `random`");
+      v = { lits: [], data: "nondeterministic", truth: "nondeterministic" };
+    }
+    return v;
+  }
+
+  // `v` goes where the walk does not follow a value it calls: a list or dict
+  // entry, or a function argument.
+  private holds(v: Val): void {
+    for (const f of v.fns ?? []) {
+      if (this.escapedFns.has(f)) continue;
+      this.escapedFns.add(f);
+      this.changed = true;
+    }
   }
 
   // A call the extraction cannot resolve runs every macro the template used as
@@ -954,6 +989,7 @@ class Interp {
       case "update":
       case "add": {
         // A mutating method: the receiver now holds the argument too.
+        for (const x of a) this.holds(x);
         const v = { ...(a[a.length - 1] ?? EMPTY), konst: undefined, konstList: undefined, ns: undefined, macro: undefined, path: undefined };
         const k = receiver?.type === "Identifier" ? String(receiver.value) : receiver?.type === "MemberExpression" ? this.slot(receiver, c) : undefined;
         if (k !== undefined) this.assign(k, v, c, c.st.get(k), true);
@@ -1235,6 +1271,8 @@ class Interp {
 // ---- values ----
 
 const BUILTINS = new Set(["namespace", "dict", "range", "strftime_now", "raise_exception", "cycler", "joiner", "lipsum", "caller", "zip", "enumerate"]);
+// The functions whose result is the clock or chance.
+const NONDET_FNS = new Set(["strftime_now", "random"]);
 const SHAPE_SELECT_TESTS = new Set(["defined", "undefined", "none", "string", "mapping", "iterable", "sequence", "number", "integer", "float", "boolean", "true", "false"]);
 
 function runtimeVal(field: Field, path: string | undefined): Val {
@@ -1403,6 +1441,7 @@ function join(a: Val, b: Val): Val {
     konstList: a.konstList && b.konstList && a.konstList.join("\u0000") === b.konstList.join("\u0000") ? a.konstList : undefined,
     ns: a.ns === b.ns ? a.ns : undefined,
     macro: a.macro === b.macro ? a.macro : undefined,
+    fns: a.fns || b.fns ? [...new Set([...(a.fns ?? []), ...(b.fns ?? [])])].sort() : undefined,
     pairs: a.pairs && b.pairs ? true : undefined,
     nsInit: a.nsInit ?? b.nsInit,
   };
@@ -1412,6 +1451,7 @@ function sameVal(a: Val, b: Val): boolean {
   if (a.lits.length !== b.lits.length || (a.keys?.length ?? 0) !== (b.keys?.length ?? 0)) return false;
   if (a.data !== b.data || a.truth !== b.truth || a.gate?.test !== b.gate?.test) return false;
   if (!sameFields(a.fields, b.fields) || a.konst !== b.konst || a.ns !== b.ns || a.macro !== b.macro || a.pairs !== b.pairs) return false;
+  if (String(a.fns) !== String(b.fns)) return false;
   if ((a.konstList === undefined) !== (b.konstList === undefined)) return false;
   for (let i = 0; i < a.lits.length; i++) if (a.lits[i]!.cond?.test !== b.lits[i]!.cond?.test) return false;
   return true;
