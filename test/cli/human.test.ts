@@ -70,6 +70,21 @@ describe("findings (ISC-26, ISC-26.1)", () => {
     expect(out).not.toContain(" 1:1 ");
   });
 
+  test("a finding listed outside any template prints no position: it is about no template, so not the whole of one (contracts r2)", () => {
+    // As the scan finalizes them: the whole-template span on an unreadable directory, the <scan> cap summary and a model finding.
+    const dir = finding("MEDIUM", "scanner_error", { file: "/roots/d001", message: "cannot read", span: { ...WHOLE }, templateName: undefined, templateSha256: undefined });
+    const capped = finding("MEDIUM", "scanner_error", { file: "<scan>", message: "5 more scanner_error findings suppressed", span: { ...WHOLE }, templateName: undefined, templateSha256: undefined });
+    const own = finding("HIGH", "parse_error", { file: `${SNAP}/tokenizer_config.json`, span: { ...WHOLE }, templateName: undefined, templateSha256: undefined });
+    const out = lines(report([model([template("clean-unverified")], { findings: [own] })], { findings: [dir, capped] }));
+    const section = out.slice(out.indexOf("Findings outside templates"), out.findIndex((l) => l.startsWith("Templates")));
+    expect(section.filter((l) => /^ {2}(HIGH|MEDIUM|LOW) /.test(l))).toEqual([
+      `  HIGH    parse_error · ${SNAP}/tokenizer_config.json`,
+      "  MEDIUM  scanner_error · /roots/d001",
+      "  MEDIUM  scanner_error · <scan>",
+    ]);
+    expect(section.join("\n")).not.toContain("whole template");
+  });
+
   test("a finding with no span omits the position", () => {
     const out = renderHuman(report([model([template("findings", [finding("HIGH", "render_dos", { span: undefined })])])]));
     expect(out).toContain(`render_dos · default · ${SNAP}/chat_template.jinja`);

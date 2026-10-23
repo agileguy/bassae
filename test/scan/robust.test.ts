@@ -1,7 +1,7 @@
 // ISC-9 and the scan's own failures: a bad file, a bad root, a missing renderer or a failing hook never stops the scan.
 
 import { afterAll, describe, expect, test } from "bun:test";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createRegistry } from "../../src/registry/index.ts";
 import { FINDING_CAP } from "../../src/rules/finalize.ts";
 import { loadModels, scan } from "../../src/scan/index.ts";
@@ -9,7 +9,7 @@ import { sandboxAvailable } from "../../src/sandbox/index.ts";
 import { scanWith } from "../../src/scan/pipeline.ts";
 import type { Registry, Renderer } from "../../src/types.ts";
 import { makeTree, removeTrees } from "../helpers/tree.ts";
-import { buildGguf, typicalKvs } from "../gguf/builder.ts";
+import { buildGguf, typicalKvs, u32, type Value } from "../gguf/builder.ts";
 import { CHATML, CHATML_HIGH, CHATML_MEDIUM, countingRender, hfCacheRepo, hfModel, known, options, REV_A, tokenizerConfig } from "./fixtures/pipeline.ts";
 
 afterAll(removeTrees);
@@ -147,6 +147,64 @@ describe("contracts SF10: scan-level findings are finalized like every other", (
     expect(errors.slice(0, FINDING_CAP).map((f) => f.file)).toEqual(missing.slice(0, FINDING_CAP));
     expect(errors.at(-1)).toMatchObject({ message: "20 more scanner_error findings suppressed", file: "<scan>", detail: { suppressed: 20 } });
     expect(report.summary.findings.MEDIUM).toBe(FINDING_CAP + 1);
+    expect(report.exitCode).toBe(3);
+  });
+});
+
+describe("contracts r2: a cap never takes a template's own gap away", () => {
+  test("past FINDING_CAP scanner_errors in one model, each template keeps the one about its own file", async () => {
+    // FINDING_CAP + 5 additional templates, each with a download record that cannot be parsed: one MEDIUM
+    // scanner_error about each template's file, and so FINDING_CAP or more about files other than its own.
+    const names = Array.from({ length: FINDING_CAP + 5 }, (_, i) => `t${String(i).padStart(3, "0")}`);
+    const root = makeTree({
+      m: hfModel(CHATML, {
+        additional_chat_templates: Object.fromEntries(names.map((n) => [`${n}.jinja`, CHATML])),
+        ".cache": { huggingface: { download: { additional_chat_templates: Object.fromEntries(names.map((n) => [`${n}.jinja.metadata`, "not a record\n"])) } } },
+      }),
+    });
+    const report = await scan(options([root]));
+    const m = report.models.find((x) => x.id === join(root, "m"))!;
+    const extra = m.templates.filter((t) => t.name !== "default");
+    expect(extra.map((t) => t.name)).toEqual(names);
+    for (const t of extra) {
+      const file = join(root, "m", "additional_chat_templates", `${t.name}.jinja`);
+      expect(t.findings.filter((f) => f.ruleId === "scanner_error")).toEqual([expect.objectContaining({ file, message: expect.stringContaining("not verified") })]);
+      expect(t.gaps).toEqual([expect.stringContaining(`${t.name}.jinja: download metadata`)]);
+      expect(t.status).toBe("incomplete");
+    }
+    expect(m.findings.filter((f) => f.ruleId === "scanner_error")).toEqual([]);
+    expect(report.exitCode).toBe(3);
+  });
+
+  test("the cap still bounds what each template is given: FINDING_CAP per rule, then one summary on that template", async () => {
+    // FINDING_CAP + 50 distinct keys, each stored twice: one MEDIUM parse_error per key about the GGUF file, which holds two templates.
+    const extra = Array.from({ length: FINDING_CAP + 50 }, (_, i): [string, Value] => [`acme.k${i}`, u32(i)]);
+    const gguf = join(makeTree({ "x.gguf": buildGguf([...typicalKvs(CHATML), ...extra, ...extra]).bytes }), "x.gguf");
+    const report = await scan(options([dirname(gguf)]));
+    const m = report.models[0]!;
+    expect(m.templates).toHaveLength(2);
+    for (const t of m.templates) {
+      const errors = t.findings.filter((f) => f.ruleId === "parse_error");
+      expect(errors).toHaveLength(FINDING_CAP + 1);
+      expect(errors.at(-1)).toMatchObject({ message: "50 more parse_error findings suppressed", file: gguf, detail: { suppressed: 50 } });
+      expect(t.gaps).toHaveLength(FINDING_CAP + 1);
+      expect(t.status).toBe("incomplete");
+    }
+    expect(m.findings).toEqual([]);
+  });
+});
+
+describe("contracts r2 SF4: differential rendering's own gaps reach the template", () => {
+  test("a gap returned with complete: true still makes the template incomplete, and the scan exits 3", async () => {
+    const root = makeTree({ m: hfModel(CHATML) });
+    const report = await scan(
+      options([root], {
+        diffRender: async () => ({ findings: [], complete: true, probes: { total: 1, rendered: 1, refused: 0, failed: 0 }, gaps: ["the 32 MiB output budget was spent"] }),
+      }),
+    );
+    const t = report.models[0]!.templates[0]!;
+    expect(t.gaps).toContain("differential rendering incomplete: the 32 MiB output budget was spent");
+    expect(t.status).toBe("incomplete");
     expect(report.exitCode).toBe(3);
   });
 });
