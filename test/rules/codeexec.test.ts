@@ -281,7 +281,7 @@ test("T9: clean stock templates produce no HIGH and no dunder_access", () => {
 
 // --- Review round 2, wave 2 -------------------------------------------------
 
-// Carve-out (Gemini M1/M2) — a subscript key is exempt ONLY when it is a direct
+// Carve-out (contracts M1/M2) — a subscript key is exempt ONLY when it is a direct
 // literal index or provably runtime data. A key reached through a binding to a
 // literal, a template-built value, or a macro parameter is not, so calling a
 // value fetched by such a key is HIGH even when it folds to a benign string.

@@ -40,7 +40,7 @@ const THRESHOLDS: [string, string][] = [
   ["(messages|batch(40)|list)[1] is defined", W("(messages|batch(40)|list)[1] is defined")],
 ];
 
-test.each(THRESHOLDS)("ISC-18: %s is HIGH content_trigger (review round 2, Codex N2, Gemini N1)", (_label, src) => {
+test.each(THRESHOLDS)("ISC-18: %s is HIGH content_trigger (review round 2, runtime N2, contracts N1)", (_label, src) => {
   expect(triggers(src)).toEqual(["HIGH content_trigger"]);
 });
 
@@ -60,6 +60,6 @@ const PRESENCE: [string, string][] = [
   ["messages|batch(1)|list|length > 1", W("messages|batch(1)|list|length > 1")],
 ];
 
-test.each(PRESENCE)("ISC-18: %s is no content trigger (review round 2, Codex N2, Gemini N1)", (_label, src) => {
+test.each(PRESENCE)("ISC-18: %s is no content trigger (review round 2, runtime N2, contracts N1)", (_label, src) => {
   expect(triggers(src)).toEqual([]);
 });

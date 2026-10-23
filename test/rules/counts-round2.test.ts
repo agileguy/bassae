@@ -35,7 +35,7 @@ function expectPresence(srcs: string[]): void {
 
 // ---- item 1: a count reaches a threshold through `in`, range, cycle, digits ----
 
-test("ISC-18: a count tested for membership in constants or a range is a count test (review round 2, Codex N2, Gemini N1)", () => {
+test("ISC-18: a count tested for membership in constants or a range is a count test (review round 2, runtime N2, contracts N1)", () => {
   expectContent([
     W("messages|length in [41, 42, 43]"),
     W("messages|length in [40, 41]"),
@@ -50,7 +50,7 @@ test("ISC-18: a count tested for membership in constants or a range is a count t
   expectPresence([W("messages|length in [0, 1]"), L(W("loop.index0 in [0]")), L(W("loop.index0 in range(messages|length)")), W("1 in range(messages|length)")]);
 });
 
-test("ISC-18: an element of a range up to a count is a count (review round 2, Codex N2, Gemini N1)", () => {
+test("ISC-18: an element of a range up to a count is a count (review round 2, runtime N2, contracts N1)", () => {
   expectContent([
     W("range(messages|length)|last >= 40"),
     `{% for i in range(messages|length) %}{% if i == 40 %}${I}{% endif %}{% endfor %}`,
@@ -70,7 +70,7 @@ test("ISC-18: an element of a range up to a count is a count (review round 2, Co
   ]);
 });
 
-test("ISC-18: a count's digits are the count (review round 2, Gemini D1t, Codex N2)", () => {
+test("ISC-18: a count's digits are the count (review round 2, contracts D1t, runtime N2)", () => {
   expectContent([
     W("messages|length|string|length > 1"),
     `{% set d = {'41': '${I}'} %}{{ d.get(messages|length|string, '') }}`,
@@ -116,7 +116,7 @@ test("ISC-18: a lookup by a content key carries the key's test into its truth (r
 
 // ---- item 3: an empty default adds no constant ----
 
-test("ISC-18: an empty list or dict default adds no constant to an id join (review round 2, Codex N5)", () => {
+test("ISC-18: an empty list or dict default adds no constant to an id join (review round 2, runtime N5)", () => {
   const calls = (iter: string, c: string) => `{% for m in messages %}{% for tc in ${iter} %}{% if ${c} %}${I}{% endif %}{% endfor %}{% endfor %}`;
   expectPresence([
     calls("m.tool_calls|default([])", "m.tool_call_id == tc.id"),
@@ -149,7 +149,7 @@ test("ISC-18: an empty list or dict default adds no constant to an id join (revi
 
 // ---- item 4: a key's condition that grows on a later pass ----
 
-test("ISC-18: a dict key whose condition grows on a later loop pass is printed under it (review round 2, Gemini NIT)", () => {
+test("ISC-18: a dict key whose condition grows on a later loop pass is printed under it (review round 2, contracts NIT)", () => {
   // On the first pass ns.a is a constant, so selectattr keeps the key
   // unconditionally; on the second ns.a holds the previous message's content
   // and the key is chosen by it. The key's condition is the only thing about

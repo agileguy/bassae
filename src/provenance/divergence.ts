@@ -172,7 +172,7 @@ function overlaps(span: Span, r: { start: number; end: number }): boolean {
 // Each text run and string literal reduced to its ASCII-whitespace-separated runs, so moving text between a raw
 // run and a string literal, or re-indenting it, is not a literal change; whether such an edit changes output
 // is the renderer's to show. A run or string of whitespace alone (the newline a `-%}` trims) has no runs and is
-// left out: whitespaceKey hashes even an empty text, so its key alone cannot say so (review round 2, Gemini N3).
+// left out: whitespaceKey hashes even an empty text, so its key alone cannot say so (review round 2, contracts N3).
 // Numbers are kept as written.
 function literals(text: string): string[] | undefined {
   if (text.length > MAX_LITERAL_UNITS) return undefined;

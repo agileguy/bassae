@@ -248,7 +248,7 @@ test("M8: an inline `set x = ...` is NOT a block and does not deepen nesting", (
   expect(r.findings.some((f) => f.ruleId === "unanalyzable")).toBe(false);
 });
 
-// M8 / ISC-31 (Codex N-a) — only the closer of a block the count opened pops it.
+// M8 / ISC-31 (runtime N-a) — only the closer of a block the count opened pops it.
 // The library strips `{% endgeneration %}` before it parses, so counting that as
 // a close let 8000 nested ifs through to a parser that overflows a 1 MiB stack.
 const ENDGENERATION = "{% if a %}{% endgeneration %}".repeat(8000) + "{% endif %}".repeat(8000);
@@ -367,7 +367,7 @@ test("M5: every shape-cap unanalyzable finding is spanned on the offending text"
 });
 
 // M5 — the whitespace message and its span describe the same run: the first one
-// over the cap, even when a longer one follows (Codex round 3).
+// over the cap, even when a longer one follows (runtime review, round 3).
 test("M5: the whitespace cap names the length of the run it spans", () => {
   const src = "{{ x" + " ".repeat(600) + "}}{{ y" + " ".repeat(100_000) + "}}";
   const caps = scan(src).findings.filter((f) => f.ruleId === "unanalyzable");
@@ -494,7 +494,7 @@ test("LineMap: a lone surrogate of either kind is one column (review round 2, ru
   for (const [text, offset, line, col] of cases) expect({ text, at: new LineMap(text).at(offset) }).toEqual({ text, at: { line, col } });
 });
 
-test("a lone CR moves a finding's line (Codex R4)", () => {
+test("a lone CR moves a finding's line (runtime R4)", () => {
   const src = "a\rb\r{{ x.__class__ }}";
   const f = scan(src).findings.find((x) => x.ruleId === "dunder_access");
   expect(f?.span?.line).toBe(3);

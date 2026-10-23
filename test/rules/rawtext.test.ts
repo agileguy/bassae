@@ -22,7 +22,7 @@ function regioned(src: string): string[] {
 }
 
 // jinja2 matches `\s*raw\s*` and `\s*endraw\s*` with Python's `\s`, which also
-// covers U+001C to U+001F and U+0085 (Codex, round 4).
+// covers U+001C to U+001F and U+0085 (runtime review, round 4).
 const PY_SPACE_RAW = [
   "{%\x1craw\x1c%}{#{% endraw %}{{ x.__class__ }}{# #}",
   "{%\x85raw%}{#{% endraw %}{{ x.__class__ }}{# #}",
@@ -30,7 +30,7 @@ const PY_SPACE_RAW = [
 ];
 
 const TRICKY = [
-  // Codex's round-3 reproductions.
+  // The runtime review's round-3 reproductions.
   "{{ {'a': {'b': 1}}['a'].__class__ }}",
   '{{ "}}" ~ x.__class__ }}',
   '{% set z = "%}" ~ x.__globals__ %}',

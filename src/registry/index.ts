@@ -273,7 +273,7 @@ function indexModel(model: ModelRecord): ModelIndex {
   const gguf = model.templates.filter((t) => t.source.kind === "gguf" && t.source.key !== undefined);
   // The last template under each key and byte length. A view is shorter than the value it is cut
   // from, so it is never that value; one lookup replaces a scan of every same-key template, which
-  // was quadratic in a record repeating one key (review round 2, Codex N1).
+  // was quadratic in a record repeating one key (review round 2, runtime N1).
   const lastByKeyLength = new Map<string, ExtractedTemplate>();
   for (const t of gguf) lastByKeyLength.set(`${t.bytes.length}\0${t.source.key}`, t);
   const viewOf = new Map<ExtractedTemplate, ExtractedTemplate>();
@@ -409,7 +409,7 @@ export function checkIntraModel(model: ModelRecord, table: PrecedenceTable): Fin
   for (const [name, group] of byName) {
     // Copies with equal bytes are bucketed first, so only pairs across buckets are visited and
     // each one visited is a finding: 65,000 identical keys cost one pass, not 2 billion skipped
-    // pairs (review round 2, Codex N1).
+    // pairs (review round 2, runtime N1).
     const order = new Map(group.map((t, i) => [t, i]));
     const buckets = new Map<string, ExtractedTemplate[]>();
     for (const t of group) {

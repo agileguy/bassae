@@ -27,7 +27,7 @@ const VALUES: [string, string][] = [
   ["v for k, v in m|dictsort|list", `{% for m in messages %}{% for k, v in m|dictsort|list %}{% if v == 'xyzzy' %}${I}{% endif %}{% endfor %}{% endfor %}`],
 ];
 
-test.each(VALUES)("ISC-18: a pair's value keeps its class, so %s == 'xyzzy' is HIGH content_trigger (review round 2, Codex N3)", (_label, src) => {
+test.each(VALUES)("ISC-18: a pair's value keeps its class, so %s == 'xyzzy' is HIGH content_trigger (review round 2, runtime N3)", (_label, src) => {
   expect(triggers(src)).toEqual(["HIGH content_trigger"]);
 });
 
@@ -37,7 +37,7 @@ const KEYS: [string, string][] = [
   ["(m.items()|list|last)[-2]", L("(m.items()|list|last)[-2] == 'content'")],
 ];
 
-test.each(KEYS)("ISC-18: a pair's key is a field name, so %s == 'content' is no content trigger (review round 2, Codex N3)", (_label, src) => {
+test.each(KEYS)("ISC-18: a pair's key is a field name, so %s == 'content' is no content trigger (review round 2, runtime N3)", (_label, src) => {
   expect(triggers(src)).toEqual([]);
 });
 

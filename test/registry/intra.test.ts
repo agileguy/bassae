@@ -145,7 +145,7 @@ describe("ISC-7.5 edge cases", () => {
     expect(model.templates.filter((t) => !t.shadowed)).toHaveLength(1);
   });
 
-  test("65,000 identical copies of one key cost one pass, and one odd copy among them is still capped (review round 2, Codex N1)", () => {
+  test("65,000 identical copies of one key cost one pass, and one odd copy among them is still capped (review round 2, runtime N1)", () => {
     const n = 65_000;
     const same = Array.from({ length: n }, () => ["tokenizer.chat_template", str(chatml("same"))] as [string, ReturnType<typeof str>]);
     const identical = readGgufSource(bytesSource(buildGguf(same).bytes), "/m/x.gguf");

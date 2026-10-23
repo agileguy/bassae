@@ -49,7 +49,7 @@ export function extractTemplates(raw: RawTemplate[], path: string, realPath: str
   const templates = raw.map((r) => makeTemplate({ kind: "gguf", path, realPath, name: templateName(r.key), key: r.key }, r.bytes));
   const out: Extraction = { templates, views: [], findings: [] };
   // The first template under each name and each key, so finding a view's clash is a lookup, not a
-  // scan per NUL-holding value (review round 2, Codex N1).
+  // scan per NUL-holding value (review round 2, runtime N1).
   const firstByName = new Map<string, number>();
   const firstByKey = new Map<string, number>();
   templates.forEach((s, i) => {

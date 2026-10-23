@@ -203,7 +203,7 @@ describe("registryDivergence (ISC-25)", () => {
     }
   });
 
-  test("ISC-25: a text run or string of whitespace alone is not a literal change; the renderer decides (review round 2, Gemini N3)", async () => {
+  test("ISC-25: a text run or string of whitespace alone is not a literal change; the renderer decides (review round 2, contracts N3)", async () => {
     const base = "{% for m in messages %}{{ m.role }}: {{ m.content }}{% endfor %}";
     const renamed = "{% for x in messages %}{{ x.role }}: {{ x.content }}{% endfor %}";
     const verdict = async (text: string) => (await registryDivergence(tpl(text), upstream(base), quiet, inProcess))[0]!;
@@ -222,7 +222,7 @@ describe("registryDivergence (ISC-25)", () => {
     expect((await verdict(renamed.replace("messages %}", "messages %}\nhi")))!.message).toContain("literal text or a number");
   });
 
-  test("ISC-25: the two Qwen3 rewrites that add a content test and no literal are MEDIUM, not LOW (review round 2, Claude N5)", async () => {
+  test("ISC-25: the two Qwen3 rewrites that add a content test and no literal are MEDIUM, not LOW (review round 2, security N5)", async () => {
     const { stock, known, analyze } = qwen3();
     const system = "{%- if messages[0].role == 'system' %}";
     const role = "'<|im_start|>' + message.role + '\\n'";
@@ -240,7 +240,7 @@ describe("registryDivergence (ISC-25)", () => {
     }
   });
 
-  test("ISC-25: a presence-only control-flow rewrite of Qwen3 is still LOW (review round 2, Claude N5)", async () => {
+  test("ISC-25: a presence-only control-flow rewrite of Qwen3 is still LOW (review round 2, security N5)", async () => {
     const { stock, known, analyze } = qwen3();
     for (const [from, to] of [
       ['{%- if (message.role == "user") or (message.role == "system" and not loop.first) %}', '{%- if (message.role == "user") or (not loop.first and message.role == "system") %}'],
@@ -252,7 +252,7 @@ describe("registryDivergence (ISC-25)", () => {
     }
   });
 
-  test("ISC-25: a loop filter, a ternary, a select filter and a clock test in the changed lines count too (review round 2, Claude N5)", async () => {
+  test("ISC-25: a loop filter, a ternary, a select filter and a clock test in the changed lines count too (review round 2, security N5)", async () => {
     const names = "{% set k = 'content' %}{% set u = 'upper' %}\n";
     for (const [base, evil, cls, test] of [
       [CHATML, CHATML.replace("for message in messages", "for message in messages if message.content is upper"), "content", "message.content is upper"],
@@ -266,7 +266,7 @@ describe("registryDivergence (ISC-25)", () => {
     }
   });
 
-  test("ISC-25: an unchanged test the rewrite makes read content counts too (review round 2, Claude N5)", async () => {
+  test("ISC-25: an unchanged test the rewrite makes read content counts too (review round 2, security N5)", async () => {
     const base = "{% set ns = namespace(skip=false) %}\n{% for message in messages %}{% if not ns.skip %}{{ message.role }}: {{ message.content }}{% endif %}{% endfor %}";
     const evil = base.replace("skip=false", "skip=(messages|last).content.isupper()");
     const [f] = await registryDivergence(tpl(evil), registry(base), quiet, echo);
@@ -277,7 +277,7 @@ describe("registryDivergence (ISC-25)", () => {
     expect(g).toMatchObject({ severity: "LOW" });
   });
 
-  test("ISC-25: a rewrite whose tests cannot be classified is MEDIUM, not LOW (review round 2, Claude N5)", async () => {
+  test("ISC-25: a rewrite whose tests cannot be classified is MEDIUM, not LOW (review round 2, security N5)", async () => {
     // Each pass splits x once more, so its value never settles.
     const grows = "{% set x = messages %}{% for m in messages %}{% set x = x.split() %}{% endfor %}\n";
     const [f] = await registryDivergence(tpl(grows + RENAMED), registry(grows + CHATML), quiet, echo);

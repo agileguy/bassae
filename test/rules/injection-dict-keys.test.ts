@@ -33,10 +33,10 @@ const ELEMENTS = [
   "D.items()|list|first|first",
 ];
 
-test.each(ELEMENTS)("ISC-22: %s prints a key of the dict, so it is extracted and its URL found (review round 2, Gemini N2)", (expr) => {
+test.each(ELEMENTS)("ISC-22: %s prints a key of the dict, so it is extracted and its URL found (review round 2, contracts N2)", (expr) => {
   expect(findings(`${D}{{ ${expr} }}`)).toEqual(["HIGH url_in_text", "MEDIUM unbaselined_text"]);
 });
 
-test("ISC-22: a dict bound to another name keeps its keys (review round 2, Gemini N2)", () => {
+test("ISC-22: a dict bound to another name keeps its keys (review round 2, contracts N2)", () => {
   expect(findings(`${D}{% set d = D %}{{ d|list|first }}`)).toEqual(["HIGH url_in_text", "MEDIUM unbaselined_text"]);
 });

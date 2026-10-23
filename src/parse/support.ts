@@ -877,7 +877,7 @@ export function isUnboundName(name: string, env: BindingEnv): boolean {
  * reference whose binding chain is rooted in a runtime input, with no string
  * operation, method call or gadget anywhere along it (ISC-14.1). This is the
  * only exemption — a literal, a template-built value, or a macro parameter some
- * caller fills with one is not runtime (Gemini M1/M2). A direct literal index is
+ * caller fills with one is not runtime (contracts M1/M2). A direct literal index is
  * handled separately.
  */
 export function keyIsRuntime(node: Node, env: BindingEnv): boolean {

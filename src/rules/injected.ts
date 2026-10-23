@@ -1375,7 +1375,7 @@ class Interp {
   }
 
   // What `min`, `max`, `sort` and `unique` compare: each element, or the
-  // `attribute=` path of each, read part by part (review round 2, Codex N7).
+  // `attribute=` path of each, read part by part (review round 2, runtime N7).
   // Its class, and the condition it puts on what it chooses.
   private orderCond(o: Val, argNodes: Node[], at: Node): [TestClass, Cond | undefined] {
     const attr = kwargKonst(argNodes, "attribute");
@@ -1624,7 +1624,7 @@ function seqOf(v: Val): Val {
 const pairFields = new WeakMap<Field, Field>();
 /**
  * One `.items()` or `|dictsort` pair of the record `f`: its key at 0 and -2,
- * its value at 1 and -1, which keeps the value's class (review round 2, Codex
+ * its value at 1 and -1, which keeps the value's class (review round 2, runtime
  * N3). Cached so identity stays stable across passes.
  */
 function pairField(f: Field): Field {

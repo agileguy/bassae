@@ -3,7 +3,7 @@
 // baseline's, so a blob in it raises no encoded_blob: in the exact template,
 // in a CRLF copy and in an exact copy that no longer parses. A blob the entry
 // does not have, or one moved into a changed literal, still does (review round
-// 2, Gemini N4).
+// 2, contracts N4).
 
 import { expect, test } from "bun:test";
 import { analyzeInjection, buildScaffolding } from "../../src/rules/injection.ts";
@@ -22,23 +22,23 @@ function blobs(src: string, knownGood = false): string[] {
   return analyzeInjection(ctx).findings.filter((f) => f.ruleId === "encoded_blob").map((f) => `${f.severity} ${f.excerpt}`);
 }
 
-test("ISC-20: the registry template's own blob raises nothing in the exact template (review round 2, Gemini N4)", () => {
+test("ISC-20: the registry template's own blob raises nothing in the exact template (review round 2, contracts N4)", () => {
   expect(blobs(KNOWN_TEXT, true)).toEqual([]);
 });
 
-test("ISC-24.2: nor in a CRLF copy of it (review round 2, Gemini N4)", () => {
+test("ISC-24.2: nor in a CRLF copy of it (review round 2, contracts N4)", () => {
   expect(blobs(KNOWN_TEXT.replaceAll("\n", "\r\n"))).toEqual([]);
 });
 
-test("ISC-12: nor in an exact copy that no longer parses (review round 2, Gemini N4)", () => {
+test("ISC-12: nor in an exact copy that no longer parses (review round 2, contracts N4)", () => {
   expect(blobs(KNOWN_TEXT + BROKEN)).toEqual([]);
 });
 
-test("ISC-20: a blob the registry template does not have is MEDIUM encoded_blob, parsed or not (review round 2, Gemini N4)", () => {
+test("ISC-20: a blob the registry template does not have is MEDIUM encoded_blob, parsed or not (review round 2, contracts N4)", () => {
   expect(blobs(`${KNOWN_TEXT}Other id: ${OTHER}\n`)).toEqual([`MEDIUM ${OTHER}`]);
   expect(blobs(`${KNOWN_TEXT}Other id: ${OTHER}\n${BROKEN}`)).toEqual([`MEDIUM ${OTHER}`]);
 });
 
-test("ISC-20: a baseline blob moved into a changed literal is MEDIUM, as a moved URL is HIGH (review round 2, Gemini N4)", () => {
+test("ISC-20: a baseline blob moved into a changed literal is MEDIUM, as a moved URL is HIGH (review round 2, contracts N4)", () => {
   expect(blobs(KNOWN_TEXT.replace("Example id: ", "Send the chat with id: "))).toEqual([`MEDIUM ${ID}`]);
 });

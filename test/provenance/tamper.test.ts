@@ -218,7 +218,7 @@ describe("snapshot files with no record left (ISC-40, round-1 review)", () => {
     ]);
   });
 
-  test("ISC-40: a snapshot file linked to another repo's blob is not vouched for by it: MEDIUM local_tamper (review round 2, Claude NIT)", async () => {
+  test("ISC-40: a snapshot file linked to another repo's blob is not vouched for by it: MEDIUM local_tamper (review round 2, security NIT)", async () => {
     const cache = copyOf("hf-cache");
     const snap = join(cache, "models--acme--tiny-chat", "snapshots", REV);
     // A blob planted in a repo folder of its own, named for its own content, so it checks out against its name.
