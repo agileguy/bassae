@@ -1,0 +1,66 @@
+{
+  "fixtures": [
+    {
+      "path": "models/pillar-backdoor",
+      "expect": [
+        {
+          "ruleId": "content_trigger",
+          "severity": "HIGH"
+        },
+        {
+          "ruleId": "render_divergence",
+          "severity": "HIGH"
+        },
+        {
+          "ruleId": "local_comparison",
+          "severity": "MEDIUM"
+        }
+      ],
+      "tags": [
+        "pillar-backdoor"
+      ]
+    },
+    {
+      "path": "models/mirror-gguf",
+      "expect": [
+        {
+          "ruleId": "registry_divergence",
+          "severity": "HIGH"
+        },
+        {
+          "ruleId": "url_in_text",
+          "severity": "HIGH"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "path": "models/cache-tamper",
+      "expect": [
+        {
+          "ruleId": "local_tamper",
+          "severity": "HIGH"
+        },
+        {
+          "ruleId": "registry_divergence",
+          "severity": "HIGH"
+        },
+        {
+          "ruleId": "prefill_injection",
+          "severity": "HIGH"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "path": "models/truncated.gguf",
+      "expect": [
+        {
+          "ruleId": "parse_error",
+          "severity": "HIGH"
+        }
+      ],
+      "tags": []
+    }
+  ]
+}
