@@ -7,10 +7,11 @@
 // carry to the output, and how strongly it depends on runtime input. Literals
 // reach the output through text, `{{ }}`, set and set blocks, namespace
 // attributes, macro parameters and bodies, `caller()`, `~`/`+`/`%`, joins,
-// filters and string methods, so all of those carry them. Variables follow
-// jinja2's scoping: a `set` replaces the value on the path it is on, `if`
-// branches join where they meet, and what a `for` body or a macro sets is gone
-// after it, except namespace attributes and mutated lists. A loop's body starts
+// filters, string methods and calls the walk has no rule for, so all of those
+// carry them. Variables follow jinja2's scoping: a `set` replaces the value on
+// the path it is on, `if` branches join where they meet, and what a `for` body
+// or a macro sets is gone after it, except namespace attributes and mutated
+// lists. A macro's extra arguments are its `varargs` and `kwargs`. A loop's body starts
 // from the join of its entry and what the body left on earlier passes, computed
 // to a fixpoint, so a loop-carried value is never missed. Macros are inlined at
 // every call site, so their emissions inherit the call site's conditions
@@ -802,17 +803,20 @@ class Interp {
           }
         }
       }
-      // Any other function (range, a runtime callable): its result carries the
-      // arguments' data, never their text.
+      // Any other function (range, zip, a runtime callable, a value called as
+      // one): its result carries the arguments' data, and may hold their text
+      // or the called value's, so it keeps those too.
       let data: TestClass = "none";
       let gate: Cond | undefined;
+      const lits: Lit[] = [...(bound?.lits ?? []), ...(bound?.keys ?? [])];
       for (const a of args) {
         const v = this.eval(a, c);
         data = stronger(data, v.data);
         gate = strongest(gate, v.gate);
+        lits.push(...v.lits, ...(v.keys ?? []));
       }
       if (name === "random") this.flagNondet(callee, "calls `random`");
-      const out: Val = { lits: [], data, truth: data, gate };
+      const out: Val = { lits, data, truth: data, gate };
       // A local that is not a known macro may hold one taken from a list or dict.
       return bound ? join(out, this.callEscaped(args, c, bound.gate)) : out;
     }
@@ -851,13 +855,22 @@ class Interp {
       return { name: id?.type === "Identifier" ? String(id.value) : "", def: kw ? (p.value as Node) : undefined };
     });
     // The parameters are the macro's own layer; its `set` shadows them.
+    // Arguments past the formals reach the body as `varargs` and `kwargs`.
     const layer = new State(c.st);
+    let varargs: Val = { lits: [], data: "none", truth: "presence" };
+    let kwargs: Val = { lits: [], keys: [], data: "none", truth: "presence" };
     let pos = 0;
     for (const a of argNodes) {
-      if (a?.type === "KeywordArgumentExpression") layer.own.set(String((a.key as Node).value), this.eval(a.value, c));
-      else if (pos < formals.length) layer.own.set(formals[pos++]!.name, this.eval(a, c));
-      else this.eval(a, c);
+      if (a?.type === "KeywordArgumentExpression") {
+        const key = a.key as Node;
+        const v = this.eval(a.value, c);
+        layer.own.set(String(key.value), v);
+        if (!formals.some((f) => f.name === String(key.value))) kwargs = join(kwargs, { ...element(v), keys: [{ text: String(key.value), span: this.exprSpan(key) }] });
+      } else if (pos < formals.length) layer.own.set(formals[pos++]!.name, this.eval(a, c));
+      else varargs = join(varargs, element(this.eval(a, c)));
     }
+    if (!formals.some((f) => f.name === "varargs")) layer.own.set("varargs", varargs);
+    if (!formals.some((f) => f.name === "kwargs")) layer.own.set("kwargs", kwargs);
     for (const f of formals) if (!layer.own.has(f.name)) layer.own.set(f.name, f.def ? this.eval(f.def, c) : EMPTY);
     // The body runs under the call site's conditions: its text inherits them.
     const inner: Ctx = { cond: c.cond, emitCond: c.emitCond, facts: NO_FACTS, st: layer, scope: { macro: name, caller }, gen: c.gen, genElse: c.genElse, stack: [...c.stack, name] };
@@ -950,8 +963,15 @@ class Interp {
         return { ...base, lits: r.lits, data: r.data, truth: r.truth };
       default:
         // startswith, endswith, find, count, isdigit and the rest compute from
-        // the receiver's text: they reveal it.
-        return { ...base, lits: [], data: maxData(r, a), truth: maxData(r, a) };
+        // the receiver's text: they reveal it and print none of it.
+        if (TEXTLESS_METHODS.has(m)) return { ...base, lits: [], data: maxData(r, a), truth: maxData(r, a) };
+        // Any other method (ljust, zfill, removeprefix, encode, format_map,
+        // loop.cycle, or one this list does not know) may return the
+        // receiver's text or its arguments', so it keeps them all: extracting
+        // too much costs a MEDIUM, dropping text would pass it silently. A
+        // name that is no Python method calls a dict entry, which never
+        // returns the dict's keys.
+        return { ...base, lits: [...r.lits, ...(KNOWN_METHODS.has(m) ? (r.keys ?? []) : []), ...a.flatMap((x) => [...x.lits, ...(x.keys ?? [])])], data: maxData(r, a), truth: maxData(r, a) };
     }
   }
 
@@ -1221,6 +1241,12 @@ function runtimeVal(field: Field, path: string | undefined): Val {
   return { lits: [], data: field.cls, truth: "presence", fields: [field], path };
 }
 
+// `v` as one element of a list or dict the template builds: its text and
+// classes, none of its identity as a constant, namespace or macro.
+function element(v: Val): Val {
+  return { ...v, konst: undefined, konstList: undefined, ns: undefined, nsInit: undefined, path: undefined };
+}
+
 function boolVal(cls: TestClass): Val {
   return { lits: [], data: cls, truth: cls };
 }
@@ -1237,6 +1263,14 @@ function refine(v: Val, path: string | undefined, c: Ctx): Val {
 function gated(c: Ctx, gate: Cond | undefined): Ctx {
   return gate ? { ...c, cond: strongest(c.cond, gate), emitCond: strongest(c.emitCond, gate) } : c;
 }
+
+// Methods whose result holds none of the receiver's or the arguments' text: a
+// truth value, a position or a count, or None from an in-place change.
+const TEXTLESS_METHODS = new Set([
+  "startswith", "endswith", "find", "rfind", "index", "rindex", "count", "isalnum", "isalpha", "isascii", "isdecimal",
+  "isdigit", "isidentifier", "islower", "isnumeric", "isprintable", "isspace", "istitle", "isupper", "clear", "remove",
+  "sort", "reverse",
+]);
 
 // Python's string, list and dict methods: a call to one of these names is never
 // a call to a macro stored under that key.
