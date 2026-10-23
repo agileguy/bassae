@@ -38,12 +38,14 @@ import {
   classifyTest,
   clsOf,
   condOf,
+  countArith,
   elementField,
   factsFrom,
   FLAG_FILTERS,
   genPolarity,
   isRuntime,
   KEY_FIELD,
+  lengthOf,
   listOf,
   mapFields,
   memberField,
@@ -56,9 +58,11 @@ import {
   truthOf,
   unionFields,
   valueField,
+  vocabClass,
   type Cond,
   type Facts,
   type Field,
+  type Fields,
   type Lit,
   type TestClass,
   type TestEnv,
@@ -1098,7 +1102,9 @@ class Interp {
       case "length":
       case "count":
       case "wordcount":
-        return { lits: [], data: o.truth, truth: o.truth, gate };
+        // A count of conversation data: compared with 0 or 1 it is presence,
+        // with a threshold further away it is content (ISC-18).
+        return lengthOf(o, gate);
       case "int":
       case "float":
       case "abs":
@@ -1121,20 +1127,20 @@ class Interp {
       case "reject": {
         // Which elements survive depends on the test applied to each one.
         const efs = o.fields ? mapFields(o.fields, elementField) : undefined;
-        let read: TestClass;
+        let fs: Fields | undefined;
         let testAt: number;
         if (name === "selectattr" || name === "rejectattr") {
           const attr = typeof a[0]?.konst === "string" ? a[0].konst : undefined;
-          const fs = efs ? mapFields(efs, (f) => memberField(f, attr)) : undefined;
-          read = fs ? clsOf(fs) : o.data;
+          fs = efs ? mapFields(efs, (f) => memberField(f, attr)) : undefined;
           testAt = 1;
         } else {
-          read = efs ? clsOf(efs) : o.data;
+          fs = efs;
           testAt = 0;
         }
+        const read: TestClass = fs ? clsOf(fs) : o.data;
         const testArg = a[testAt];
         const test = typeof testArg?.konst === "string" ? testArg.konst : "";
-        let sel: TestClass = test === "" || SHAPE_SELECT_TESTS.has(test) ? (read === "none" ? "none" : "presence") : read;
+        let sel: TestClass = test === "" || SHAPE_SELECT_TESTS.has(test) ? (read === "none" ? "none" : "presence") : ((fs && vocabSelect(fs, test, a[testAt + 1])) ?? read);
         // What the elements are compared with (`select('in', x)`) decides too.
         for (const x of a.slice(testAt + 1)) sel = stronger(sel, x.data);
         const cond = strongest(this.argsCond(a, argNodes), condOf(sel === "presence" ? "none" : sel, this.exprSpan(fnode)));
@@ -1167,6 +1173,12 @@ class Interp {
     const r = this.eval(n.right, c);
     const gate = strongest(l.gate, r.gate);
     const data = stronger(l.data, r.data);
+    // Arithmetic on a count keeps it a count, shifted or scaled. Text is never
+    // a count: `'a' + 'b'` folds and `'text' * n` is chosen below.
+    if (o !== "~" && typeof l.konst !== "string" && typeof r.konst !== "string") {
+      const counted = countArith(l, r, o);
+      if (counted) return { ...counted, lits: [...l.lits, ...r.lits], gate: strongest(gate, counted.gate) };
+    }
     if (o === "~" || o === "+") {
       // Concatenation: fold two constants into one literal, so text assembled
       // from fragments is matched (and URL-scanned) whole.
@@ -1296,6 +1308,22 @@ const BUILTINS = new Set(["namespace", "dict", "range", "strftime_now", "raise_e
 // The functions whose result is the clock or chance.
 const NONDET_FNS = new Set(["strftime_now", "random"]);
 const SHAPE_SELECT_TESTS = new Set(["defined", "undefined", "none", "string", "mapping", "iterable", "sequence", "number", "integer", "float", "boolean", "true", "false"]);
+
+// `selectattr('type', 'equalto', 'image')` compares each element with a
+// constant, so it reads the field against its vocabulary as `==` does (ISC-18).
+const COMPARE_SELECT_TESTS = new Set(["equalto", "==", "eq", "sameas", "ne", "!=", "in"]);
+
+function vocabSelect(fs: Fields, test: string, value: Val | undefined): TestClass | undefined {
+  if (!value || !COMPARE_SELECT_TESTS.has(test) || isRuntime(value)) return undefined;
+  const values = test === "in" ? value.konstList : value.konst !== undefined ? [value.konst] : undefined;
+  let cls: TestClass | undefined;
+  for (const v of values ?? []) {
+    const c = vocabClass(fs, v);
+    if (c === undefined) return undefined;
+    cls = cls === undefined ? c : stronger(cls, c);
+  }
+  return cls;
+}
 
 function runtimeVal(field: Field, path: string | undefined): Val {
   return { lits: [], data: field.cls, truth: "presence", fields: [field], path };
