@@ -110,6 +110,18 @@ test("encoded blobs: one long run, hex, near-misses and many tiny strings", () =
   expect(suppressed(tiny)).toBe(120_000 - FINDING_CAP + 1);
 }, TIMING_TIMEOUT_MS);
 
+test("encoded blobs that hide their shape: split runs, decoded runs and base32", () => {
+  // Each split run is decoded from a few of its tokens, then each token is judged alone.
+  expect(expectLinear("blob-like tokens that never decode", blobs, (n) => "aB3 ".repeat(n), 250_000)).toEqual([]);
+  expect(expectLinear("'A1 ' x n", blobs, (n) => "A1 ".repeat(n), 300_000)).toEqual([]);
+  expect(expectLinear("blob-like token, then a word", blobs, (n) => "aB3 word ".repeat(n), 100_000)).toEqual([]);
+  expect(expectLinear("wrapped base64 lines", blobs, (n) => "QWxhZGRpbjpvcGVuIHNlc2FtZSBJZ25v\n".repeat(n), 30_000).length).toBe(1);
+  expect(expectLinear("base64 of upper-case text", blobs, (n) => "U1lTVEVN".repeat(n), 120_000).map((f) => f.detail!.encoding)).toEqual(["base64"]);
+  expect(expectLinear("base32 run", blobs, (n) => "JFDU4T2S".repeat(n), 120_000).map((f) => f.detail!.encoding)).toEqual(["base32"]);
+  const split = expectLinear("split blob x n", blobs, (n) => "SWdub3JlIGFsbCBw cmV2aW91cyB0ZXh0 x ".repeat(n), 30_000);
+  expect(suppressed(split)).toBe(120_000 - FINDING_CAP + 1);
+}, TIMING_TIMEOUT_MS);
+
 test("the literal walk is linear under the cap and over it", () => {
   // Under the cap the literals come from the pre-lexer; over it they stream.
   const tags = (n: number) => "{{ 'a.com' }}".repeat(n);

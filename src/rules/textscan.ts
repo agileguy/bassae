@@ -14,6 +14,7 @@ import { domainToUnicode } from "node:url";
 import type { Finding, FindingBase, InjectedText, RuleId, Severity, Span } from "../types.ts";
 import type { ParseOutcome } from "../parse/parse.ts";
 import { isJsWhitespace } from "../parse/parse.ts";
+import { isTemplateSpace } from "../whitespace.ts";
 import { clip, FINDING_CAP } from "./finalize.ts";
 import { eachLiteral } from "./literals.ts";
 import { IncrementalPos } from "./rawtext.ts";
@@ -32,27 +33,27 @@ export function findUrls(items: readonly InjectedText[], base: FindingBase): Fin
   return finish("url_in_text", "HIGH", base, [hits], (s, e) => ({ start: s, end: e, line: 1, col: 1 }));
 }
 
-/** MEDIUM encoded_blob for each base64-like or hex-like run of 32+ characters in a template literal: text between tags and string literals inside them (ISC-20). */
+/** MEDIUM encoded_blob for each base64-like, base32-like or hex-like run of 32+ characters in a template literal: text between tags and string literals inside them (ISC-20). A run wrapped across lines or split by spaces counts when it decodes to text. */
 export function findEncodedBlobs(outcome: ParseOutcome, text: string, base: FindingBase): Finding[] {
   const hits = new Hits();
   eachLiteral(outcome, text, (kind, from, to) => {
     scanBlobs(text, from, to, (start, end, blob) => {
       if (!hits.take()) return;
       const where = kind === "text" ? "template text" : "a string literal";
-      hits.kept.push({ start, end, message: `${blob === "hex" ? "hex-like" : "base64-like"} run of ${end - start} characters in ${where}`, excerpt: text.slice(start, end), detail: { encoding: blob, length: end - start } });
+      hits.kept.push({ start, end, message: `${blob}-like run of ${end - start} characters in ${where}`, excerpt: text.slice(start, end), detail: { encoding: blob, length: end - start } });
     });
   });
   return finish("encoded_blob", "MEDIUM", base, [hits], placer(outcome, text));
 }
 
-/** MEDIUM encoded_blob for each base64-like or hex-like run of 32+ characters in an injected text's folded value, spanned at the injected text (ISC-20). This catches a blob assembled from shorter literals with `~`, `+` or `|join`. The caller passes only items whose text is not one raw literal already scanned by `findEncodedBlobs`, so each blob is reported once. */
+/** MEDIUM encoded_blob for each base64-like, base32-like or hex-like run of 32+ characters in an injected text's folded value, spanned at the injected text (ISC-20). This catches a blob assembled from shorter literals with `~`, `+` or `|join`, or emitted by literals in sequence, whitespace between them included. The caller passes only items whose text is not one raw literal already scanned by `findEncodedBlobs`, so each blob is reported once. */
 export function findEncodedBlobsIn(items: readonly InjectedText[], base: FindingBase): Finding[] {
   const hits = new Hits();
   for (const item of items) {
     scanBlobs(item.text, 0, item.text.length, (start, end, blob) => {
       if (!hits.take()) return;
       const run = item.text.slice(start, end);
-      hits.kept.push({ start: item.span.start, end: item.span.end, span: item.span, message: `${blob === "hex" ? "hex-like" : "base64-like"} run of ${end - start} characters in injected text`, excerpt: run, detail: { encoding: blob, length: end - start } });
+      hits.kept.push({ start: item.span.start, end: item.span.end, span: item.span, message: `${blob}-like run of ${end - start} characters in injected text`, excerpt: run, detail: { encoding: blob, length: end - start } });
     });
   }
   return finish("encoded_blob", "MEDIUM", base, [hits], (s, e) => ({ start: s, end: e, line: 1, col: 1 }));
@@ -716,12 +717,13 @@ function ipv6End(s: string, i: number, to: number): number {
 
 // ---- ISC-20: encoded blobs ----
 
-export type BlobKind = "base64" | "hex";
+export type BlobKind = "base64" | "base32" | "hex";
 
 /** Receives one blob [start, end) in the scanned string. */
 export type BlobSink = (start: number, end: number, kind: BlobKind) => void;
 
-// The shortest run that counts as a blob (ISC-20).
+// The shortest run that counts as a blob (ISC-20). A run split by whitespace
+// counts its characters without the whitespace.
 const MIN_BLOB = 32;
 
 // A base64-like run switches between upper case, lower case, digits and symbols
@@ -734,6 +736,40 @@ const MIN_SWITCH_RATE = 0.45;
 // not a blob.
 const MAX_SYMBOL_SHARE = 1 / 8;
 
+// About 1 random base64 run in 100 fails the two cuts above by chance. A second
+// test adds whether its letters pair the way English words do. Of its pairs of
+// adjacent letters, case folded and doubled letters left out, about 23% of a
+// random run's are among the common English pairs below, and most of an
+// identifier's, which is built from words. Its switch rate here leaves out
+// symbols, which in a path or a kebab-case name only separate words. A random
+// run's common share is about 0.4 below that rate, and an identifier's well
+// above it. A run with both cases, symbols from one base64 alphabet and at most
+// one in 4, and a common share at most 0.15 above its rate, is random. Together
+// the two tests miss about 5 in 1,000,000 random runs of 40 characters.
+const MAX_COMMON_OVER_SWITCH = 0.15;
+const MAX_RANDOM_SYMBOL_SHARE = 1 / 4;
+
+// 150 common English letter pairs, roughly commonest first.
+const COMMON_PAIRS: Uint8Array = (() => {
+  const pairs =
+    "th he in er an re on at en nd ti es or te of ed is it al ar st to nt ng se ha as ou io le ve co me de hi ri ro ic ne ea ra ce li ch ll be ma si om ur ca el ta la ns di fo ho pe ec pr no ct us ac ot il tr ly nc et ut ss so rs un lo wa ge ie wh ee wi em ad ol rt po we na ul ni ts mo ow pa im mi ai sh ir su id os iv ia am fi ci vi pl ig tu ev ld ry mp fe bl ab gh ty op wo sa ay ex ke fr oo av ag if ap gr od bo sp rd do uc bu ei ov by rm ep tt oc fa";
+  const table = new Uint8Array(32 * 32);
+  for (const p of pairs.split(" ")) table[pairPlace(p.charCodeAt(0), p.charCodeAt(1))] = 1;
+  return table;
+})();
+
+// A letter pair's place in COMMON_PAIRS, either case: A-Z and a-z share their low five bits.
+function pairPlace(a: number, b: number): number {
+  return (a & 31) * 32 + (b & 31);
+}
+
+// A run split by whitespace is tried as one blob from each of its first few
+// tokens, so a blob-like word or two before it does not hide it.
+const MAX_SPLIT_STARTS = 3;
+
+// Decoded bytes are text when at least this share of their characters print.
+const MIN_PRINTABLE_SHARE = 0.9;
+
 function isBlobChar(c: number): boolean {
   return isAlnum(c) || c === 0x2b || c === 0x2f || c === 0x5f || c === 0x2d; // '+' '/' '_' '-'
 }
@@ -742,13 +778,40 @@ function isHexDigit(c: number): boolean {
   return (c >= 0x30 && c <= 0x39) || (c >= 0x41 && c <= 0x46) || (c >= 0x61 && c <= 0x66);
 }
 
+function isAsciiLetter(c: number): boolean {
+  return (c >= 0x41 && c <= 0x5a) || (c >= 0x61 && c <= 0x7a);
+}
+
+// The value of a base64 digit in either alphabet, or -1.
+function base64Value(c: number): number {
+  if (c >= 0x41 && c <= 0x5a) return c - 0x41;
+  if (c >= 0x61 && c <= 0x7a) return c - 0x61 + 26;
+  if (c >= 0x30 && c <= 0x39) return c - 0x30 + 52;
+  if (c === 0x2b || c === 0x2d) return 62; // '+' '-'
+  if (c === 0x2f || c === 0x5f) return 63; // '/' '_'
+  return -1;
+}
+
+// The value of a base32 digit in either case, or -1.
+function base32Value(c: number): number {
+  if (c >= 0x41 && c <= 0x5a) return c - 0x41;
+  if (c >= 0x61 && c <= 0x7a) return c - 0x61;
+  if (c >= 0x32 && c <= 0x37) return c - 0x32 + 26;
+  return -1;
+}
+
 /**
- * Every base64-like and hex-like run of MIN_BLOB or more characters in
- * s[from, to), in order. One forward pass. A base64-like run mixes upper case,
- * lower case and digits, switches class often and holds few symbols; trailing
- * '=' padding is part of it. A hex-like run is hex digits only, with at least
- * one digit and one letter. English words, snake_case, camelCase, paths and
- * separator lines like `====` or `----` are neither.
+ * Every encoded blob of MIN_BLOB or more characters in s[from, to), in order.
+ * One forward pass, each character read a bounded number of times.
+ *
+ * A base64-like run mixes upper case, lower case and digits, switches class
+ * often and holds few symbols, or its letters pair unlike English words, or it
+ * decodes to text; trailing '=' padding is part of it. A hex-like run is hex
+ * digits only, with at least one digit and one letter. A base32 run decodes to
+ * text. Blob-like tokens apart only by whitespace, a blob wrapped across lines
+ * or split by spaces, are one blob when they decode to text. English words,
+ * snake_case, camelCase, paths and separator lines like `====` or `----` are
+ * none of these.
  */
 export function scanBlobs(s: string, from: number, to: number, emit: BlobSink): void {
   let i = from;
@@ -757,53 +820,214 @@ export function scanBlobs(s: string, from: number, to: number, emit: BlobSink): 
       i++;
       continue;
     }
-    const p = i;
-    let upper = 0;
-    let lowerCase = 0;
-    let digits = 0;
-    let symbols = 0;
-    let switches = 0;
-    let prev = -1;
-    let allHex = true;
-    let hexStart = -1; // the hex sub-run in progress
-    let hexDigit = false;
-    let hexLetter = false;
-    for (;;) {
-      const c = i < to ? s.charCodeAt(i) : -1;
-      const blob = c >= 0 && isBlobChar(c);
-      if (!blob || !isHexDigit(c)) {
-        // The hex sub-run in progress, if any, ends here.
-        if (hexStart >= 0 && i - hexStart >= MIN_BLOB && hexDigit && hexLetter) emit(hexStart, i, "hex");
-        hexStart = -1;
-      }
-      if (!blob) break;
-      const cls = c >= 0x41 && c <= 0x5a ? 0 : c >= 0x61 && c <= 0x7a ? 1 : c >= 0x30 && c <= 0x39 ? 2 : 3;
-      if (cls === 0) upper++;
-      else if (cls === 1) lowerCase++;
-      else if (cls === 2) digits++;
-      else symbols++;
-      if (prev >= 0 && cls !== prev) switches++;
-      prev = cls;
-      if (isHexDigit(c)) {
-        if (hexStart < 0) {
-          hexStart = i;
-          hexDigit = hexLetter = false;
-        }
-        if (cls === 2) hexDigit = true;
-        else hexLetter = true;
-      } else {
-        allHex = false;
-      }
-      i++;
+    const end = splitEnd(s, i, to);
+    if (end === i) {
+      i = judgeRun(s, i, to, emit);
+      continue;
     }
-    const len = i - p;
-    if (len >= MIN_BLOB && !allHex && upper > 0 && lowerCase > 0 && digits > 0 && symbols <= len * MAX_SYMBOL_SHARE && switches >= (len - 1) * MIN_SWITCH_RATE) {
-      let e = i;
-      while (e < to && e - i < 2 && s.charCodeAt(e) === 0x3d) e++; // '=' padding
-      emit(p, e, "base64");
-      i = e;
+    // A split run is one blob when it decodes to text from one of its first
+    // tokens; the tokens before that, and every token of a run that does not
+    // decode, are judged alone.
+    let start = i;
+    let kind: BlobKind | undefined;
+    for (let tries = 0; tries < MAX_SPLIT_STARTS && start < end; tries++) {
+      kind = textKind(s, start, end);
+      if (kind) break;
+      start = nextToken(s, start, end);
     }
+    const alone = kind ? start : end;
+    for (let k = i; k < alone; k = nextToken(s, k, alone)) judgeRun(s, k, alone, emit);
+    if (kind) emit(start, end, kind);
+    i = end;
   }
+}
+
+// The end of the run of two or more blob-like tokens at i, apart only by ASCII
+// whitespace, '=' padding included; i when the token at i is not blob-like or
+// stands alone. A token is blob-like when it holds a digit, '+' or '/', or an
+// upper-case letter after its first character, or ends in padding, which ends
+// the run too.
+function splitEnd(s: string, i: number, to: number): number {
+  let tokens = 0;
+  let end = i;
+  let k = i;
+  for (;;) {
+    let e = k;
+    let like = false;
+    for (let c; e < to && isBlobChar((c = s.charCodeAt(e))); e++) {
+      if ((c >= 0x30 && c <= 0x39) || c === 0x2b || c === 0x2f || (e > k && c >= 0x41 && c <= 0x5a)) like = true;
+    }
+    const unpadded = e;
+    while (e < to && e - unpadded < 6 && s.charCodeAt(e) === 0x3d) e++; // '=', up to base32's 6
+    if (e > unpadded) like = true;
+    if (!like) break;
+    tokens++;
+    end = e;
+    if (e > unpadded) break;
+    let n = e;
+    while (n < to && isTemplateSpace(s.charCodeAt(n))) n++;
+    if (n === e || n === to || !isBlobChar(s.charCodeAt(n))) break;
+    k = n;
+  }
+  return tokens >= 2 ? end : i;
+}
+
+// The start of the token after the one at k, or end.
+function nextToken(s: string, k: number, end: number): number {
+  while (k < end && !isTemplateSpace(s.charCodeAt(k))) k++;
+  while (k < end && isTemplateSpace(s.charCodeAt(k))) k++;
+  return k;
+}
+
+// The kind of the blob s[from, to), whitespace skipped, when it decodes to text.
+function textKind(s: string, from: number, to: number): BlobKind | undefined {
+  if (decodesToText(s, from, to, 6)) return "base64";
+  if (isBase32(s, from, to) && decodesToText(s, from, to, 5)) return "base32";
+  return undefined;
+}
+
+// Whether s[from, to), whitespace skipped and up to its padding, is base32
+// digits in one case.
+function isBase32(s: string, from: number, to: number): boolean {
+  let upper = false;
+  let lower = false;
+  for (let i = from; i < to; i++) {
+    const c = s.charCodeAt(i);
+    if (c === 0x3d) break;
+    if (isTemplateSpace(c)) continue;
+    if (base32Value(c) < 0) return false;
+    if (c >= 0x41 && c <= 0x5a) upper = true;
+    else if (c >= 0x61) lower = true;
+  }
+  return !(upper && lower);
+}
+
+/**
+ * Whether s[from, to), read as base64 (6 bits a digit) or base32 (5) with ASCII
+ * whitespace skipped, holds MIN_BLOB or more digits and decodes to UTF-8 text:
+ * MIN_PRINTABLE_SHARE of its characters printable. Padding or any other
+ * character outside the alphabet ends the data; a broken UTF-8 sequence is one
+ * unprintable character. Allocates nothing.
+ */
+function decodesToText(s: string, from: number, to: number, bits: 5 | 6): boolean {
+  let read = 0;
+  let acc = 0;
+  let held = 0; // bits in acc not yet decoded
+  let need = 0; // continuation bytes the current UTF-8 character still needs
+  let chars = 0;
+  let printable = 0;
+  for (let i = from; i < to; i++) {
+    const c = s.charCodeAt(i);
+    if (isTemplateSpace(c)) continue;
+    const v = bits === 6 ? base64Value(c) : base32Value(c);
+    if (v < 0) break;
+    read++;
+    acc = ((acc << bits) | v) & 0x3fff;
+    held += bits;
+    if (held < 8) continue;
+    held -= 8;
+    const b = (acc >> held) & 0xff;
+    if (need > 0) {
+      if ((b & 0xc0) === 0x80) {
+        if (--need === 0) {
+          chars++;
+          printable++;
+        }
+        continue;
+      }
+      need = 0;
+      chars++; // the broken sequence; b starts afresh
+    }
+    if (b < 0x80) {
+      chars++;
+      if ((b >= 0x20 && b < 0x7f) || b === 0x09 || b === 0x0a || b === 0x0d) printable++;
+    } else if (b >= 0xc2 && b <= 0xdf) need = 1;
+    else if (b >= 0xe0 && b <= 0xef) need = 2;
+    else if (b >= 0xf0 && b <= 0xf4) need = 3;
+    else chars++;
+  }
+  return read >= MIN_BLOB && chars > 0 && printable >= chars * MIN_PRINTABLE_SHARE;
+}
+
+// Judge the run of blob characters at p, emitting it and any hex sub-run that
+// is a blob. Returns the index after the run, past its padding when emitted.
+function judgeRun(s: string, p: number, to: number, emit: BlobSink): number {
+  let i = p;
+  let upper = 0;
+  let lowerCase = 0;
+  let digits = 0;
+  let symbols = 0;
+  let switches = 0;
+  let prev = -1;
+  let allHex = true;
+  let hexStart = -1; // the hex sub-run in progress
+  let hexDigit = false;
+  let hexLetter = false;
+  let adjacent = 0; // adjacent pairs with no symbol
+  let wordSwitches = 0; // of those, pairs that switch class
+  let pairs = 0; // adjacent distinct letters, case folded
+  let common = 0; // of those, pairs in COMMON_PAIRS
+  let plusSlash = false;
+  let dashUnderscore = false;
+  let base32 = true; // only base32 digits so far
+  for (;;) {
+    const c = i < to ? s.charCodeAt(i) : -1;
+    const blob = c >= 0 && isBlobChar(c);
+    if (!blob || !isHexDigit(c)) {
+      // The hex sub-run in progress, if any, ends here.
+      if (hexStart >= 0 && i - hexStart >= MIN_BLOB && hexDigit && hexLetter) emit(hexStart, i, "hex");
+      hexStart = -1;
+    }
+    if (!blob) break;
+    const cls = c >= 0x41 && c <= 0x5a ? 0 : c >= 0x61 && c <= 0x7a ? 1 : c >= 0x30 && c <= 0x39 ? 2 : 3;
+    if (cls === 0) upper++;
+    else if (cls === 1) lowerCase++;
+    else if (cls === 2) digits++;
+    else {
+      symbols++;
+      if (c === 0x2b || c === 0x2f) plusSlash = true;
+      else dashUnderscore = true;
+    }
+    if (prev >= 0 && cls !== prev) switches++;
+    if (prev >= 0 && prev !== 3 && cls !== 3) {
+      adjacent++;
+      if (cls !== prev) wordSwitches++;
+    }
+    if (cls < 2 && i > p) {
+      const b = s.charCodeAt(i - 1);
+      if (isAsciiLetter(b) && (b & 31) !== (c & 31)) {
+        pairs++;
+        common += COMMON_PAIRS[pairPlace(b, c)]!;
+      }
+    }
+    if (base32Value(c) < 0) base32 = false;
+    prev = cls;
+    if (isHexDigit(c)) {
+      if (hexStart < 0) {
+        hexStart = i;
+        hexDigit = hexLetter = false;
+      }
+      if (cls === 2) hexDigit = true;
+      else hexLetter = true;
+    } else {
+      allHex = false;
+    }
+    i++;
+  }
+  const len = i - p;
+  if (len < MIN_BLOB || allHex) return i;
+  const mixedCase = upper > 0 && lowerCase > 0;
+  let kind: BlobKind | undefined;
+  if (mixedCase && digits > 0 && symbols <= len * MAX_SYMBOL_SHARE && switches >= (len - 1) * MIN_SWITCH_RATE) kind = "base64";
+  else if (mixedCase && !(plusSlash && dashUnderscore) && symbols <= len * MAX_RANDOM_SYMBOL_SHARE && (pairs > 0 ? common / pairs : 1) - (adjacent > 0 ? wordSwitches / adjacent : 0) <= MAX_COMMON_OVER_SWITCH) kind = "base64";
+  else if (decodesToText(s, p, i, 6)) kind = "base64";
+  else if (base32 && !mixedCase && decodesToText(s, p, i, 5)) kind = "base32";
+  if (!kind) return i;
+  let e = i;
+  const padding = kind === "base64" ? 2 : 6;
+  while (e < to && e - i < padding && s.charCodeAt(e) === 0x3d) e++; // '='
+  emit(p, e, kind);
+  return e;
 }
 
 // ---- ISC-21: invisible and deceptive characters ----

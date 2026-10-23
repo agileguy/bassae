@@ -36,6 +36,13 @@ const SHAPES: Record<string, { unit: string; tail?: string }> = {
   "all tag characters": { unit: "\u{E0041}" },
   "one dotted run ending .info": { unit: "a.", tail: "info" },
   "one base64 run": { unit: "aB3c" },
+  // Blobs that hide their shape: one split run of millions of tokens, decoded
+  // from its first few, and single runs judged by their decoded bytes.
+  "all 'aB3 '": { unit: "aB3 " },
+  "all 'A1 '": { unit: "A1 " },
+  "base64 text wrapped in lines": { unit: "QWxhZGRpbjpvcGVuIHNlc2FtZSBJZ25v\n" },
+  "one run of base64 of upper-case text": { unit: "U1lTVEVN" },
+  "one base32 run": { unit: "JFDU4T2S" },
   "one string of \\u200b escapes": { unit: "\\u200b", tail: "' }}" },
   "one string of \\N{ZWSP} escapes": { unit: "\\N{ZWSP}", tail: "' }}" },
   // The URL fold: every character read through the fold table, as a surrogate
