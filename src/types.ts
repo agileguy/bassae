@@ -53,7 +53,12 @@ export interface Finding {
   ruleId: RuleId;
   severity: Severity;
   message: string;
-  /** Absolute path of the file the template or record came from. */
+  /**
+   * Absolute path of the file the template or record came from, or the model's id for a finding about the
+   * model as a whole. Three kinds of finding name no file and carry a sentinel instead: "<renderer>" for an
+   * unavailable renderer, `https://huggingface.co/<repo>/tree/<revision>` for an upstream that could not be
+   * fetched, and "<scan>" for the summary of the scan's own findings past FINDING_CAP.
+   */
   file: string;
   templateName?: string;
   templateSha256?: string;
@@ -347,7 +352,10 @@ export interface Probe {
 export interface IntegrityIssue {
   ruleId: "content_integrity" | "tool_integrity";
   message: string;
-  /** The content (index into `Probe.contents`) or tool (index into `Probe.tools`) it concerns. */
+  /**
+   * The content (index into `Probe.contents`) or tool (index into `Probe.tools`) it concerns. -1 for a tool
+   * the probe did not pass, which has no index: an extra tool in the output, or one the scan budget could not rule out.
+   */
   index: number;
 }
 
@@ -406,7 +414,11 @@ export interface TemplateReport {
     | { kind: "registry"; entry: RegistryEntry }
     | { kind: "upstream"; repo: string; revision: string; path: string; templateName: string }
     | { kind: "none" };
-  /** Every finding on this template: the rules, divergence, differential rendering, and model findings about this template's own file. */
+  /**
+   * Every finding on this template: the rules, divergence, differential rendering, and model findings about
+   * this template's own file or hash. A model finding about a file holding several templates, such as a GGUF,
+   * is copied onto each of them, so it appears, and counts in `ScanReport.summary`, once per template.
+   */
   findings: Finding[];
   /** ISC-17. */
   injected: InjectedText[];
@@ -431,7 +443,7 @@ export interface ModelReport {
   /** Hub repos named by GGUF `general.*` metadata. Untrusted, never a baseline (ISC-41.1). */
   upstreamCandidates: { repo: string; key: string }[];
   extractionComplete: boolean;
-  /** Findings about the model as a whole: parse errors, tamper and local comparisons not tied to one template's file. */
+  /** Findings about the model as a whole: parse errors, tamper and local comparisons that name none of its templates' files or hashes. */
   findings: Finding[];
   templates: TemplateReport[];
 }
@@ -448,6 +460,11 @@ export interface ScanReport {
   models: ModelReport[];
   /** Findings that belong to no model: paths the walk could not read, budgets run out, an unavailable renderer. */
   findings: Finding[];
+  /**
+   * `statuses` counts each template once, and each model with no template once, as `no_template`, or
+   * `incomplete` when its extraction did not complete. `findings` counts every finding in the report by
+   * severity, a model finding copied onto several templates once per copy.
+   */
   summary: {
     models: number;
     templates: number;
