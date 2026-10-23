@@ -1,0 +1,72 @@
+[
+  {
+    "url": "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct/resolve/7ae557604adf67be50417f59c2c2f167def9a775/tokenizer_config.json",
+    "status": 307,
+    "headers": {
+      "content-type": "text/plain; charset=utf-8",
+      "content-length": "312",
+      "location": "/api/resolve-cache/models/Qwen/Qwen2.5-0.5B-Instruct/7ae557604adf67be50417f59c2c2f167def9a775/tokenizer_config.json?%2FQwen%2FQwen2.5-0.5B-Instruct%2Fresolve%2F7ae557604adf67be50417f59c2c2f167def9a775%2Ftokenizer_config.json=&etag=%2207bfe0640cb5a0037f9322287fbfc682806cf672%22",
+      "x-repo-commit": "7ae557604adf67be50417f59c2c2f167def9a775",
+      "x-linked-etag": "\"07bfe0640cb5a0037f9322287fbfc682806cf672\""
+    },
+    "body": "00.body"
+  },
+  {
+    "url": "https://huggingface.co/api/resolve-cache/models/Qwen/Qwen2.5-0.5B-Instruct/7ae557604adf67be50417f59c2c2f167def9a775/tokenizer_config.json?%2FQwen%2FQwen2.5-0.5B-Instruct%2Fresolve%2F7ae557604adf67be50417f59c2c2f167def9a775%2Ftokenizer_config.json=&etag=%2207bfe0640cb5a0037f9322287fbfc682806cf672%22",
+    "status": 200,
+    "headers": {
+      "content-type": "text/plain; charset=utf-8",
+      "etag": "W/\"07bfe0640cb5a0037f9322287fbfc682806cf672\"",
+      "x-repo-commit": "7ae557604adf67be50417f59c2c2f167def9a775"
+    },
+    "body": "01.body"
+  },
+  {
+    "url": "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct/resolve/7ae557604adf67be50417f59c2c2f167def9a775/chat_template.jinja",
+    "status": 404,
+    "headers": {
+      "content-type": "text/plain; charset=utf-8",
+      "content-length": "15",
+      "etag": "W/\"f-mY2VvLxuxB7KhsoOdQTlMTccuAQ\"",
+      "x-error-code": "EntryNotFound",
+      "x-error-message": "Entry not found"
+    },
+    "body": "02.body"
+  },
+  {
+    "url": "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct/resolve/7ae557604adf67be50417f59c2c2f167def9a775/chat_template.json",
+    "status": 404,
+    "headers": {
+      "content-type": "text/plain; charset=utf-8",
+      "content-length": "15",
+      "etag": "W/\"f-mY2VvLxuxB7KhsoOdQTlMTccuAQ\"",
+      "x-error-code": "EntryNotFound",
+      "x-error-message": "Entry not found"
+    },
+    "body": "03.body"
+  },
+  {
+    "url": "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct/resolve/7ae557604adf67be50417f59c2c2f167def9a775/processor_config.json",
+    "status": 404,
+    "headers": {
+      "content-type": "text/plain; charset=utf-8",
+      "content-length": "15",
+      "etag": "W/\"f-mY2VvLxuxB7KhsoOdQTlMTccuAQ\"",
+      "x-error-code": "EntryNotFound",
+      "x-error-message": "Entry not found"
+    },
+    "body": "04.body"
+  },
+  {
+    "url": "https://huggingface.co/api/models/Qwen/Qwen2.5-0.5B-Instruct/tree/7ae557604adf67be50417f59c2c2f167def9a775/additional_chat_templates",
+    "status": 404,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "content-length": "100",
+      "etag": "W/\"64-WZXrknYpJOwwVdcjGxMcZ1ocU3s\"",
+      "x-error-code": "EntryNotFound",
+      "x-error-message": "additional_chat_templates does not exist on \"7ae557604adf67be50417f59c2c2f167def9a775\""
+    },
+    "body": "05.body"
+  }
+]
