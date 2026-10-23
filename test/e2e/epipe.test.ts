@@ -1,12 +1,14 @@
 // Runtime SF6: a failure to print never weakens the exit code (ISC-28). A reader that goes away early (EPIPE)
-// leaves the verdict standing; any other write error, uncaught exception or unhandled rejection is 3.
+// leaves the verdict standing; any other write error, uncaught exception or unhandled rejection is 3, and so is a
+// command that fails to load at all (runtime r2 SF3).
 
 import { afterAll, describe, expect, test } from "bun:test";
+import { cpSync } from "node:fs";
 import { join } from "node:path";
-import { type Io, main, run } from "../../src/cli.ts";
+import { type Io, main, run } from "../../src/cli/main.ts";
 import type { ScanReport } from "../../src/types.ts";
 import { finding, model, report, template } from "../cli/fixtures/reports.ts";
-import { makeTree, removeTrees } from "../helpers/tree.ts";
+import { link, makeTree, removeTrees, type Tree } from "../helpers/tree.ts";
 import { CHATML_HIGH } from "../scan/fixtures/pipeline.ts";
 import { CLI, fixtureEnv, ROOT, SCAN_TIMEOUT } from "./fixtures/cli.ts";
 
@@ -94,11 +96,9 @@ describe("the real command", () => {
   }, SCAN_TIMEOUT);
 
   test("an uncaught exception or an unhandled rejection exits 3", async () => {
-    // On Linux, a timer can fire while the command's modules are still loading, before its handlers exist, and bun
-    // then exits 1 on its own. So each hook waits for the handler it means to reach.
     const hooks = makeTree({
-      "throw.ts": `const t = setInterval(() => { if (process.listenerCount("uncaughtException") === 0) return; clearInterval(t); throw new Error("late throw"); }, 1);`,
-      "reject.ts": `const t = setInterval(() => { if (process.listenerCount("unhandledRejection") === 0) return; clearInterval(t); Promise.reject(new Error("late rejection")); }, 1);`,
+      "throw.ts": `setTimeout(() => { throw new Error("late throw"); }, 0);`,
+      "reject.ts": `setTimeout(() => { Promise.reject(new Error("late rejection")); }, 0);`,
     });
     for (const [file, message] of [["throw.ts", "late throw"], ["reject.ts", "late rejection"]] as const) {
       const p = Bun.spawn([process.execPath, "--preload", join(hooks, file), CLI, "--version"], { cwd: ROOT, env: fixtureEnv(), stdout: "pipe", stderr: "pipe" });
@@ -106,5 +106,37 @@ describe("the real command", () => {
       expect(code).toBe(3);
       expect(stderr).toContain(`bassae: internal error: ${message}`);
     }
+  }, SCAN_TIMEOUT);
+});
+
+describe("the real command, when it fails to load", () => {
+  // A copy of src and package.json, so a test can break the install without touching the checkout.
+  function copy(extra: Tree = {}): string {
+    const dir = makeTree(extra);
+    cpSync(join(ROOT, "src"), join(dir, "src"), { recursive: true });
+    cpSync(join(ROOT, "package.json"), join(dir, "package.json"));
+    return dir;
+  }
+
+  // --no-install: bun would otherwise fetch a missing package from the registry instead of failing.
+  async function version(dir: string): Promise<{ code: number; stdout: string; stderr: string }> {
+    const p = Bun.spawn([process.execPath, "--no-install", join(dir, "src", "cli.ts"), "--version"], { cwd: dir, env: fixtureEnv(), stdout: "pipe", stderr: "pipe" });
+    const [stdout, stderr, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
+    return { code, stdout, stderr };
+  }
+
+  test("a package that is not installed exits 3, with one line on stderr", async () => {
+    const run = await version(copy());
+    expect(run.code).toBe(3);
+    expect(run.stdout).toBe("");
+    expect(run.stderr).toMatch(/^bassae: internal error: [^\n]*@huggingface\/jinja[^\n]*\n$/);
+  }, SCAN_TIMEOUT);
+
+  test("a module that throws as it loads exits 3, with its message escaped", async () => {
+    // As the launcher's findJinja() does when the package is not where the sandbox looks for it.
+    const dir = copy({ node_modules: link(join(ROOT, "node_modules")) });
+    const launcher = join(dir, "src", "sandbox", "launcher.ts");
+    await Bun.write(launcher, `${await Bun.file(launcher).text()}\nthrow new Error("not installed \\x1b[2J");\n`);
+    expect(await version(dir)).toEqual({ code: 3, stdout: "", stderr: "bassae: internal error: not installed \\x1B[2J\n" });
   }, SCAN_TIMEOUT);
 });

@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { type Io, run } from "../../src/cli.ts";
+import { type Io, run } from "../../src/cli/main.ts";
 import { type Command, parseArgs, USAGE } from "../../src/cli/args.ts";
 import { defaultRootCandidates, defaultRoots } from "../../src/cli/roots.ts";
 import type { ExitCode, ScanOptions, ScanReport } from "../../src/types.ts";
