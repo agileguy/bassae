@@ -12,7 +12,7 @@ import type { AnalysisContext, Finding, FindingBase, InjectedText, KnownGoodTemp
 import { parseTemplate, WHOLE_TEMPLATE } from "../parse/parse.ts";
 import { preLex } from "../parse/prelexer.ts";
 import { extract, rawItems, Scaffold } from "./injected.ts";
-import { findEncodedBlobs, findInvisibleChars, findUrls, findUrlsRaw } from "./textscan.ts";
+import { findEncodedBlobs, findEncodedBlobsIn, findInvisibleChars, findUrls, findUrlsRaw } from "./textscan.ts";
 import { capPerRule, clip, dedupe, pushAll } from "./finalize.ts";
 
 // Role and channel names a template writes between special tokens. A channel
@@ -127,8 +127,8 @@ function analyze(ctx: AnalysisContext, base: FindingBase): RuleResult {
     for (const n of ex.nondeterministic) {
       pushAll(findings, [{ ruleId: "nondeterministic_trigger", severity: "HIGH", message: n.message, ...base, span: n.span, excerpt: clip(t.text.slice(n.span.start, n.span.end)) }]);
     }
-    pushAll(findings, findUrls(ex.items, base)); //                    ISC-19
-    pushAll(findings, findEncodedBlobs(outcome, t.text, base)); //     ISC-20
+    pushAll(findings, whole(findUrls(ex.items, base), findUrls(ex.joined.urls, base))); //                                ISC-19
+    pushAll(findings, whole(findEncodedBlobs(outcome, t.text, base), findEncodedBlobsIn(ex.joined.blobs, base))); //  ISC-20
     pushAll(findings, findInvisibleChars(t.text, base, outcome)); //   ISC-21
     return { findings: capPerRule(dedupe(findings), base), complete: ex.complete };
   }
@@ -141,6 +141,15 @@ function analyze(ctx: AnalysisContext, base: FindingBase): RuleResult {
   pushAll(findings, findInvisibleChars(t.text, base, outcome));
   if (!outcome.oversized) pushAll(findings, itemFindings(rawItems(outcome, new Scaffold(scaffolding)), ctx, base, t.text));
   return { findings: capPerRule(dedupe(findings), base), complete: false };
+}
+
+// A URL or blob found across literals is reported once, whole: a finding on
+// part of it in one literal (`evil.com` of `evil.com{{ '/x' }}`) is dropped.
+function whole(parts: Finding[], joined: Finding[]): Finding[] {
+  if (joined.length === 0) return parts;
+  const within = (p: Finding, j: Finding): boolean =>
+    !!p.span && !!j.span && j.span.start <= p.span.start && p.span.end <= j.span.end && (j.excerpt ?? "").includes(p.excerpt ?? "\u0000");
+  return [...parts.filter((p) => !joined.some((j) => within(p, j))), ...joined];
 }
 
 // ISC-17.1, ISC-17.2, ISC-18 — the findings one extracted item raises.

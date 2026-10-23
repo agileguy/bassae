@@ -30,6 +30,7 @@
 // rather than throwing (ISC-42.1), and the text between tags is still reported.
 
 import type { InjectedText, Span } from "../types.ts";
+import { scanBlobs, scanUrls } from "./textscan.ts";
 import { WHOLE_TEMPLATE, type ParseOutcome } from "../parse/parse.ts";
 import { children, type LineMap, type Node } from "../parse/support.ts";
 import type { PreToken } from "../parse/prelexer.ts";
@@ -72,6 +73,8 @@ export interface Trigger {
 
 export interface Extraction {
   items: InjectedText[];
+  /** URLs and blobs only the printed text as a whole holds: across literals printed one after another, or in a folded literal (ISC-19, ISC-20). */
+  joined: { urls: InjectedText[]; blobs: InjectedText[] };
   nondeterministic: Trigger[];
   /** False when a budget stopped the walk before every emission was seen. */
   complete: boolean;
@@ -96,6 +99,8 @@ const MAX_KONST = 64 * 1024;
 // `set s = s ~ 'x'` folds ever longer strings; past this, the pieces stay as
 // written, which the matcher reads as more residue, never less.
 const KONST_BUDGET = 4 * 1024 * 1024;
+// Characters of printed text joined for the URL and blob scans.
+const JOIN_BUDGET = 16 * 1024 * 1024;
 // Tokens the text aligner looks ahead before it gives a literal a fallback span.
 const ALIGN_LOOKAHEAD = 256;
 // Trie steps the scaffolding matcher may take over the whole template.
@@ -107,23 +112,25 @@ const MAX_TRIE_CHARS = 4 * 1024 * 1024;
 
 const EMPTY: Val = { lits: [], data: "none", truth: "none" };
 const WORDISH = /[\p{L}\p{N}]/u;
+const NON_SPACE = /\S/u;
 
 /** Run the extraction over a parsed template. */
 export function extract(outcome: ParseOutcome, text: string, scaffolding: ReadonlySet<string>): Extraction {
   const matcher = new Scaffold(scaffolding);
   if (!outcome.program || !outcome.pre || !outcome.lines) {
-    return { items: rawItems(outcome, matcher), nondeterministic: [], complete: false };
+    return { items: rawItems(outcome, matcher), joined: { urls: [], blobs: [] }, nondeterministic: [], complete: false };
   }
   const interp = new Interp(outcome, outcome.lines);
   const lits = interp.run();
   const items = toItems(lits, matcher);
+  const joined = joinedText(lits, matcher);
   if (!interp.complete) {
     // Out of budget, the walk may have stopped before some text: every text run
     // between tags it did not reach is still reported, as on the no-AST path.
     const seen = new Set(items.map((i) => i.span.start));
     for (const r of rawItems(outcome, matcher)) if (!seen.has(r.span.start)) items.push(r);
   }
-  return { items, nondeterministic: [...interp.nondet.values()], complete: interp.complete && matcher.complete };
+  return { items, joined, nondeterministic: [...interp.nondet.values()], complete: interp.complete && matcher.complete && joined.complete };
 }
 
 /** With no AST (parse error or shape cap), every text run between tags is a candidate: it is emitted whenever it is reached. */
@@ -315,18 +322,18 @@ class Interp {
           const name = callee?.type === "Identifier" ? String(callee.value) : undefined;
           const caller: Caller = { body: (s.body as Node[]) ?? [], params: (s.callerArgs as Node[] | null) ?? [], ctx: c };
           const m = name ? this.macroNamed(name, c) : undefined;
-          this.emit(m ? this.callMacro(m, (call.args as Node[]) ?? [], c, caller) : this.eval(call, c), c, sink);
+          this.emit(m ? this.callMacro(m, (call.args as Node[]) ?? [], c, caller) : this.eval(call, c), c, sink, s);
           break;
         }
         case "FilterStatement": {
           const inner: Sink = { lits: [], data: "none", truth: "none" };
           this.exec(s.body, c, inner);
           const f = s.filter as Node;
-          this.emit(this.applyFilter({ lits: inner.lits, data: inner.data, truth: inner.truth }, filterName(f), filterArgs(f), c, f), c, sink);
+          this.emit(this.applyFilter({ lits: inner.lits, data: inner.data, truth: inner.truth }, filterName(f), filterArgs(f), c, f), c, sink, s);
           break;
         }
         default:
-          this.emit(this.eval(s, c), c, sink);
+          this.emit(this.eval(s, c), c, sink, s);
       }
     }
   }
@@ -397,7 +404,7 @@ class Interp {
   // the test when only that branch prints it.
   private repush(l: Lit, oneSided: boolean, test: Cond | undefined, c: Ctx, sink: Sink): void {
     const cond = oneSided ? strongest(l.cond, test) : l.cond;
-    if (cond) sink.truth = stronger(sink.truth, cond.test);
+    if (cond && WORDISH.test(l.text)) sink.truth = stronger(sink.truth, cond.test);
     sink.lits.push({ ...l, cond, via: oneSided || c.fresh ? ++this.vias : l.via });
   }
 
@@ -481,8 +488,10 @@ class Interp {
     }
   }
 
-  private emit(v: Val, c: Ctx, sink: Sink): void {
+  private emit(v: Val, c: Ctx, sink: Sink, at: Node): void {
     if (!this.spend(v.lits.length)) return;
+    // Runtime text separates the literals printed before and after it.
+    if (isRuntime(v) && v.lits.length === 0 && !v.keys?.length) this.pushLit({ text: "", span: this.exprSpan(at), brk: true }, c, sink);
     for (const l of v.lits) this.pushLit(l, c, sink);
     if (v.keys) for (const l of v.keys) this.pushLit(l, c, sink);
     sink.data = stronger(sink.data, v.data);
@@ -492,16 +501,22 @@ class Interp {
   }
 
   private pushLit(l: Lit, c: Ctx, sink: Sink): void {
-    // Text with no letter or digit (whitespace, punctuation) is never injected
-    // text, and is never taken as the generation-prompt marker.
-    if (!WORDISH.test(l.text)) return;
+    if (l.text === "" && !l.brk) return;
+    // Whitespace never continues a URL or a blob: it separates the literals
+    // around it as runtime text does. One break stands for a run of them.
+    if (l.brk || !NON_SPACE.test(l.text)) {
+      if (!sink.lits.at(-1)?.brk) sink.lits.push({ text: "", span: l.span, brk: true });
+      return;
+    }
     if (++this.outputLits > MAX_OUTPUT_LITS) {
       this.complete = false;
       return;
     }
     const cond = strongest(l.cond, c.emitCond);
-    if (cond) sink.truth = stronger(sink.truth, cond.test);
-    sink.lits.push({ text: l.text, span: l.span, cond, via: c.fresh ? ++this.vias : l.via, routed: l.routed, gen: l.gen ?? c.gen, genElse: l.genElse ?? c.genElse });
+    // Punctuation is never injected text and is never the generation-prompt
+    // marker; it is kept only to join the literals around it (`http{{ ':' }}//`).
+    if (cond && WORDISH.test(l.text)) sink.truth = stronger(sink.truth, cond.test);
+    sink.lits.push({ text: l.text, span: l.span, cond, via: c.fresh ? ++this.vias : l.via, routed: l.routed, gen: l.gen ?? c.gen, genElse: l.genElse ?? c.genElse, folded: l.folded });
   }
 
   // ---- variables ----
@@ -1158,7 +1173,9 @@ class Interp {
       if (o === "~" && l.konst !== undefined && r.konst !== undefined) konst = konstText(l.konst) + konstText(r.konst);
       else if (o === "+" && typeof l.konst === "string" && typeof r.konst === "string") konst = l.konst + r.konst;
       konst = this.fold(konst);
-      const lits = [...l.lits, ...r.lits];
+      // A runtime operand with no text of its own separates the others'.
+      const gap: Lit[] = (isRuntime(l) && !l.lits.length) || (isRuntime(r) && !r.lits.length) ? [{ text: "", span: this.exprSpan(n), brk: true }] : [];
+      const lits = [...l.lits, ...gap, ...r.lits];
       return { lits: this.folded(lits, konst, n), keys: concatKeys(l, r), data, truth: stronger(l.truth, r.truth), gate, konst };
     }
     if (o === "*") {
@@ -1216,7 +1233,7 @@ class Interp {
     if (konst === undefined || lits.length === 0) return lits;
     let cond: Cond | undefined;
     for (const l of lits) cond = strongest(cond, l.cond);
-    return [{ text: konst, span: this.exprSpan(at), cond }];
+    return [{ text: konst, span: this.exprSpan(at), cond, folded: true }];
   }
 
   // ---- tests ----
@@ -1761,6 +1778,87 @@ function pushFrag(text: string, s: number, e: number, out: [number, number][]): 
 }
 
 // ---- items ----
+
+/**
+ * The URLs and blobs only the printed text as a whole holds (ISC-19, ISC-20).
+ * Literals printed one after another with no runtime text between them are one
+ * text: `evil{{ '' }}.com`, `{{ 'evil' }}.com`, `http{{ ':' }}//`. A URL is
+ * kept when it crosses a literal boundary, since one inside a literal is the
+ * item scan's; a blob also when it lies in a folded literal (`'a' ~ 'b'`),
+ * which the template-literal scan never sees. Either must touch injected text,
+ * so joined scaffolding raises nothing.
+ */
+export function joinedText(lits: Lit[], matcher: Scaffold): { urls: InjectedText[]; blobs: InjectedText[]; complete: boolean } {
+  const urls: InjectedText[] = [];
+  const blobs: InjectedText[] = [];
+  let budget = JOIN_BUDGET;
+  let complete = true;
+  let run: Lit[] = [];
+  let runChars = 0;
+  const scan = (): void => {
+    if (run.length === 0 || (run.length === 1 && !run[0]!.folded)) return;
+    if ((budget -= runChars) < 0) {
+      complete = false;
+      return;
+    }
+    const offs: number[] = [];
+    let text = "";
+    for (const l of run) {
+      offs.push(text.length);
+      text += l.text;
+    }
+    const at = (p: number): number => {
+      let lo = 0;
+      let hi = offs.length - 1;
+      while (lo < hi) {
+        const mid = (lo + hi + 1) >> 1;
+        if (offs[mid]! <= p) lo = mid;
+        else hi = mid - 1;
+      }
+      return lo;
+    };
+    // The literals a match covers, when it touches residue in one of them.
+    const covered = (s: number, e: number): [number, number] | undefined => {
+      const i = at(s);
+      const j = at(e - 1);
+      for (let k = i; k <= j; k++) {
+        const o = offs[k]!;
+        if (matcher.residue(run[k]!.text).frags.some(([fs, fe]) => fs + o < e && fe + o > s)) return [i, j];
+      }
+      return undefined;
+    };
+    const item = (s: number, e: number, [i, j]: [number, number]): InjectedText => {
+      let first = run[i]!.span;
+      let end = first.end;
+      for (let k = i; k <= j; k++) {
+        const sp = run[k]!.span;
+        if (sp.start < first.start) first = sp;
+        end = Math.max(end, sp.end);
+      }
+      return { text: text.slice(s, e), span: { ...first, end }, afterGenerationPrompt: false };
+    };
+    scanUrls(text, 0, text.length, (s, e) => {
+      const c = covered(s, e);
+      if (c && c[0] !== c[1]) urls.push(item(s, e, c));
+    });
+    scanBlobs(text, 0, text.length, (s, e) => {
+      const c = covered(s, e);
+      if (c && (c[0] !== c[1] || run[c[0]]!.folded)) blobs.push(item(s, e, c));
+    });
+  };
+  for (const l of lits) {
+    if (l.brk) {
+      scan();
+      run = [];
+      runChars = 0;
+    } else {
+      run.push(l);
+      runChars += l.text.length;
+    }
+  }
+  scan();
+  return { urls, blobs, complete };
+}
 
 /**
  * Turn the ordered output literals into injected-text items. Residue after an

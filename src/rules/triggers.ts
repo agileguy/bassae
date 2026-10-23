@@ -225,6 +225,10 @@ export interface Lit {
   via?: number;
   /** It reached a variable under a content test that reads a value already holding it (`set r = c.split('</think>')[0]` under `'</think>' in c`): the test moved the text, it did not put it there. */
   routed?: boolean;
+  /** Not text: a runtime value or whitespace printed here, so the literals on either side are not adjacent. */
+  brk?: true;
+  /** Folded from several literals (`'a' ~ 'b'`, `|join`): no one literal in the template holds this text. */
+  folded?: true;
 }
 
 /** What the extraction knows about one runtime value. */
