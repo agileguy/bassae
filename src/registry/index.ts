@@ -11,6 +11,7 @@ import { cKey, viewKey } from "../gguf/templates.ts";
 import { parseHfCachePath } from "../hf/cache.ts";
 import { LineMap } from "../parse/support.ts";
 import { clip } from "../rules/finalize.ts";
+import { whitespaceKey } from "../whitespace.ts";
 import type {
   ExtractedTemplate,
   Finding,
@@ -81,14 +82,8 @@ function parseEntry(raw: unknown, i: number): RegistryEntry {
   return { family: e.family, repo: e.repo, revision: e.revision, path: e.path, templateName: e.templateName, sha256: e.sha256 };
 }
 
-// ISC-24.2: the template's runs of non-whitespace, joined by one space. Two texts get the
-// same key exactly when their run sequences are equal, so CRLF against LF, indentation and
-// trailing newlines match while `do not` against `donot` does not. Whitespace here is ASCII
-// only: an inserted U+FEFF, U+00A0 or U+2028 is a real change, never a variant.
-export function whitespaceKey(text: string): string {
-  const s = text.replace(/[\t\n\v\f\r ]+/g, " ");
-  return s.slice(s.startsWith(" ") ? 1 : 0, s.endsWith(" ") ? -1 : undefined);
-}
+// ISC-24.2's variant key; one definition with divergence and the local comparison.
+export { whitespaceKey };
 
 /** Loads registry/known-good.json and the template text each entry pins. Throws when a pinned text does not hash to its entry's sha256. */
 export function loadRegistry(dir: string = REGISTRY_DIR): Registry {

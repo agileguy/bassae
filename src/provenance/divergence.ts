@@ -19,6 +19,7 @@ import { WHOLE_TEMPLATE } from "../parse/parse.ts";
 import { preLex } from "../parse/prelexer.ts";
 import { LineMap } from "../parse/support.ts";
 import { clip } from "../rules/finalize.ts";
+import { sameIgnoringWhitespace } from "../whitespace.ts";
 import type { Baseline, ExtractedTemplate, Finding, RenderRequest, Renderer, RuleResult, Severity, Span } from "../types.ts";
 import { SEVERITY_RANK } from "../types.ts";
 
@@ -110,31 +111,8 @@ function citation(b: Trusted): Record<string, string> {
   return { kind: "upstream", repo: b.repo, revision: b.revision, path: b.path, templateName: b.templateName };
 }
 
-/** True when the two texts' sequences of non-whitespace runs are equal (Decisions 23:30, ISC-24.2): CRLF, indentation and trailing newlines differ, `do not` and `donot` do not. */
-export function sameIgnoringWhitespace(a: string, b: string): boolean {
-  let i = 0;
-  let j = 0;
-  for (;;) {
-    while (i < a.length && isSpace(a.charCodeAt(i))) i++;
-    while (j < b.length && isSpace(b.charCodeAt(j))) j++;
-    if (i === a.length || j === b.length) return i === a.length && j === b.length;
-    // Compare one run on each side; both must end together.
-    while (i < a.length && j < b.length && !isSpace(a.charCodeAt(i)) && !isSpace(b.charCodeAt(j))) {
-      if (a.charCodeAt(i) !== b.charCodeAt(j)) return false;
-      i++;
-      j++;
-    }
-    const aEnd = i === a.length || isSpace(a.charCodeAt(i));
-    const bEnd = j === b.length || isSpace(b.charCodeAt(j));
-    if (!aEnd || !bEnd) return false;
-  }
-}
-
-// JavaScript's `\s`, the class the library's own whitespace handling uses.
-const SPACE = /\s/;
-function isSpace(c: number): boolean {
-  return c < 0x80 ? c === 0x20 || (c >= 0x09 && c <= 0x0d) : SPACE.test(String.fromCharCode(c));
-}
+// ISC-24.2's whitespace, the same ASCII-only definition the registry uses.
+export { sameIgnoringWhitespace };
 
 /** Where `text` first differs from the baseline: the first added or changed lines, else the point of the first removal. */
 export function firstChange(text: string, diff: LineDiff): Span {

@@ -170,7 +170,11 @@ describe("registryDivergence (ISC-25)", () => {
     expect(sameIgnoringWhitespace("do not", "donot")).toBe(false);
     expect(sameIgnoringWhitespace("a", "a b")).toBe(false);
     expect(sameIgnoringWhitespace("", " \n ")).toBe(true);
-    expect(sameIgnoringWhitespace("a b", "a b")).toBe(true);
+    expect(sameIgnoringWhitespace("a\tb", "a b")).toBe(true);
+  });
+
+  test("whitespace is ASCII only: a Unicode space is a real change (round-2 review)", () => {
+    for (const ch of ["\u00a0", "\u2028", "\u3000", "\ufeff"]) expect(sameIgnoringWhitespace("a b", `a${ch}b`)).toBe(false);
   });
 });
 

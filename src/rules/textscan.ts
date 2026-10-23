@@ -44,6 +44,19 @@ export function findEncodedBlobs(outcome: ParseOutcome, text: string, base: Find
   return finish("encoded_blob", "MEDIUM", base, [hits], placer(outcome, text));
 }
 
+/** MEDIUM encoded_blob for each base64-like or hex-like run of 32+ characters in an injected text's folded value, spanned at the injected text (ISC-20). This catches a blob assembled from shorter literals with `~`, `+` or `|join`. The caller passes only items whose text is not one raw literal already scanned by `findEncodedBlobs`, so each blob is reported once. */
+export function findEncodedBlobsIn(items: readonly InjectedText[], base: FindingBase): Finding[] {
+  const hits = new Hits();
+  for (const item of items) {
+    scanBlobs(item.text, 0, item.text.length, (start, end, blob) => {
+      if (!hits.take()) return;
+      const run = item.text.slice(start, end);
+      hits.kept.push({ start: item.span.start, end: item.span.end, span: item.span, message: `${blob === "hex" ? "hex-like" : "base64-like"} run of ${end - start} characters in injected text`, excerpt: run, detail: { encoding: blob, length: end - start } });
+    });
+  }
+  return finish("encoded_blob", "MEDIUM", base, [hits], (s, e) => ({ start: s, end: e, line: 1, col: 1 }));
+}
+
 /** HIGH invisible_char for each run of invisible or deceptive characters anywhere in the template, tags and comments included (ISC-21). Works with or without a line map, so it covers over-cap templates too. */
 export function findInvisibleChars(text: string, base: FindingBase, outcome?: ParseOutcome): Finding[] {
   const raw = new Hits();
