@@ -468,6 +468,7 @@ class Interp {
     if (filter) loop = strongest(loop, this.testCond(filter, { ...c, st: layer }));
     const inner = { cond: strongest(c.cond, loop), emitCond: strongest(c.emitCond, loop), fresh: true };
     const [each, none] = arms(c.path);
+    LOOP_BODIES.add(each);
     // A filter that holds only with the flag set, or a count of passes above 0
     // only with it (`range(add_generation_prompt|int)`), makes the body a
     // generation-prompt branch, and its `else` the arm exclusive with it.
@@ -730,7 +731,7 @@ class Interp {
           t = genArm(t, p === "body" ? id : undefined, p === "body" ? undefined : id);
           f = genArm(f, p === "body" ? undefined : id, p === "body" ? id : undefined);
         }
-        const v = this.under(join(t, f), cond, undefined, this.subjectOf(test, cond, c));
+        const v = this.under(join(inArm(t, yes), inArm(f, no)), cond, undefined, this.subjectOf(test, cond, c));
         // Truthy only when the flag is set: each arm is the flag, is false, or runs only with the flag.
         return (p === "body" || flagOrFalse(t)) && (p === "alternate" || flagOrFalse(f)) ? { ...v, genFlag: true } : v;
       }
@@ -1084,6 +1085,8 @@ class Interp {
   private method(r: Val, m: string, argNodes: Node[], c: Ctx, receiver: Node): Val {
     const a = argNodes.map((x) => this.eval(x, c));
     const base = { gate: strongest(r.gate, a.reduce<Cond | undefined>((g, x) => strongest(g, x.gate), undefined)) };
+    const known = this.konstMethod(r, m, a, argNodes, receiver);
+    if (known) return known;
     switch (m) {
       case "upper":
       case "lower":
@@ -1173,12 +1176,16 @@ class Interp {
     const a = argNodes.map((x) => this.eval(x, c));
     const gate = strongest(o.gate, a.reduce<Cond | undefined>((g, x) => strongest(g, x.gate), undefined));
     const keep = { lits: o.lits, data: o.data, truth: o.truth, gate };
+    const known = this.konstFilter(o, name, a, argNodes, fnode);
+    if (known) return known;
     switch (name) {
       case "default":
       case "d": {
-        // The default is printed only when the operand is undefined: a presence test.
+        // The default is printed only when the operand is undefined: a presence
+        // test, whose arms print one or the other (review round 3, runtime R3-3).
         const dv = this.under(a[0] ?? EMPTY, condOf("presence", this.exprSpan(fnode)));
-        return join(o, dv);
+        const [yes, no] = arms(c.path);
+        return join(inArm(o, yes), inArm(dv, no));
       }
       case "join": {
         const sep = a[0];
@@ -1411,6 +1418,102 @@ class Interp {
     if (s === "") return { lits: [], data: "none", truth: "none", gate: strongest(o.gate, gate), konst: "", konstList: [] };
     const konst = this.fold(s);
     return konst === undefined ? undefined : { lits: this.choose(this.folded(o.lits, konst, at), gate), data: "none", truth: "none", gate: strongest(o.gate, gate), konst };
+  }
+
+  // A string method on constant text, worked out as Python does:
+  // `'x.x'.split('x')`, `' .'.lstrip()`, `'x.x'.strip('x')`. Undefined when an
+  // argument is not constant or Python would raise (review round 3, runtime
+  // R3-3).
+  private konstMethod(r: Val, m: string, a: Val[], argNodes: Node[], at: Node): Val | undefined {
+    if (typeof r.konst !== "string") return undefined;
+    const s = r.konst;
+    switch (m) {
+      case "strip":
+      case "lstrip":
+      case "rstrip": {
+        const p = params(argNodes, a, ["chars"], true);
+        const chars = p && strArg(p[0]);
+        return chars === undefined ? undefined : this.konstText(r, pyStrip(s, chars, m !== "rstrip", m !== "lstrip"), a, at);
+      }
+      case "split":
+      case "rsplit": {
+        const p = params(argNodes, a, ["sep", "maxsplit"]);
+        const sep = p && strArg(p[0]);
+        const max = p && intArg(p[1], -1);
+        return sep === undefined || sep === "" || max === undefined ? undefined : this.konstItems(r, pySplit(s, sep, max, m === "rsplit"), a);
+      }
+      case "splitlines": {
+        const p = params(argNodes, a, ["keepends"]);
+        const keep = p && intArg(p[0], 0);
+        return keep === undefined ? undefined : this.konstItems(r, pyLines(s, keep !== 0), a);
+      }
+      case "partition":
+      case "rpartition": {
+        // The separator is one of the parts.
+        const p = params(argNodes, a, ["sep"], true);
+        const sep = p?.[0]?.konst;
+        if (typeof sep !== "string" || sep === "") return undefined;
+        const i = m === "partition" ? s.indexOf(sep) : s.lastIndexOf(sep);
+        const parts = i >= 0 ? [s.slice(0, i), sep, s.slice(i + sep.length)] : m === "partition" ? [s, "", ""] : ["", "", s];
+        return this.konstItems(r, parts, a, [...r.lits, ...p![0]!.lits]);
+      }
+      default:
+        return undefined;
+    }
+  }
+
+  // A filter on a constant string or list, worked out as Python Jinja2 does:
+  // `'x.x'|trim('x')`, `'.x'|first`, `('.x'|list)[0]`, `'.x'|list|unique|first`.
+  // Undefined when an argument is not constant or the result is undefined
+  // (review round 3, runtime R3-3).
+  private konstFilter(o: Val, name: string, a: Val[], argNodes: Node[], at: Node): Val | undefined {
+    const text = typeof o.konst === "string" ? Array.from(o.konst) : undefined;
+    const items = text ?? o.konstList;
+    if (!items) return undefined;
+    switch (name) {
+      case "trim": {
+        const p = params(argNodes, a, ["chars"]);
+        const chars = p && strArg(p[0]);
+        return text && chars !== undefined ? this.konstText(o, pyStrip(o.konst as string, chars, true, true), a, at) : undefined;
+      }
+      case "first":
+      case "last":
+        // The first or last of nothing is undefined.
+        return items.length > 0 && argNodes.length === 0 ? this.konstText(o, items[name === "first" ? 0 : items.length - 1]!, a, at) : undefined;
+      case "list":
+        return argNodes.length === 0 ? this.konstItems(o, items, a) : undefined;
+      case "reverse":
+        if (argNodes.length > 0) return undefined;
+        return text ? this.konstText(o, text.reverse().join(""), a, at) : this.konstItems(o, [...items].reverse(), a);
+      case "unique": {
+        // Compared lower-cased unless `case_sensitive`; the first of each is kept.
+        const p = params(argNodes, a, ["case_sensitive", "attribute"]);
+        const exact = p?.[0]?.konst ?? false;
+        if (!p || p[1] || typeof exact !== "boolean") return undefined;
+        const seen = new Set<string>();
+        return this.konstItems(o, items.filter((x) => !seen.has(exact ? x : x.toLowerCase()) && !!seen.add(exact ? x : x.toLowerCase())), a);
+      }
+      default:
+        return undefined;
+    }
+  }
+
+  // Constant text `s` worked out from `o` with the constant arguments `keys`:
+  // `o` itself when unchanged.
+  private konstText(o: Val, s: string, keys: Val[], at: Node): Val | undefined {
+    if (s !== o.konst) return this.cut(o, s, keys, at);
+    let gate = o.gate;
+    for (const k of keys) gate = strongest(gate, k.gate);
+    return { lits: o.lits, data: o.data, truth: o.truth, gate, konst: s };
+  }
+
+  // A constant list cut from `o` with the constant arguments `keys`. It may
+  // print any of the literals it was cut from, `lits`.
+  private konstItems(o: Val, items: string[], keys: Val[], lits = o.lits): Val | undefined {
+    if (this.fold(items.join("")) === undefined) return undefined;
+    let gate: Cond | undefined;
+    for (const k of keys) gate = strongest(gate, k.gate);
+    return { lits: items.some((x) => x !== "") ? this.choose(lits, gate) : [], data: "none", truth: "none", gate: strongest(o.gate, gate), konstList: items };
   }
 
   // What `min`, `max`, `sort` and `unique` compare: each element, or the
@@ -1981,6 +2084,120 @@ function kwargKonst(args: Node[], key: string): string | undefined {
   return undefined;
 }
 
+// The arguments of a call by parameter, `names` in order, by position or,
+// unless `positional`, by keyword. Undefined when one does not fit.
+function params(argNodes: Node[], a: Val[], names: string[], positional = false): (Val | undefined)[] | undefined {
+  const out: (Val | undefined)[] = [];
+  let next = 0;
+  for (let i = 0; i < argNodes.length; i++) {
+    const n = argNodes[i];
+    const kw = n?.type === "KeywordArgumentExpression";
+    if (n?.type === "SpreadExpression" || n?.type === "KeywordSpreadExpression" || (kw && positional)) return undefined;
+    const at = kw ? names.indexOf(String((n.key as Node).value)) : next++;
+    if (at < 0 || at >= names.length || out[at] !== undefined) return undefined;
+    out[at] = a[i];
+  }
+  return out;
+}
+
+// A constant str-or-None argument: null when absent or None, undefined when not constant.
+function strArg(v: Val | undefined): string | null | undefined {
+  if (v === undefined || v.konst === null) return null;
+  return typeof v.konst === "string" ? v.konst : undefined;
+}
+
+// A constant int argument, `absent` when there is none; undefined when not constant.
+function intArg(v: Val | undefined, absent: number): number | undefined {
+  if (v === undefined) return absent;
+  if (typeof v.konst === "boolean") return Number(v.konst);
+  return Number.isInteger(v.konst) ? (v.konst as number) : undefined;
+}
+
+// Python's whitespace (str.isspace), which split() and strip() take with no argument.
+function isPySpace(c: number): boolean {
+  return (c >= 0x09 && c <= 0x0d) || (c >= 0x1c && c <= 0x20) || c === 0x85 || c === 0xa0 || c === 0x1680 || (c >= 0x2000 && c <= 0x200a) || c === 0x2028 || c === 0x2029 || c === 0x202f || c === 0x205f || c === 0x3000;
+}
+
+// Python's line boundaries (str.splitlines).
+function isPyLineBreak(c: number): boolean {
+  return (c >= 0x0a && c <= 0x0d) || (c >= 0x1c && c <= 0x1e) || c === 0x85 || c === 0x2028 || c === 0x2029;
+}
+
+// str.strip, lstrip or rstrip: the characters of `chars`, or whitespace when null.
+function pyStrip(s: string, chars: string | null, left: boolean, right: boolean): string {
+  const cs = Array.from(s);
+  const set = chars === null ? undefined : new Set(Array.from(chars));
+  const drop = (ch: string): boolean => (set ? set.has(ch) : ch.length === 1 && isPySpace(ch.charCodeAt(0)));
+  let i = 0;
+  let j = cs.length;
+  if (left) while (i < j && drop(cs[i]!)) i++;
+  if (right) while (j > i && drop(cs[j - 1]!)) j--;
+  return cs.slice(i, j).join("");
+}
+
+// str.split or rsplit: at `sep`, or between runs of whitespace when null, at
+// most `max` times (every time when negative), from the right for rsplit.
+function pySplit(s: string, sep: string | null, max: number, fromRight: boolean): string[] {
+  const n = max < 0 ? Infinity : max;
+  const out: string[] = [];
+  if (sep !== null && !fromRight) {
+    let from = 0;
+    for (let k = s.indexOf(sep); out.length < n && k >= 0; k = s.indexOf(sep, from)) {
+      out.push(s.slice(from, k));
+      from = k + sep.length;
+    }
+    out.push(s.slice(from));
+    return out;
+  }
+  if (sep !== null) {
+    let to = s.length;
+    const prev = (): number => (to >= sep.length ? s.lastIndexOf(sep, to - sep.length) : -1);
+    for (let k = prev(); out.length < n && k >= 0; k = prev()) {
+      out.push(s.slice(k + sep.length, to));
+      to = k;
+    }
+    out.push(s.slice(0, to));
+    return out.reverse();
+  }
+  // Whitespace at either end splits off nothing; past `max` words, the rest is
+  // one word, whitespace inside it kept.
+  const sp = (i: number): boolean => isPySpace(s.charCodeAt(i));
+  if (!fromRight) {
+    for (let i = 0; ; ) {
+      while (i < s.length && sp(i)) i++;
+      if (i === s.length) return out;
+      if (out.length >= n) return [...out, s.slice(i)];
+      const j = i;
+      while (i < s.length && !sp(i)) i++;
+      out.push(s.slice(j, i));
+    }
+  }
+  for (let j = s.length; ; ) {
+    while (j > 0 && sp(j - 1)) j--;
+    if (j === 0) return out.reverse();
+    if (out.length >= n) return [...out, s.slice(0, j)].reverse();
+    const i = j;
+    while (j > 0 && !sp(j - 1)) j--;
+    out.push(s.slice(j, i));
+  }
+}
+
+// str.splitlines: at each line boundary, `\r\n` one, kept with `keep`.
+function pyLines(s: string, keep: boolean): string[] {
+  const out: string[] = [];
+  let from = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (!isPyLineBreak(c)) continue;
+    const end = c === 0x0d && s.charCodeAt(i + 1) === 0x0a ? i + 2 : i + 1;
+    out.push(s.slice(from, keep ? end : i));
+    from = end;
+    i = end - 1;
+  }
+  if (from < s.length) out.push(s.slice(from));
+  return out;
+}
+
 function collectMacros(program: Node, out: Map<string, Node>): void {
   const stack: unknown[] = [program];
   while (stack.length) {
@@ -2267,24 +2484,30 @@ function pushFrag(text: string, s: number, e: number, out: [number, number][]): 
  * kept when it crosses a literal boundary, since one inside a literal is the
  * item scan's; a blob also when it lies in a folded literal (`'a' ~ 'b'`),
  * which the template-literal scan never sees. Either must touch injected text,
- * so joined scaffolding raises nothing.
+ * so joined scaffolding raises nothing. One render prints one arm of an `if`
+ * or inline `if`, so each text a render may print is scanned on its own
+ * (review round 3, runtime R3-3), and each URL and blob is reported once.
  */
 export function joinedText(lits: Lit[], matcher: Scaffold): { urls: InjectedText[]; blobs: InjectedText[]; complete: boolean } {
   const urls: InjectedText[] = [];
   const blobs: InjectedText[] = [];
+  const seen = new Set<string>();
   let budget = JOIN_BUDGET;
   let complete = true;
   let run: Lit[] = [];
-  let runChars = 0;
-  const scan = (): void => {
-    if (run.length === 0 || (run.length === 1 && !run[0]!.folded)) return;
-    if ((budget -= runChars) < 0) {
-      complete = false;
-      return;
+  const push = (out: InjectedText[], t: InjectedText): void => {
+    const key = `${out === urls ? "url" : "blob"}:${t.span.start}:${t.span.end}:${t.text}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      out.push(t);
     }
+  };
+  // The literals of one render, in order.
+  const scanRender = (way: Lit[]): void => {
+    if (way.length === 0 || (way.length === 1 && !way[0]!.folded)) return;
     const offs: number[] = [];
     let text = "";
-    for (const l of run) {
+    for (const l of way) {
       offs.push(text.length);
       text += l.text;
     }
@@ -2304,15 +2527,15 @@ export function joinedText(lits: Lit[], matcher: Scaffold): { urls: InjectedText
       const j = at(e - 1);
       for (let k = i; k <= j; k++) {
         const o = offs[k]!;
-        if (matcher.residue(run[k]!.text).frags.some(([fs, fe]) => fs + o < e && fe + o > s)) return [i, j];
+        if (matcher.residue(way[k]!.text).frags.some(([fs, fe]) => fs + o < e && fe + o > s)) return [i, j];
       }
       return undefined;
     };
     const item = (s: number, e: number, [i, j]: [number, number]): InjectedText => {
-      let first = run[i]!.span;
+      let first = way[i]!.span;
       let end = first.end;
       for (let k = i; k <= j; k++) {
-        const sp = run[k]!.span;
+        const sp = way[k]!.span;
         if (sp.start < first.start) first = sp;
         end = Math.max(end, sp.end);
       }
@@ -2320,25 +2543,130 @@ export function joinedText(lits: Lit[], matcher: Scaffold): { urls: InjectedText
     };
     scanUrls(text, 0, text.length, (s, e) => {
       const c = covered(s, e);
-      if (c && c[0] !== c[1]) urls.push(item(s, e, c));
+      if (c && c[0] !== c[1]) push(urls, item(s, e, c));
     });
     scanBlobs(text, 0, text.length, (s, e) => {
       const c = covered(s, e);
-      if (c && (c[0] !== c[1] || run[c[0]]!.folded)) blobs.push(item(s, e, c));
+      if (c && (c[0] !== c[1] || way[c[0]]!.folded)) push(blobs, item(s, e, c));
     });
+  };
+  const scan = (): void => {
+    if (run.length === 0 || (run.length === 1 && !run[0]!.folded)) return;
+    // Past the budget, the run is read once in program order, and the result
+    // is incomplete.
+    const ways = renders(run, budget);
+    if (!ways) complete = false;
+    for (const way of ways ?? [run]) {
+      for (const l of way) budget -= l.text.length;
+      if (budget < 0) {
+        complete = false;
+        return;
+      }
+      scanRender(way);
+    }
   };
   for (const l of lits) {
     if (l.brk) {
       scan();
       run = [];
-      runChars = 0;
     } else {
       run.push(l);
-      runChars += l.text.length;
     }
   }
   scan();
   return { urls, blobs, complete };
+}
+
+// Option of a fork in a loop's body: both arms, in program order.
+const BOTH: Frame = {};
+// Renders of one run kept apart at once.
+const MAX_RENDERS = 4096;
+
+/**
+ * The texts one render may print from a run of literals, each as the literals
+ * it prints. A fork with literals on both arms in the run prints one arm; in a
+ * loop's body it may also print both, on different passes. A fork with
+ * literals on one arm only prints them, as before. Renders that print the same
+ * text and choose alike for the literals still to come are one, so arms that
+ * print the same text cost nothing. Undefined past `budget` characters or
+ * MAX_RENDERS renders.
+ */
+function renders(run: Lit[], budget: number): Lit[][] | undefined {
+  // The fork arms above each literal, outermost first.
+  const chains = run.map((l) => {
+    const out: Frame[] = [];
+    for (let x = l.at; x; x = x.up) if (x.fork !== undefined) out.push(x);
+    return out.reverse();
+  });
+  const armsOf = new Map<object, Set<Frame>>();
+  for (const ch of chains) {
+    for (const x of ch) {
+      const set = armsOf.get(x.fork!) ?? new Set<Frame>();
+      armsOf.set(x.fork!, set.add(x));
+    }
+  }
+  // The forks whose arms both hold literals of the run, their options, and the
+  // last literal under each.
+  const options = new Map<object, Frame[]>();
+  for (const [fork, set] of armsOf) {
+    if (set.size < 2) continue;
+    const [one] = set;
+    let looped = false;
+    for (let x = one!.up; x && !looped; x = x.up) looped = LOOP_BODIES.has(x);
+    options.set(fork, looped ? [...set, BOTH] : [...set]);
+  }
+  if (options.size === 0) return [run];
+  const marks = chains.map((ch) => ch.filter((x) => options.has(x.fork!)));
+  const last = new Map<object, number>();
+  marks.forEach((m, k) => m.forEach((x) => last.set(x.fork!, k)));
+  // Numbers for forks and options, for literal texts, and for each text a
+  // render has printed so far, built literal by literal.
+  const objs = new Map<object, number>();
+  const obj = (x: object): number => objs.get(x) ?? (objs.set(x, objs.size), objs.size - 1);
+  const texts = new Map<string, number>();
+  const textId = (t: string): number => texts.get(t) ?? (texts.set(t, texts.size), texts.size - 1);
+  const litText = run.map((l) => textId(l.text));
+  type Printed = { lit: Lit; before?: Printed };
+  type Render = { pick: Map<object, Frame>; printed?: Printed; text: number; chars: number };
+  let states: Render[] = [{ pick: new Map(), text: textId(""), chars: 0 }];
+  for (let k = 0; k < run.length; k++) {
+    const l = run[k]!;
+    const out: Render[] = [];
+    const place = (r: Render, i: number): void => {
+      if (i === marks[k]!.length) {
+        out.push({ pick: r.pick, printed: { lit: l, before: r.printed }, text: textId(`${r.text}:${litText[k]}`), chars: r.chars + l.text.length });
+        return;
+      }
+      const x = marks[k]![i]!;
+      const p = r.pick.get(x.fork!);
+      if (p === x || p === BOTH) return place(r, i + 1);
+      if (p !== undefined) return void out.push(r);
+      for (const o of options.get(x.fork!)!) {
+        const t = { ...r, pick: new Map(r.pick).set(x.fork!, o) };
+        if (o === x || o === BOTH) place(t, i + 1);
+        else out.push(t);
+      }
+    };
+    for (const r of states) place(r, 0);
+    // A choice no later literal depends on is dropped, and renders alike from
+    // here on are merged.
+    const merged = new Map<string, Render>();
+    let chars = 0;
+    for (const r of out) {
+      for (const f of r.pick.keys()) if (last.get(f)! <= k) r.pick.delete(f);
+      const key = `${r.text}|${[...r.pick].map(([f, o]) => `${obj(f)}:${obj(o)}`).sort().join(",")}`;
+      if (merged.has(key)) continue;
+      merged.set(key, r);
+      chars += r.chars;
+    }
+    if (merged.size > MAX_RENDERS || chars > budget) return undefined;
+    states = [...merged.values()];
+  }
+  return states.map((r) => {
+    const lits: Lit[] = [];
+    for (let p = r.printed; p; p = p.before) lits.push(p.lit);
+    return lits.reverse();
+  });
 }
 
 /**
@@ -2484,6 +2812,10 @@ function openHeader(lits: Lit[], res: Residue[]): { index: number; at: number } 
 // ---- blocks ----
 
 const ROOT: Frame = {};
+
+// Each loop's body. A fork in one may take both its arms in one render, on
+// different passes.
+const LOOP_BODIES = new WeakSet<Frame>();
 
 // The two arms of one `if`, loop or inline `if`, below `up`.
 function arms(up: Frame | undefined): [Frame, Frame] {
