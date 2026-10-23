@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
-import { checkTools, jsonValues } from "../../src/diffrender/tools.ts";
+import { checkTools, jsonValues, MAX_JSON_DEPTH, MAX_TOOL_ISSUES, MAX_TOOL_SITES } from "../../src/diffrender/tools.ts";
 import { TOOL_MATCHERS } from "../../src/diffrender/transforms.ts";
 import { loadRegistry, loadTransforms } from "../../src/registry/index.ts";
 import { createRenderer, sandboxAvailable } from "../../src/sandbox/index.ts";
@@ -37,6 +37,15 @@ describe("jsonValues", () => {
     const text = '{"a": '.repeat(50_000);
     const found = jsonValues(text, 1000);
     expect(found.exhausted).toBe(true);
+  });
+
+  test("skips a value nested deeper than its bound, saying so, and keeps what follows", () => {
+    const deep = "[".repeat(MAX_JSON_DEPTH + 1) + "]".repeat(MAX_JSON_DEPTH + 1);
+    const found = jsonValues(`${deep} {"after": 1}`);
+    expect(found.map((v) => v.value)).toEqual([{ after: 1 }]);
+    expect([found.deep, found.exhausted]).toEqual([true, false]);
+    const atBound = jsonValues("[".repeat(MAX_JSON_DEPTH) + "]".repeat(MAX_JSON_DEPTH));
+    expect([atBound.length, atBound.deep]).toEqual([1, false]);
   });
 });
 
@@ -129,6 +138,73 @@ describe("checkTools", () => {
   });
 });
 
+// Hostile output costs the scanner bounded time and memory (Decisions, review round 1: bounded cost).
+describe("checkTools on hostile output", () => {
+  const gptOss = TOOL_MATCHERS["gpt-oss-typescript-tools"]!;
+  const namespace = (body: string) => `<|start|>developer<|message|># Tools\n\nnamespace functions {\n\n${body}} // namespace functions<|end|>`;
+  // The runtime reviewer's output: 104,000 entries that never close, which once took 2 s and 104,853 issues.
+  const unclosed = namespace("type a = \n".repeat(104_000));
+
+  test("past the site cap, one issue says there are too many tool sites to check", () => {
+    const found = issues(both, unclosed);
+    expect(found.filter((i) => /too many/.test(i.message)).map((i) => i.index)).toEqual([-1]);
+    // The probe's tools are still checked against the sites inside the cap.
+    expect(indexes(found).slice(0, 2)).toEqual([
+      ["tool_integrity", 0],
+      ["tool_integrity", 1],
+    ]);
+  }, 5000);
+
+  test("the issues returned are the first ones plus a count of the rest", () => {
+    const found = issues(both, unclosed);
+    expect(found.length).toBe(MAX_TOOL_ISSUES + 1);
+    expect(found.at(-1)).toEqual({ ruleId: "tool_integrity", index: -1, message: expect.stringMatching(/^\d+ more tool_integrity issues/) });
+    // MAX_TOOL_SITES extras, two missing tools and the site-cap issue, less the ones listed.
+    const rest = Number(/^(\d+)/.exec(found.at(-1)!.message)![1]);
+    expect(rest).toBe(MAX_TOOL_SITES + 3 - MAX_TOOL_ISSUES);
+
+    const extra = (n: number) => JSON.stringify({ type: "function", function: { name: `extra_${n}`, description: "Archive it." } });
+    const many = issues(both, qwen([JSON.stringify(WEATHER_TOOL), JSON.stringify(TIME_TOOL), ...Array.from({ length: 5000 }, (_, n) => extra(n))]));
+    expect(many.length).toBe(MAX_TOOL_ISSUES + 1);
+    expect(many[0]!.message).toMatch(/extra_0$/);
+    expect(many.at(-1)!.message).toMatch(new RegExp(`^${5000 - MAX_TOOL_ISSUES} more`));
+  }, 5000);
+
+  test("each allowlisted rendering of each tool is printed once per output, however many sites there are", () => {
+    let calls = 0;
+    const render = gptOss.render;
+    gptOss.render = (tool) => (calls++, render(tool));
+    try {
+      issues(both, namespace(`${render(WEATHER_TOOL)}${render(TIME_TOOL)}`.repeat(MAX_TOOL_SITES)));
+    } finally {
+      gptOss.render = render;
+    }
+    expect(calls).toBe(both.tools.length);
+  });
+
+  test("deep nesting is an issue, never a RangeError", () => {
+    for (const depth of [MAX_JSON_DEPTH + 1, 200_000]) {
+      const deep = `${"[".repeat(depth)}${JSON.stringify(WEATHER_TOOL)}${"]".repeat(depth)}`;
+      const found = issues(both, qwen([deep, JSON.stringify(TIME_TOOL)]));
+      expect([depth, indexes(found)]).toEqual([
+        depth,
+        [
+          ["tool_integrity", 0],
+          ["tool_integrity", -1],
+        ],
+      ]);
+      expect(found[1]!.message).toMatch(/deeper than/);
+    }
+    // Within the bound, a tool nested in a wrapper is found, and a probe tool nested as deep as the bound compares.
+    const wrapped = `${"[".repeat(MAX_JSON_DEPTH - 10)}${JSON.stringify(WEATHER_TOOL)}${"]".repeat(MAX_JSON_DEPTH - 10)}`;
+    expect(issues(both, qwen([wrapped, JSON.stringify(TIME_TOOL)]))).toEqual([]);
+    let nest: unknown = "core";
+    for (let i = 0; i < MAX_JSON_DEPTH - 4; i++) nest = [nest];
+    const deepTool = { type: "function", function: { name: "nest", description: "Deep.", parameters: { type: "object", properties: {} }, nest } };
+    expect(issues(probe("deep tool", [{ role: "user", content: USER_1 }], [deepTool]), qwen([JSON.stringify(deepTool)]))).toEqual([]);
+  });
+});
+
 describe("malicious fixtures, rendered by the sandboxed renderer", () => {
   async function render(fixture: string, p: Probe): Promise<string> {
     const template = await Bun.file(join(FIXTURES, fixture)).text();
@@ -151,6 +227,12 @@ describe("malicious fixtures, rendered by the sandboxed renderer", () => {
 
   test.if(live)("adding a tool", async () => {
     for (const p of [both, pipeline, harbor]) expect([p.label, indexes(issues(p, await render("add-tool.jinja", p)))]).toEqual([p.label, [["tool_integrity", -1]]]);
+  });
+
+  test.if(live)("a namespace of entries that never close gives a bounded list of issues", async () => {
+    const found = issues(both, await render("many-tool-sites.jinja", both));
+    expect(found.length).toBe(MAX_TOOL_ISSUES + 1);
+    expect(found.some((i) => /too many/.test(i.message))).toBe(true);
   });
 
   test.if(live)("altering a nested parameter description inside an allowlisted rendering", async () => {
