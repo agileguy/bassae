@@ -2,13 +2,16 @@
 // on this machine and prints HIGH and MEDIUM counts per template. Read-only: it
 // never writes under the scanned trees.
 //
-//   bun scripts/corpus-scan.ts [--dump <dir>] [--verbose] [--differential] [root ...]
+//   bun scripts/corpus-scan.ts [--dump <dir>] [--verbose] [--differential] [--no-registry] [root ...]
 //
 // Roots default to ~/.cache/huggingface/hub and ~/.omlx. Models are found and
 // read by the real readers (discover, readHfModel, readGgufModel), so every
 // template is scanned with scaffolding built from its own model's special
 // tokens. A template shared by several models is scanned once per model and
-// reported with the worst injection result.
+// reported with the worst injection result. A template that matches the
+// known-good registry is scanned as the pipeline will scan it: its registry
+// literals are scaffolding (ISC-17.1) and an exact match is known-good (ISC-12).
+// --no-registry scans every template as unknown, to see the raw rule output.
 
 import { writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -20,11 +23,13 @@ import { readHfModel } from "../src/hf/index.ts";
 import { preLex } from "../src/parse/prelexer.ts";
 import { analyzeCodeExec } from "../src/rules/index.ts";
 import { analyzeInjection, buildScaffolding } from "../src/rules/injection.ts";
+import { loadRegistry } from "../src/registry/index.ts";
 import type { ExtractedTemplate, ModelRecord, RuleResult } from "../src/types.ts";
 
 const args = process.argv.slice(2);
 const verbose = args.includes("--verbose");
 const differential = args.includes("--differential");
+const registry = args.includes("--no-registry") ? undefined : loadRegistry();
 const dumpAt = args.indexOf("--dump");
 const dumpDir = dumpAt >= 0 ? args[dumpAt + 1] : undefined;
 const roots = args.filter((a, i) => !a.startsWith("--") && !(dumpAt >= 0 && i === dumpAt + 1));
@@ -92,14 +97,17 @@ function counts(r: RuleResult): { high: number; medium: number } {
 const totals = { ceHigh: 0, ceMed: 0, ceIncomplete: 0, injHigh: 0, injMed: 0, injIncomplete: 0 };
 console.log(`${models.length} models, ${sources} template sources, ${bySha.size} distinct templates\n`);
 console.log("code-exec       injection");
-console.log("HIGH  MED done  HIGH  MED done  sha256        name        first path");
+console.log("HIGH  MED done  HIGH  MED done  registry    sha256        name        first path");
 for (const [sha, { template: t, models: carriers }] of [...bySha].sort((a, b) => a[1].template.source.path.localeCompare(b[1].template.source.path))) {
-  const ce = analyzeCodeExec({ template: t, scaffolding: new Set(), knownGood: false });
+  const match = registry?.match(t) ?? { kind: "none" as const };
+  const knownGood = match.kind === "exact";
+  const known = match.kind === "none" ? undefined : match.known;
+  const ce = analyzeCodeExec({ template: t, scaffolding: new Set(), knownGood });
   // The worst injection result across the models that carry this template, each
   // with scaffolding from its own special tokens.
   let inj: RuleResult | undefined;
   for (const model of carriers) {
-    const r = analyzeInjection({ template: t, scaffolding: buildScaffolding(model), knownGood: false });
+    const r = analyzeInjection({ template: t, scaffolding: buildScaffolding(model, known), knownGood, known });
     if (!inj || counts(r).high > counts(inj).high || (counts(r).high === counts(inj).high && !r.complete)) inj = r;
   }
   inj ??= { findings: [], complete: true };
@@ -114,7 +122,7 @@ for (const [sha, { template: t, models: carriers }] of [...bySha].sort((a, b) =>
   const where = t.source.path.replace(homedir(), "~");
   const n = (x: number) => String(x).padStart(4);
   console.log(
-    `${n(c1.high)} ${n(c1.medium)} ${ce.complete ? "yes " : "NO  "} ${n(c2.high)} ${n(c2.medium)} ${inj.complete ? "yes " : "NO  "} ${sha.slice(0, 12)}  ${t.source.name.padEnd(10)}  ${where}${carriers.length > 1 ? ` (+${carriers.length - 1} more models)` : ""}`,
+    `${n(c1.high)} ${n(c1.medium)} ${ce.complete ? "yes " : "NO  "} ${n(c2.high)} ${n(c2.medium)} ${inj.complete ? "yes " : "NO  "} ${match.kind.padEnd(10)}  ${sha.slice(0, 12)}  ${t.source.name.padEnd(10)}  ${where}${carriers.length > 1 ? ` (+${carriers.length - 1} more models)` : ""}`,
   );
   // With no declared special tokens the scaffolding is only role names and
   // delimiters, so every control token the template writes reads as text.
