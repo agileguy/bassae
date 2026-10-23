@@ -3,7 +3,7 @@
 // whitespace, so it raises no injected-text finding even though it is not the
 // exact known-good text (`knownGood` stays an exact SHA-256 match, ISC-12).
 
-import { expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { parseTemplate } from "../../src/parse/parse.ts";
 import { loadRegistry } from "../../src/registry/index.ts";
 import { analyzeInjection, buildScaffolding } from "../../src/rules/injection.ts";
@@ -34,17 +34,18 @@ test("ISC-24.2: the registry has entries that parse", () => {
   expect(parsed.length).toBeGreaterThan(5);
 });
 
-test("ISC-17.1: a registry entry scanned against itself without known-good raises nothing", () => {
-  for (const k of parsed) expect({ entry: `${k.entry.repo} ${k.entry.templateName}`, findings: findings(k, k.text) }).toEqual({ entry: `${k.entry.repo} ${k.entry.templateName}`, findings: [] });
-});
-
-test("ISC-24.2: a CRLF or re-indented copy of every registry entry that parses raises no finding", () => {
-  for (const k of parsed) {
-    for (const [name, vary] of VARIANTS) {
-      const text = vary(k.text);
-      expect({ entry: `${k.entry.repo} ${k.entry.templateName}`, name, findings: findings(k, text) }).toEqual({ entry: `${k.entry.repo} ${k.entry.templateName}`, name, findings: [] });
-    }
-  }
+// One test per entry: each reads its template three times, and the registry
+// grows.
+describe("every registry entry that parses", () => {
+  parsed.forEach((k, i) => {
+    const entry = `#${i} ${k.entry.repo} ${k.entry.path} ${k.entry.templateName}`;
+    test(`ISC-17.1: scanned against itself without known-good, it raises nothing: ${entry}`, () => {
+      expect(findings(k, k.text)).toEqual([]);
+    });
+    test(`ISC-24.2: a CRLF or re-indented copy raises no finding: ${entry}`, () => {
+      for (const [name, vary] of VARIANTS) expect({ name, findings: findings(k, vary(k.text)) }).toEqual({ name, findings: [] });
+    });
+  });
 });
 
 test("ISC-24.2: a variant's own new words are still injected text", () => {
