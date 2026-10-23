@@ -8,7 +8,7 @@
 // size cap there is no AST, token array or line map, and only the raw-text
 // forms of the text rules run.
 
-import type { AnalysisContext, Finding, FindingBase, InjectedText, KnownGoodTemplate, ModelRecord, RuleResult } from "../types.ts";
+import type { AnalysisContext, Finding, FindingBase, InjectedText, InjectionAnalysis, KnownGoodTemplate, ModelRecord, RuleResult } from "../types.ts";
 import { parseTemplate, WHOLE_TEMPLATE } from "../parse/parse.ts";
 import { preLex } from "../parse/prelexer.ts";
 import { extract, rawItems, Scaffold } from "./injected.ts";
@@ -188,8 +188,23 @@ export function extractInjectedText(ctx: AnalysisContext): InjectedText[] {
   return extract(outcome, ctx.template.text, scaffolding).items;
 }
 
-/** unbaselined_text, prefill_injection, content_trigger, nondeterministic_trigger, url_in_text, encoded_blob and invisible_char. The raw-text forms of ISC-19 to ISC-21 still run when the template does not parse (ISC-12). */
-export function analyzeInjection(ctx: AnalysisContext): RuleResult {
+/**
+ * unbaselined_text, prefill_injection, content_trigger, nondeterministic_trigger, url_in_text, encoded_blob and invisible_char,
+ * with the injected text itself (ISC-17) and every trigger candidate (ISC-22.1). The raw-text forms of ISC-19 to ISC-21 still
+ * run when the template does not parse (ISC-12).
+ */
+export function analyzeInjection(ctx: AnalysisContext): InjectionAnalysis {
+  // Phase 3 seam stub: the injected text and the trigger candidates come from the same walk as the findings once p3-triggers lands.
+  let injected: InjectedText[] = [];
+  try {
+    injected = extractInjectedText(ctx);
+  } catch {
+    // analyzeRules reports the failure.
+  }
+  return { ...analyzeRules(ctx), injected, triggers: [] };
+}
+
+function analyzeRules(ctx: AnalysisContext): RuleResult {
   const t = ctx.template;
   const base: FindingBase = { file: t.source.path, templateName: t.source.name, templateSha256: t.sha256 };
   try {

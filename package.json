@@ -4,7 +4,9 @@
   "description": "Finds MLX and GGUF models, extracts their chat templates, and flags malicious ones",
   "type": "module",
   "private": true,
-  "bin": { "bassae": "src/cli.ts" },
+  "bin": {
+    "bassae": "src/cli.ts"
+  },
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "bun test"
@@ -15,6 +17,7 @@
   "devDependencies": {
     "@huggingface/gguf": "0.4.6",
     "@types/bun": "latest",
+    "ajv": "8.17.1",
     "typescript": "^5.6.0"
   }
 }
