@@ -81,6 +81,7 @@ import {
   type Field,
   type Fields,
   type Frame,
+  type GenAt,
   type Lit,
   type TestClass,
   type TestEnv,
@@ -244,6 +245,10 @@ class Interp {
   // The same for strftime_now and random put in a list or dict, or passed to
   // a function: a call through a value the walk lost track of may be them.
   private readonly escapedFns = new Set<string>();
+  // What each filter last read as its operand, in which context: a count
+  // test that looks through `|int` takes it from here, not from a second walk
+  // of the operand (review round 3, runtime S3-1).
+  private readonly operands = new WeakMap<Node, { c: Ctx; v: Val }>();
   private work = 0;
   private changed = false;
   private outputLits = 0;
@@ -304,6 +309,15 @@ class Interp {
     if (this.work <= WORK_BUDGET) return true;
     this.complete = false;
     return false;
+  }
+
+  // Where a value holds the flag is kept to MAX_GEN_AT entries, so a join costs
+  // the same however often it runs. Past that it is dropped and the template is
+  // incomplete, as a read of it may be the flag (review round 3, runtime R3-1).
+  private capped(v: Val): Val {
+    if (!v.genAt || genSize(v.genAt, MAX_GEN_AT) <= MAX_GEN_AT) return v;
+    this.complete = false;
+    return { ...v, genAt: undefined };
   }
 
   // ---- statements ----
@@ -526,10 +540,10 @@ class Interp {
       const names = ((lv.value as Node[]) ?? []).filter((x) => x?.type === "Identifier");
       if (it.pairs && names.length === 2) {
         this.assign(String(names[0]!.value), keysOf(it), c);
-        this.assign(String(names[1]!.value), valuesOf(it), c);
+        this.assign(String(names[1]!.value), withHeld(valuesOf(it), heldAt(heldAt(it.genAt, null), 1)), c);
       } else {
         const e = elemOf(it);
-        for (const n of names) this.assign(String(n.value), elemOf(e), c);
+        for (const n of names) this.assign(String(n.value), entryOf(e, (lv.value as Node[]).indexOf(n)), c);
       }
     }
   }
@@ -588,8 +602,7 @@ class Interp {
       const k = this.slot(target, c);
       if (k !== undefined) this.assign(k, v, c, c.st.get(k));
     } else if (target.type === "TupleLiteral" || target.type === "ArrayLiteral") {
-      const e = elemOf(v);
-      for (const n of (target.value as Node[]) ?? []) this.assignTo(n, e, c);
+      ((target.value as Node[]) ?? []).forEach((n, i) => this.assignTo(n, entryOf(v, i), c));
     }
   }
 
@@ -695,24 +708,27 @@ class Interp {
       case "Identifier":
         return this.ident(node, c);
       case "MemberExpression": {
-        const picked = this.flagPick(node, c);
+        // The container and the subscript are each evaluated once, for a pick
+        // by the flag and for the member (review round 3, runtime S3-1).
+        const o = this.eval(node.object, c);
+        const prop = node.property as Node;
+        const kv = node.computed && prop?.type !== "SliceExpression" ? this.eval(prop, c) : undefined;
+        const picked = kv?.genFlag ? this.flagPick(node, o, c) : undefined;
         if (picked) return picked;
-        const v = this.member(node, c);
-        // An entry that holds the flag is the flag (`set g = d.g`), read off a
-        // variable or a literal only, so a chain is not evaluated twice a step.
-        return !v.genFlag && HOLDERS.has((node.object as Node)?.type) && this.holdsFlag(node, c) ? { ...v, genFlag: true } : v;
+        const v = this.member(node, c, o, kv);
+        // A slice keeps what every entry holds of the flag, at new places
+        // (review round 3, contracts M3).
+        return prop?.type === "SliceExpression" ? { ...v, genFlag: undefined, genAt: everyHeld(v.genAt) } : v;
       }
       case "CallExpression":
         return this.call(node, c);
       case "FilterExpression": {
         const o = this.eval(node.operand, c);
+        this.operands.set(node, { c, v: o });
         const f = node.filter as Node;
         const name = filterName(f);
         const v = this.applyFilter(o, name, filterArgs(f), c, f);
-        // `add_generation_prompt|default(false)` is still the flag, and so is
-        // `[add_generation_prompt]|first`.
-        const end = name === "first" ? 0 : name === "last" ? -1 : undefined;
-        return (o.genFlag && FLAG_FILTERS.has(name)) || (end !== undefined && o.genAt?.includes(end)) ? { ...v, genFlag: true } : v;
+        return this.capped({ ...v, ...filterGen(o, name, filterArgs(f)) });
       }
       case "TestExpression":
         return this.flagged(boolVal(this.testClass(node, c)), node, c);
@@ -754,24 +770,24 @@ class Interp {
         const konsts: string[] = [];
         let allKonst = true;
         const els = (node.value as Node[]) ?? [];
-        const genAt: number[] = [];
-        els.forEach((el, i) => {
+        const held: (Held | undefined)[] = [];
+        els.forEach((el) => {
           const e = this.eval(el, c);
           this.holds(e);
           if (typeof e.konst === "string") konsts.push(e.konst);
           else allKonst = false;
-          if (e.genFlag) genAt.push(i, i - els.length);
+          held.push(heldOf(e));
           // A list of its elements' fields: `[messages|length]` is a list of one count, not a count (review round 3, contracts S3).
           v = join(v, { ...e, keys: deeper(e.keys), fields: e.fields && mapFields(e.fields, listOf), konst: undefined, konstList: undefined, ns: undefined, macro: undefined, path: undefined });
         });
-        return { ...v, truth: "none", konst: undefined, konstList: allKonst ? konsts : undefined, genAt: genAt.length ? genAt : undefined };
+        return this.capped({ ...v, truth: "none", konst: undefined, konstList: allKonst ? konsts : undefined, genAt: gathered(held) });
       }
       case "ObjectLiteral": {
         const map = node.value as Map<unknown, unknown>;
         // An empty dict to start from, which adds nothing to what a value may be.
         let v: Val = { lits: [], keys: [], data: "none", truth: "none" };
         const keys: Lit[] = [];
-        const genAt: string[] = [];
+        const held = new Map<string, Held>();
         let konstKeys: string[] | undefined = [];
         if (map instanceof Map) {
           for (const [k, val] of map) {
@@ -781,12 +797,12 @@ class Interp {
             else konstKeys = undefined;
             const vv = this.eval(val, c);
             this.holds(vv);
-            if (vv.genFlag && typeof kv.konst === "string") genAt.push(kv.konst);
+            if (typeof kv.konst === "string") keyHeld(held, kv.konst, heldOf(vv));
             // A value keeps its fields as a member: a count is still a count (review round 3, contracts M2).
             v = join(v, { ...vv, keys: deeper(vv.keys), fields: vv.fields && mapFields(vv.fields, recordOf), konst: undefined, konstList: undefined, ns: undefined, macro: undefined, path: undefined });
           }
         }
-        return { ...v, keys: [...(v.keys ?? []), ...keys], truth: "none", genAt: genAt.length ? genAt : undefined, konstKeys };
+        return this.capped({ ...v, keys: [...(v.keys ?? []), ...keys], truth: "none", genAt: held.size ? [...held] : undefined, konstKeys });
       }
       case "KeywordArgumentExpression":
         return this.eval(node.value, c);
@@ -828,8 +844,7 @@ class Interp {
     return name === "add_generation_prompt" ? { ...v, genFlag: true } : v;
   }
 
-  private member(n: Node, c: Ctx): Val {
-    const o = this.eval(n.object, c);
+  private member(n: Node, c: Ctx, o: Val, pre: Val | undefined): Val {
     const prop = n.property as Node;
     let key: string | number | undefined;
     let keyGate: Cond | undefined;
@@ -850,7 +865,7 @@ class Interp {
       });
       return { ...o, lits: this.choose(o.lits, keyGate), keys: o.keys && this.choose(o.keys, keyGate), path: undefined, konst: undefined, konstList: undefined, gate: strongest(o.gate, keyGate) };
     } else {
-      const kv = this.eval(prop, c);
+      const kv = pre ?? this.eval(prop, c);
       if (typeof kv.konst === "string" || typeof kv.konst === "number") key = kv.konst;
       const items = Number.isInteger(kv.konst) ? (typeof o.konst === "string" ? Array.from(o.konst) : o.konstList) : undefined;
       if (items) {
@@ -889,7 +904,7 @@ class Interp {
       rest: o.rest,
       path,
     };
-    return refine(v, path, c);
+    return refine(withHeld(v, entryHeld(o.genAt, key)), path, c);
   }
 
   private call(n: Node, c: Ctx): Val {
@@ -935,15 +950,18 @@ class Interp {
           case "dict": {
             let v: Val = { ...EMPTY, keys: [] };
             const keys: Lit[] = [];
+            const held = new Map<string, Held>();
             for (const a of args) {
               // A keyword's value is an entry; `dict(D)` copies D's keys and members.
               const kw = a?.type === "KeywordArgumentExpression";
               if (kw) keys.push({ text: String((a.key as Node).value), span: this.exprSpan(a.key as Node) });
               const av = this.eval(a, c);
               this.holds(av);
+              if (kw) keyHeld(held, String((a.key as Node).value), heldOf(av));
+              else for (const [k, h] of av.genAt ?? []) if (typeof k === "string") keyHeld(held, k, h);
               v = join(v, { ...av, keys: kw ? deeper(av.keys) : av.keys, fields: kw && av.fields ? mapFields(av.fields, recordOf) : av.fields, konst: undefined, path: undefined });
             }
-            return { ...v, keys: [...(v.keys ?? []), ...keys], truth: "none" };
+            return this.capped({ ...v, keys: [...(v.keys ?? []), ...keys], truth: "none", genAt: held.size ? [...held] : undefined });
           }
         }
       }
@@ -972,7 +990,7 @@ class Interp {
       const method = !callee.computed && prop?.type === "Identifier" ? String(prop.value) : prop?.type === "StringLiteral" ? String(prop.value) : "";
       if (method === "cycle" && r.fields?.includes(rootField("loop"))) return this.loopCycle(r, args, c, n);
       const out = this.method(r, method, args, c, callee.object as Node);
-      if (KNOWN_METHODS.has(method)) return out;
+      if (KNOWN_METHODS.has(method)) return this.capped({ ...out, ...methodGen(r, method, args) });
       // `d.k()` with no such string, list or dict method: an entry holding a
       // macro or the clock.
       const slot = r.ns !== undefined ? c.st.get(`${r.ns}.${method}`)?.fns : undefined;
@@ -1427,7 +1445,12 @@ class Interp {
   // the number (`d[messages|length|string]`).
   private positionCond(o: Val, kv: Val, at: Node, c: Ctx, role: KeyRole): Cond | undefined {
     const inner = numberKept(at);
-    return this.choiceCond(positionTest(o, inner === at ? kv : this.eval(inner, c), role), at);
+    if (inner === at) return this.choiceCond(positionTest(o, kv, role), at);
+    // `kv` was just evaluated from `at`, reading `inner` on the way.
+    let f = at;
+    while ((f.operand as Node) !== inner) f = f.operand as Node;
+    const seen = this.operands.get(f);
+    return this.choiceCond(positionTest(o, seen?.c === c ? seen.v : this.eval(inner, c), role), at);
   }
 
   // A slice with constant bounds the template can work out: of a constant
@@ -1628,22 +1651,12 @@ class Interp {
   }
 
   // The flag as an expression: the flag, a copy of it, a value true only when
-  // it is set, or an entry read out of a list, tuple or dict holding it.
-  // Tests and comparisons are left to genPolarity, which reads them apart.
+  // it is set, or an entry read out of a list, tuple or dict holding it, by a
+  // subscript, a filter or a method (`d.get('g')`). Tests and comparisons are
+  // left to genPolarity, which reads them apart.
   private isFlag(x: Node, c: Ctx): boolean {
-    if (!FLAG_NODES.has(x.type)) return false;
-    if (this.eval(x, c).genFlag) return true;
-    return x.type === "MemberExpression" && this.holdsFlag(x, c);
-  }
-
-  // A read of a list, tuple or dict literal's entry where it holds the flag.
-  private holdsFlag(x: Node, c: Ctx): boolean {
-    const prop = x.property as Node;
-    let key: unknown;
-    if (!x.computed) key = prop?.type === "Identifier" ? String(prop.value) : undefined;
-    else if (prop?.type === "UnaryExpression" && String((prop.operator as { value?: unknown })?.value) === "-") key = -Number((prop.argument as Node | undefined)?.value);
-    else key = this.eval(prop, c).konst;
-    return (typeof key === "string" || typeof key === "number") && this.eval(x.object, c).genAt?.includes(key) === true;
+    const method = x.type === "CallExpression" && (x.callee as Node)?.type === "MemberExpression";
+    return (FLAG_NODES.has(x.type) || method) && this.eval(x, c).genFlag === true;
   }
 
   // True when `x` is a count above 0 only with the flag set
@@ -1665,12 +1678,12 @@ class Interp {
   // (`['', X][add_generation_prompt|int]`): the one for the flag set is
   // printed only in the generation prompt, the one for it unset only in the
   // arm exclusive with it (review round 2, security N4).
-  private flagPick(n: Node, c: Ctx): Val | undefined {
+  private flagPick(n: Node, o: Val, c: Ctx): Val | undefined {
     const prop = n.property as Node;
     if (!n.computed || (prop?.type !== "Identifier" && prop?.type !== "FilterExpression")) return undefined;
-    const k = flagNumbers(prop, (y) => this.isFlag(y, c));
+    // Called only when the subscript is the flag, already evaluated.
+    const k = flagNumbers(prop, (y) => y === prop || this.isFlag(y, c));
     if (!k) return undefined;
-    const o = this.eval(n.object, c);
     const items = o.konstList;
     if (!items) return undefined;
     const entry = (i: number): string => (Number.isInteger(i) ? items[i < 0 ? i + items.length : i] : undefined) ?? "";
@@ -1825,9 +1838,6 @@ function boolVal(cls: TestClass): Val {
   return { lits: [], data: cls, truth: cls };
 }
 
-// What an entry holding the flag is read off when the read is evaluated.
-const HOLDERS = new Set(["Identifier", "ArrayLiteral", "TupleLiteral", "ObjectLiteral"]);
-
 // `s.replace(old, new[, count])` on constants, as Python does it.
 function replaceKonst(s: unknown, a: Val[]): string | undefined {
   const [old, by, count] = [a[0]?.konst, a[1]?.konst, a[2]?.konst];
@@ -1928,11 +1938,12 @@ function positionField(f: Field, i: number, orElse: Field): Field {
 
 // An element, key or value of `it`. With no schema, an element's emptiness is
 // as telling as the whole value's: the parts of a string the template built
-// are no more content-revealing than the string.
+// are no more content-revealing than the string. An element holds what every
+// element does of the flag (review round 3, contracts M3).
 function elemOf(it: Val): Val {
   const s = seqOf(it);
   const fields = it.fields ? mapFields(it.fields, it.pairs ? pairField : elementField) : undefined;
-  return {
+  const e: Val = {
     // A pair prints its key as well as its value.
     lits: [...s.lits, ...(s.keys ?? [])],
     data: fields ? clsOf(fields) : it.data,
@@ -1941,6 +1952,12 @@ function elemOf(it: Val): Val {
     fields,
     rest: it.rest,
   };
+  return withHeld(e, heldAt(it.genAt, null));
+}
+
+// Entry `i` of a tuple or list, or of each of its elements' (`for k, v in`).
+function entryOf(it: Val, i: number): Val {
+  return withHeld(elemOf(it), heldAt(it.genAt, i));
 }
 
 /** The positions Python's `[start:stop:step]` takes from `n` items; undefined for a step of 0. */
@@ -2115,17 +2132,181 @@ function join(a: Val, b: Val): Val {
   };
 }
 
-// The entries both values hold the flag at (review round 2, security N4).
-function bothAt(a: (string | number)[] | undefined, b: (string | number)[] | undefined): (string | number)[] | undefined {
-  const at = a && b ? a.filter((k) => b.includes(k)) : undefined;
-  return at?.length ? at : undefined;
+// ---- where a container holds the flag ----
+// The flag goes into lists, tuples and dicts, and comes back out by a
+// subscript, a loop, unpacking, `.get`, `.values()`, `.items()`, `first`,
+// `map` and the like, however deep it is (review round 3, contracts M3).
+
+/** What a value holds of the flag: the flag itself, or where it holds it. */
+type Held = true | GenAt;
+
+function heldOf(v: Val): Held | undefined {
+  return v.genFlag ? true : v.genAt;
+}
+
+function withHeld(v: Val, h: Held | undefined): Val {
+  return h === true ? { ...v, genFlag: true } : h ? { ...v, genAt: h } : v;
+}
+
+function asGen(h: Held | undefined): Pick<Val, "genFlag" | "genAt"> {
+  return h === true ? { genFlag: true } : { genAt: h };
+}
+
+/** What a container holds at `key`, or at every entry for `null`. */
+function heldAt(h: Held | undefined, key: string | number | null): Held | undefined {
+  return h === true ? undefined : h?.find(([k]) => k === key)?.[1];
+}
+
+/** A read by `key`: an index not known may be any entry of a list. */
+function entryHeld(at: GenAt | undefined, key: string | number | undefined): Held | undefined {
+  return (key === undefined ? undefined : heldAt(at, key)) ?? (typeof key === "string" ? undefined : heldAt(at, null));
+}
+
+/** A dotted attribute path read off an entry (`map(attribute='a.0')`). */
+function heldPath(h: Held | undefined, attr: string): Held | undefined {
+  for (const part of attr.split(".")) h = heldAt(h, /^\d+$/.test(part) ? Number(part) : part);
+  return h;
+}
+
+/** A list of entries holding `hs`: at each index from either end, and at every entry when all hold it. */
+function gathered(hs: readonly (Held | undefined)[]): GenAt | undefined {
+  const at: [number | null, Held][] = [];
+  hs.forEach((h, i) => {
+    if (h) at.push([i, h], [i - hs.length, h]);
+  });
+  const each = hs.length ? hs.reduce((x, y) => meet(x, y)) : undefined;
+  if (each) at.push([null, each]);
+  return at.length ? at : undefined;
+}
+
+/** A dict's holdings with `key` set: a later entry for a key replaces an earlier one. */
+function keyHeld(at: Map<string, Held>, key: string, h: Held | undefined): void {
+  at.delete(key);
+  if (h) at.set(key, h);
+}
+
+/** The same entries in another order, or fewer of them: only what every entry holds. */
+function everyHeld(at: GenAt | undefined): GenAt | undefined {
+  const each = heldAt(at, null);
+  return each ? [[null, each]] : undefined;
+}
+
+/** `.values()` of a dict of constant keys, each once: what each value holds, in order. */
+function valuesHeld(d: Val): GenAt | undefined {
+  const ks = d.konstKeys;
+  if (!d.genAt || !ks || new Set(ks).size !== ks.length) return undefined;
+  return gathered(ks.map((k) => heldAt(d.genAt, k)));
+}
+
+/** `.items()` of such a dict: each pair holds its value's at 1. `|dictsort` puts them in another order. */
+function pairsHeld(d: Val, sorted: boolean): GenAt | undefined {
+  const at = valuesHeld(d)?.map(([k, h]): GenAt[number] => [k, [[1, h], [-1, h]]]);
+  return sorted ? everyHeld(at) : at;
+}
+
+/** What both hold: the flag where both are it, and where both containers hold it. */
+function meet(a: Held | undefined, b: Held | undefined): Held | undefined {
+  if (a === b) return a;
+  if (a === true || b === true) return undefined;
+  return bothAt(a, b);
+}
+
+// One meet per entry, so the work is linear in the entries at every depth.
+// Copies of one literal list the same keys in the same order and need no
+// lookup table. It is `a` itself when both hold the same, so a value joined
+// again and again with an equal one stays one array (review round 3, runtime
+// R3-1).
+function bothAt(a: GenAt | undefined, b: GenAt | undefined): GenAt | undefined {
+  if (a === b) return a;
+  if (!a || !b) return undefined;
+  const inB = a.length === b.length && a.every(([k], i) => b[i]![0] === k) ? undefined : new Map(b);
+  const at: GenAt[number][] = [];
+  let same = true;
+  a.forEach(([k, h], i) => {
+    const m = meet(h, inB ? inB.get(k) : b[i]![1]);
+    if (m) at.push([k, m]);
+    if (m !== h) same = false;
+  });
+  return same ? a : at.length ? at : undefined;
+}
+
+// Where the flag is held is tracked up to this many entries, at every depth
+// (review round 3, runtime R3-1).
+const MAX_GEN_AT = 256;
+
+/** Entries of `at` at every depth, counted no further than one past `cap`. */
+function genSize(at: GenAt, cap: number): number {
+  let n = 0;
+  for (const [, h] of at) {
+    if (n++ >= cap) break;
+    if (h !== true) n += genSize(h, cap - n);
+  }
+  return n;
+}
+
+// A filter's value: `add_generation_prompt|default(false)` is the flag, and so
+// is `[add_generation_prompt]|first`. A list in another order or with fewer
+// entries holds what every entry does, and what `select` keeps of entries that
+// are only ever the flag is there, so the list is true, only with it set.
+function filterGen(o: Val, name: string, args: Node[]): Pick<Val, "genFlag" | "genAt"> {
+  const each = heldAt(o.genAt, null);
+  if (FLAG_FILTERS.has(name)) return { genFlag: o.genFlag, genAt: name === "default" || name === "d" ? o.genAt : undefined };
+  switch (name) {
+    case "first":
+    case "last":
+      return asGen(heldAt(o.genAt, name === "first" ? 0 : -1) ?? each);
+    case "min":
+    case "max":
+      return asGen(each);
+    case "list":
+      // A dict's list is its keys.
+      return { genFlag: o.genFlag, genAt: o.genAt?.some(([k]) => typeof k === "string") ? undefined : o.genAt };
+    case "reverse":
+    case "sort":
+    case "unique":
+      return { genFlag: o.genFlag, genAt: everyHeld(o.genAt) };
+    case "reject":
+    case "rejectattr":
+      return { genAt: everyHeld(o.genAt) };
+    case "select":
+      return { genFlag: args.length === 0 && each === true ? true : undefined, genAt: everyHeld(o.genAt) };
+    case "selectattr": {
+      const attr = args.length === 1 && args[0]?.type === "StringLiteral" ? String(args[0].value) : undefined;
+      return { genFlag: attr !== undefined && heldPath(each, attr) === true ? true : undefined, genAt: everyHeld(o.genAt) };
+    }
+    case "map": {
+      const attr = kwargKonst(args, "attribute");
+      const at = attr === undefined ? undefined : o.genAt?.flatMap(([k, h]): GenAt[number][] => {
+        const x = typeof k === "string" ? undefined : heldPath(h, attr);
+        return x ? [[k, x]] : [];
+      });
+      return { genAt: at?.length ? at : undefined };
+    }
+    case "items":
+    case "dictsort":
+      return { genAt: pairsHeld(o, name === "dictsort") };
+  }
+  return {};
+}
+
+// A method's value: a dict's entry by `.get`, its values and its pairs.
+function methodGen(r: Val, m: string, args: Node[]): Pick<Val, "genFlag" | "genAt"> {
+  switch (m) {
+    case "get":
+      return args[0]?.type === "StringLiteral" ? asGen(heldAt(r.genAt, String(args[0].value))) : {};
+    case "values":
+      return { genAt: valuesHeld(r) };
+    case "items":
+      return { genAt: pairsHeld(r, false) };
+  }
+  return {};
 }
 
 function sameVal(a: Val, b: Val): boolean {
   if (a.lits.length !== b.lits.length || (a.keys?.length ?? 0) !== (b.keys?.length ?? 0)) return false;
   if (a.data !== b.data || a.truth !== b.truth || a.gate?.test !== b.gate?.test) return false;
   if (!sameFields(a.fields, b.fields) || a.rest !== b.rest || a.konst !== b.konst || a.ns !== b.ns || a.macro !== b.macro || a.pairs !== b.pairs) return false;
-  if (String(a.fns) !== String(b.fns) || a.genFlag !== b.genFlag || String(a.genAt) !== String(b.genAt)) return false;
+  if (String(a.fns) !== String(b.fns) || a.genFlag !== b.genFlag || (a.genAt !== b.genAt && JSON.stringify(a.genAt) !== JSON.stringify(b.genAt))) return false;
   if (String(a.restNums) !== String(b.restNums)) return false;
   if ((a.konstList === undefined) !== (b.konstList === undefined)) return false;
   for (let i = 0; i < a.lits.length; i++) if (a.lits[i]!.cond?.test !== b.lits[i]!.cond?.test) return false;

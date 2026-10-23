@@ -6,7 +6,9 @@
 // header with no end-of-turn after it, gated or not (review round 1). A
 // closer counts only on every path through the header, the flag is still the
 // flag inside a container or a comparison, and prose after a header with no
-// scaffolding (`### Response:`) is prefill (review round 2).
+// scaffolding (`### Response:`) is prefill (review round 2). The flag read back
+// out of a container however deep, by any read, is still the flag (review
+// round 3).
 
 import { expect, test } from "bun:test";
 import { loadRegistry } from "../../src/registry/index.ts";
@@ -116,6 +118,39 @@ test.each(FLAGS)("ISC-17.2: %s, then a closer, is HIGH prefill_injection (review
   expect(prefills(src("<|im_end|>\n"))).toContain(`HIGH ${S}`);
 });
 
+// The flag read back out of a container is still the flag: by `.get`,
+// `.values()`, a loop or unpacking, a container in a container, `select`,
+// `selectattr` and `map` (review round 3, contracts M3).
+const D = (dict: string) => `{% set d = ${dict} %}`;
+const looped = (head: string, test: string) => (end: string) => `${LOOP}{% for ${head} %}{% if ${test} %}<|im_start|>assistant\n${S}{% endif %}{% endfor %}${end}`;
+const HELD: [string, (end: string) => string][] = [
+  ["the flag read from a dict by .get", (end) => `${D("{'g': add_generation_prompt}")}${gated("d.get('g')")(end)}`],
+  ["the flag as the first of a dict's values", (end) => `${D("{'g': add_generation_prompt}")}${gated("d.values()|first")(end)}`],
+  ["the flag as the last of a dict's values", (end) => `${D("{'n': messages, 'g': add_generation_prompt}")}${gated("d.values()|last")(end)}`],
+  ["the flag as a dict() field", gated("dict(g=add_generation_prompt).g")],
+  ["the flag in a dict copied by dict()", (end) => `${D("{'g': add_generation_prompt}")}${gated("dict(d).g")(end)}`],
+  ["the flag in a dict copied by dict() beside a keyword", (end) => `${D("{'g': add_generation_prompt}")}${gated("dict(d, n=messages).g")(end)}`],
+  ["the flag as a loop variable", looped("f in [add_generation_prompt]", "f")],
+  ["the flag as a loop variable over a dict's values", (end) => `${D("{'g': add_generation_prompt}")}${looped("f in d.values()", "f")(end)}`],
+  ["the flag as the value of each .items() pair", looped("k, v in {'g': add_generation_prompt}.items()", "v")],
+  ["the flag as the value of each |dictsort pair", looped("k, v in {'g': add_generation_prompt}|dictsort", "v")],
+  ["the flag unpacked from a tuple", (end) => `{% set g, n = (add_generation_prompt, messages) %}${gated("g")(end)}`],
+  ["the flag as a field of a dict in a dict", (end) => `${D("{'a': {'g': add_generation_prompt}}")}${gated("d.a.g")(end)}`],
+  ["the flag in a list in a dict", (end) => `${D("{'a': [add_generation_prompt]}")}${gated("d.a[0]")(end)}`],
+  ["the flag at the end of a list in a dict, counted from the end", (end) => `${D("{'a': [messages, messages, add_generation_prompt]}")}${gated("d.a[-1]")(end)}`],
+  ["a list of dicts selected by the flag's field", gated("[{'g': add_generation_prompt}]|selectattr('g')|list")],
+  ["the flag's field mapped out of a list of dicts", gated("[{'g': add_generation_prompt}]|map(attribute='g')|first")],
+  ["a list of the flag, selected", gated("[add_generation_prompt]|select|list")],
+];
+
+test.each(HELD)("ISC-17.2: %s, then a decoy closer, is HIGH prefill_injection (review round 3, contracts M3)", (_label, src) => {
+  expect(prefills(src(DEAD))).toContain(`HIGH ${S}`);
+});
+
+test.each(HELD)("ISC-17.2: %s, then a closer, is HIGH prefill_injection (review round 3, contracts M3)", (_label, src) => {
+  expect(prefills(src("<|im_end|>\n"))).toContain(`HIGH ${S}`);
+});
+
 // Only the entry that is the flag is the flag, and a comparison that cannot
 // hold says nothing: a closed assistant turn under these tests is no prefill.
 const turn = (test: string) => `${LOOP}{% if ${test} %}<|im_start|>assistant\nThe capital of France is Paris.<|im_end|>\n{% endif %}`;
@@ -134,6 +169,109 @@ const NOT_FLAGS: [string, string][] = [
 
 test.each(NOT_FLAGS)("ISC-17.2: a closed turn under %s is no prefill (review round 2, security N4)", (_label, src) => {
   expect(prefills(src)).toEqual([]);
+});
+
+// Only what holds the flag holds it: an entry or field beside it, a key, a
+// slice past it, or a list something else was added to is no generation
+// prompt (review round 3, contracts M3).
+const closedLoop = (head: string, test: string) => `${LOOP}{% for ${head} %}{% if ${test} %}<|im_start|>assistant\nThe capital of France is Paris.<|im_end|>\n{% endif %}{% endfor %}`;
+const NOT_HELD: [string, string][] = [
+  ["a dict field beside the flag, read by .get", `${D("{'g': add_generation_prompt, 'n': messages}")}${turn("d.get('n')")}`],
+  ["the last of a dict's values, beside the flag", `${D("{'g': add_generation_prompt, 'n': messages}")}${turn("d.values()|last")}`],
+  ["a dict field whose key repeats after the flag", `${D("{'g': add_generation_prompt, 'g': messages}")}${turn("d.g")}`],
+  ["a dict() field beside the flag", turn("dict(g=add_generation_prompt, n=messages).n")],
+  ["a field beside the flag in a dict copied by dict()", `${D("{'g': add_generation_prompt, 'n': messages}")}${turn("dict(d).n")}`],
+  ["the flag's field in a dict copied by dict(), replaced by a keyword", `${D("{'g': add_generation_prompt}")}${turn("dict(d, g=messages).g")}`],
+  ["a loop variable over the flag and another value", closedLoop("f in [add_generation_prompt, messages]", "f")],
+  ["a loop variable over a dict's keys", closedLoop("k in {'g': add_generation_prompt}", "k")],
+  ["the key of each .items() pair", closedLoop("k, v in {'g': add_generation_prompt}.items()", "k")],
+  ["the value of each .items() pair, one beside the flag", closedLoop("k, v in {'g': add_generation_prompt, 'n': messages}.items()", "v")],
+  ["a list the flag's list had another value appended to", `{% set xs = [add_generation_prompt] %}{% set _ = xs.append(messages) %}${closedLoop("f in xs", "f")}`],
+  ["the name unpacked beside the flag", `{% set g, n = (add_generation_prompt, messages) %}${turn("n")}`],
+  ["a field beside the flag in a dict in a dict", `${D("{'a': {'g': add_generation_prompt, 'n': messages}}")}${turn("d.a.n")}`],
+  ["an entry beside the flag in a list in a dict", `${D("{'a': [add_generation_prompt, messages]}")}${turn("d.a[1]")}`],
+  ["the first entry of a slice past the flag", turn("(add_generation_prompt, messages)[1:]|first")],
+  ["a list of dicts selected by a field beside the flag's", turn("[{'g': add_generation_prompt, 'n': messages}]|selectattr('n')|list")],
+  ["a field beside the flag's mapped out of a list of dicts", turn("[{'g': add_generation_prompt, 'n': messages}]|map(attribute='n')|first")],
+  ["a list of the flag and another value, selected", turn("[add_generation_prompt, messages]|select|list")],
+  ["a list of the flag, rejected", turn("[add_generation_prompt]|reject|list")],
+];
+
+test.each(NOT_HELD)("ISC-17.2: a closed turn under %s is no prefill (review round 3, contracts M3)", (_label, src) => {
+  expect(prefills(src)).toEqual([]);
+});
+
+// Where a container holds the flag costs the same at every join, and past a
+// cap is dropped with the template reported incomplete (review round 3,
+// runtime R3-1). A read of a nested container, or a pick by the flag nested in
+// itself, is evaluated once per level (review round 3, runtime S3-1).
+const G = "add_generation_prompt";
+function timed(src: string): { ms: number; complete: boolean; prefills: string[] } {
+  const t0 = performance.now();
+  const r = analyzeInjection(ctx(src));
+  const ms = performance.now() - t0;
+  return { ms, complete: r.complete, prefills: r.findings.filter((f) => f.ruleId === "prefill_injection").map((f) => `${f.severity} ${f.excerpt}`) };
+}
+// `head`, then a turn under `test` with a closer after it.
+const after = (head: string, test: string) => gated(test)("<|im_end|>\n").replace(LOOP, `${head}${LOOP}`);
+const many = (n: number, entry: (i: number) => string) => Array.from({ length: n }, (_, i) => entry(i)).join(", ");
+const nested = (depth: number, step: (inner: string) => string, start: string) => {
+  let s = start;
+  for (let i = 0; i < depth; i++) s = step(s);
+  return s;
+};
+const joined = (n: number, k: number, other: string) =>
+  after(`{% set g = ${G} %}{% set L = [${many(n, () => "g")}] %}{% set M = [${many(n, () => "g")}] %}${`{% set x = L or ${other} %}`.repeat(k)}`, "x[0]");
+
+test("ISC-17.2: a list of 1000 flags joined 20000 times finishes in under 2 s, incomplete (review round 3, runtime R3-1)", () => {
+  const r = timed(joined(1000, 20000, "L"));
+  expect(r.ms).toBeLessThan(2000);
+  expect(r.complete).toBe(false);
+});
+
+test("ISC-17.2: a list under the cap joined 20000 times with an equal list keeps the flag, complete (review round 3, runtime R3-1)", () => {
+  const r = timed(joined(120, 20000, "M"));
+  expect(r.ms).toBeLessThan(2000);
+  expect(r.complete).toBe(true);
+  expect(r.prefills).toContain(`HIGH ${S}`);
+});
+
+test("ISC-17.2: two dicts nested 40 deep that differ at the bottom join in under 2 s, complete (review round 3, runtime R3-1)", () => {
+  const deep = (bottom: string) => nested(40, (s) => `{'a': ${s}}`, bottom);
+  const r = timed(after(`{% set x = ${deep(`{'a': ${G}, 'b': ${G}}`)} or ${deep(`{'a': ${G}}`)} %}`, `x${"['a']".repeat(41)}`));
+  expect(r.ms).toBeLessThan(2000);
+  expect(r.complete).toBe(true);
+  expect(r.prefills).toContain(`HIGH ${S}`);
+});
+
+const OVER_CAP: [string, string][] = [
+  ["a list of 200 flags", `[${many(200, () => G)}]`],
+  ["a dict of 300 flags", `{${many(300, (i) => `'k${i}': ${G}`)}}`],
+  ["dict() of 300 flags", `dict(${many(300, (i) => `k${i}=${G}`)})`],
+  ["the pairs of a dict of 50 flags", `{${many(50, (i) => `'k${i}': ${G}`)}}.items()`],
+  ["a list of 20 lists of 20 flags", `[${many(20, () => `[${many(20, () => G)}]`)}]`],
+];
+
+test.each(OVER_CAP)("ISC-17.2: the flag held in %s is past the cap, and the template incomplete (review round 3, runtime R3-1)", (_label, x) => {
+  expect(timed(after(`{% set x = ${x} %}`, "x[0]")).complete).toBe(false);
+});
+
+const DEEP: [string, string][] = [
+  ["the flag read out of a list nested 40 deep", after("", nested(40, (s) => `[${s}][0]`, G))],
+  ["a list subscript nested 40 deep", `${LOOP}{{ ${nested(40, (s) => `[${s}][0]`, "1")} }}`],
+  ["a pick by the flag nested 40 deep in the list", `${LOOP}{{ ${nested(40, (s) => `[${s}, ''][${G}|int]`, "'x'")} }}`],
+  ["a pick by the flag nested 40 deep in the index", `${LOOP}{{ ${nested(40, (s) => `[0, 1][${s}|int]`, G)} }}`],
+  ["a pick from constants nested 40 deep in the index", `${LOOP}{{ ${nested(40, (s) => `['', 'x'][(${s})|length]`, G)} }}`],
+];
+
+test.each(DEEP)("ISC-17.2: %s is complete in under 2 s (review round 3, runtime S3-1)", (_label, src) => {
+  const r = timed(src);
+  expect(r.ms).toBeLessThan(2000);
+  expect(r.complete).toBe(true);
+});
+
+test("ISC-17.2: the flag read out of a list nested 40 deep is still the flag (review round 3, runtime S3-1)", () => {
+  expect(timed(DEEP[0]![1]).prefills).toContain(`HIGH ${S}`);
 });
 
 // An entry a loop overwrites holds the flag on the first pass only, so a

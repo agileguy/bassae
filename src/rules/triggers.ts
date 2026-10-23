@@ -614,11 +614,18 @@ export interface Val {
   fns?: string[];
   /** It is `add_generation_prompt`, or a copy of it (`set g = add_generation_prompt`), or true only when the flag is set. */
   genFlag?: true;
-  /** A list, tuple or dict literal holding the flag: the indexes (from either end) or keys it is at. */
-  genAt?: (string | number)[];
+  /** A list, tuple or dict holding the flag: where it holds it. */
+  genAt?: GenAt;
   /** `.items()` / `|dictsort`: a two-name loop gets keys and values. */
   pairs?: boolean;
 }
+
+/**
+ * Where a container holds the flag: each index (from either end) or key, and
+ * `null` for every entry of a list, with what is there, the flag itself
+ * (`true`) or a container holding it further in.
+ */
+export type GenAt = readonly (readonly [key: string | number | null, held: true | GenAt])[];
 
 export type Facts = ReadonlyMap<string, "string" | "nonstring">;
 export const NO_FACTS: Facts = new Map();
