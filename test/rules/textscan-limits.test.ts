@@ -86,6 +86,21 @@ test("URLs: dense domains, long dotted runs, www. paths and near-miss emails", (
   expect(expectLinear("63-char labels", urlsRaw, (n) => `${"a".repeat(63)}.`.repeat(n) + "com", 16_000).length).toBe(1);
 }, TIMING_TIMEOUT_MS);
 
+test("URLs through the fold: fullwidth, astral, IDN and defanged runs, IPs and brackets", () => {
+  const fw = (s: string) => [...s].map((c) => String.fromCharCode(c.charCodeAt(0) + 0xfee0)).join(""); // ASCII to fullwidth
+  expect(expectLinear("fullwidth a.a.a...com", urlsRaw, (n) => fw("a.").repeat(n) + fw("com"), 500_000).length).toBe(1);
+  expect(expectLinear("math bold a.a.a...com", urlsRaw, (n) => String.fromCodePoint(0x1d41a, 0x2e).repeat(n) + "com", 300_000).length).toBe(1);
+  const rf = String.fromCharCode(0x440, 0x444);
+  expect(expectLinear("Cyrillic labels ending in an IDN TLD", urlsRaw, (n) => String.fromCharCode(0x43f, 0x2e).repeat(n) + rf, 500_000).length).toBe(1);
+  expect(expectLinear("a[.]a[.]...com", urlsRaw, (n) => "a[.]".repeat(n) + "com", 300_000).length).toBe(1);
+  expect(expectLinear("x@ Cyrillic labels...1", urlsRaw, (n) => "x@" + String.fromCharCode(0x43f, 0x2e).repeat(n) + "1", 500_000)).toEqual([]);
+  expect(suppressed(expectLinear("'1.2.3.4 ' x n", urlsRaw, (n) => "1.2.3.4 ".repeat(n), 150_000))).toBe(4 * 150_000 - FINDING_CAP + 1);
+  expect(expectLinear("1.1.1.1... no IP", urlsRaw, (n) => "1.".repeat(n) + "1", 500_000)).toEqual([]);
+  expect(expectLinear("unclosed IPv6 brackets", urlsRaw, (n) => "[1111:2222:3333:4444:5555:6666:7777".repeat(n), 50_000)).toEqual([]);
+  expect(expectLinear("brackets", urlsRaw, (n) => "[".repeat(n), 1_000_000)).toEqual([]);
+  expect(expectLinear("trailing punctuation after a scheme", urlsRaw, (n) => "x://" + ".".repeat(n), 1_000_000).length).toBe(1);
+}, TIMING_TIMEOUT_MS);
+
 test("encoded blobs: one long run, hex, near-misses and many tiny strings", () => {
   expect(expectLinear("base64 run", blobs, (n) => "aB3c".repeat(n), 250_000).length).toBe(1);
   expect(expectLinear("hex run", blobs, (n) => "0a".repeat(n), 500_000).map((f) => f.detail!.encoding)).toEqual(["hex"]);

@@ -1,4 +1,4 @@
-// Text rules that need no AST: URLs, emails and domains in injected text
+// Text rules that need no AST: URLs, emails, domains and IPs in injected text
 // (ISC-19), encoded blobs (ISC-20) and invisible or deceptive characters
 // (ISC-21), plus their raw-text forms for a template the library could not
 // parse (ISC-12). Every scan is linear in the text and bounded in findings.
@@ -10,15 +10,16 @@
 // passes them through unchanged and a template of millions of hits never
 // builds millions of findings.
 
+import { domainToUnicode } from "node:url";
 import type { Finding, FindingBase, InjectedText, RuleId, Severity, Span } from "../types.ts";
 import type { ParseOutcome } from "../parse/parse.ts";
 import { isJsWhitespace } from "../parse/parse.ts";
 import { clip, FINDING_CAP } from "./finalize.ts";
 import { eachLiteral } from "./literals.ts";
 import { IncrementalPos } from "./rawtext.ts";
-import { KNOWN_TLDS, MAX_TLD_LENGTH } from "./tlds.ts";
+import { KNOWN_TLDS } from "./tlds.ts";
 
-/** HIGH url_in_text for each URL, email address or known-TLD domain in injected text, spanned at the literal it sits in (ISC-19). */
+/** HIGH url_in_text for each URL, email address, known-TLD domain or IP address in injected text, spanned at the literal it sits in (ISC-19). */
 export function findUrls(items: readonly InjectedText[], base: FindingBase): Finding[] {
   const hits = new Hits();
   for (const item of items) {
@@ -72,7 +73,7 @@ export function findInvisibleChars(text: string, base: FindingBase, outcome?: Pa
   return finish("invisible_char", "HIGH", base, [raw, escaped], placer(outcome, text));
 }
 
-/** The raw-text form of ISC-19 for a template with no AST (ISC-12): URLs, emails and domains in text between tags and in string literals, streamed when the template is over the size cap. */
+/** The raw-text form of ISC-19 for a template with no AST (ISC-12): URLs, emails, domains and IPs in text between tags and in string literals, streamed when the template is over the size cap. */
 export function findUrlsRaw(outcome: ParseOutcome, text: string, base: FindingBase): Finding[] {
   const hits = new Hits();
   eachLiteral(outcome, text, (kind, from, to) => {
@@ -146,11 +147,12 @@ function finish(ruleId: RuleId, severity: Severity, base: FindingBase, passes: H
 
 // ---- ISC-19: URLs, email addresses and domains ----
 
-// A set of lowercase ASCII keys, each with a nonzero value, looked up in
-// s[k, e) with A-Z folded to lower case and no slice. The URL scanner looks up
-// every label of every dotted run, and the escape scan every \N{name}; on a
-// hostile 64 MiB template a slice per lookup is tens of millions of strings,
-// hundreds of MB of garbage before a collection.
+// A set of lowercase keys, each with a nonzero value, looked up in s[k, e)
+// with no slice. get() folds A-Z to lower case; getFolded() reads through the
+// URL fold below. The URL scanner looks up every label of every dotted run,
+// and the escape scan every \N{name}; on a hostile 64 MiB template a slice per
+// lookup is tens of millions of strings, hundreds of MB of garbage before a
+// collection.
 class FoldedSet {
   private readonly next: Map<number, number>[] = [new Map()];
   private readonly values: number[] = [0];
@@ -182,11 +184,24 @@ class FoldedSet {
     }
     return this.values[node]!;
   }
+  /** The value of s[k, e) read through the URL fold and folded to lower case, or 0. */
+  getFolded(s: string, k: number, e: number): number {
+    let node = 0;
+    for (let j = k; j < e; ) {
+      const f = at(s, j, e);
+      const c = charOf(f);
+      const child = this.next[node]!.get(c >= 0x41 && c <= 0x5a ? c + 0x20 : c);
+      if (child === undefined) return 0;
+      node = child;
+      j += widthOf(f);
+    }
+    return this.values[node]!;
+  }
 }
 
-export type UrlKind = "url" | "email" | "domain";
+export type UrlKind = "url" | "email" | "domain" | "ip";
 
-const URL_KIND: Record<UrlKind, string> = { url: "URL", email: "email address", domain: "domain" };
+const URL_KIND: Record<UrlKind, string> = { url: "URL", email: "email address", domain: "domain", ip: "IP address" };
 
 /** Receives one match [start, end) in the scanned string. */
 export type UrlSink = (start: number, end: number, kind: UrlKind) => void;
@@ -205,10 +220,132 @@ const FILE_EXTENSION_TLDS: ReadonlySet<string> = new Set([
 // Second-level labels that ccTLD registries sell under, so `x.com.py` is a host.
 const SECOND_LEVEL = new FoldedSet(["ac", "co", "com", "edu", "gob", "gov", "mil", "ne", "net", "nom", "or", "org", "sch"].map((l) => [l, 1]));
 
-// Every known TLD, 2 for one that is also a file extension, 1 for the rest.
+// Every known TLD: 2 for one that is also a file extension, 3 for an IDN TLD in
+// its Unicode form (U+0440 U+0444 for xn--p1ai), so a name is checked after the
+// IDNA conversion a browser applies, and 1 for the rest. `.onion` and `.i2p`
+// are not in the root zone, but Tor and I2P resolve them, so they are here too.
 const TLD = 1;
 const FILE_EXTENSION_TLD = 2;
-const TLDS = new FoldedSet([...KNOWN_TLDS].map((t) => [t, FILE_EXTENSION_TLDS.has(t) ? FILE_EXTENSION_TLD : TLD]));
+const IDN_TLD = 3;
+const TLDS = new FoldedSet([
+  ...[...KNOWN_TLDS].map((t): [string, number] => [t, FILE_EXTENSION_TLDS.has(t) ? FILE_EXTENSION_TLD : TLD]),
+  ...[...KNOWN_TLDS].filter((t) => t.startsWith("xn--")).map((t): [string, number] => [domainToUnicode(t), IDN_TLD]),
+  ["onion", TLD],
+  ["i2p", TLD],
+]);
+
+// ---- the URL fold ----
+//
+// The URL scanner reads each character folded the way a browser's IDNA mapping
+// and a reader's eye both fold it, so a host spelled in look-alike characters
+// is still a host. A character folds to its NFKC form when that is one
+// character: the fullwidth and mathematical letters and digits, the fullwidth
+// full stop U+FF0E, the one dot leader U+2024 and the small full stop U+FE52
+// all read as ASCII. The ideographic full stop U+3002 folds to '.', as IDNA
+// maps it; a non-ASCII letter folds to lower case, so an IDN TLD matches in
+// either case; and the defanged dot `[.]` folds to '.'. A character NFKC
+// expands to several (U+2122 TRADE MARK SIGN) stays as it is, so each folded
+// character stands for one source character, or one defang, and every match
+// is a span of the source text.
+
+// A folded character is packed in a number with its width: the folded code
+// unit in the low 16 bits, and above them how many source code units it stands
+// for, 2 for a surrogate pair and 3 for `[.]`. A number, not an object, so a
+// scan allocates nothing per character.
+const UNIT = 0x10000;
+const charOf = (f: number) => f & 0xffff;
+const widthOf = (f: number) => f >>> 16;
+
+// What an astral character folds to when no table entry covers it: a letter
+// (CJK Extension B and later), or anything else. Both are noncharacters, so no
+// folded BMP character collides with them.
+const ASTRAL_LETTER = 0xffff;
+const ASTRAL_OTHER = 0xfffe;
+
+// The astral block the fold reads from a table: Mathematical Alphanumeric
+// Symbols through Symbols for Legacy Computing, which hold the math bold,
+// script and double-struck letters and digits, the squared Latin letters and
+// the segmented digits.
+const ASTRAL_FROM = 0x1d400;
+const ASTRAL_TO = 0x1fc00;
+
+// FOLD maps a BMP code unit to its folded code unit, ASTRAL_FOLD an astral
+// code point in the block above, and LABEL marks the folded non-ASCII units
+// that can stand in an IDN label: letters, marks and digits that are not
+// default-ignorable. Built once, from the engine's own Unicode data.
+const { FOLD, ASTRAL_FOLD, LABEL } = (() => {
+  const one = (cp: number): number => {
+    const n = String.fromCodePoint(cp).normalize("NFKC");
+    if (n.length !== 1) return -1;
+    const c = n.charCodeAt(0);
+    if (c === 0x3002) return 0x2e;
+    if (c < 0x80) return c;
+    const lower = n.toLowerCase();
+    return lower.length === 1 ? lower.charCodeAt(0) : c;
+  };
+  const fold = new Uint16Array(0x10000);
+  for (let c = 0; c < 0x10000; c++) {
+    const f = c < 0x80 || (c >= 0xd800 && c <= 0xdfff) ? -1 : one(c);
+    fold[c] = f < 0 ? c : f;
+  }
+  const astral = new Uint16Array(ASTRAL_TO - ASTRAL_FROM);
+  for (let cp = ASTRAL_FROM; cp < ASTRAL_TO; cp++) {
+    const f = one(cp);
+    astral[cp - ASTRAL_FROM] = f < 0 ? ASTRAL_OTHER : f;
+  }
+  const letter = /^[\p{L}\p{M}\p{Nd}]$/u;
+  const ignorable = /^\p{Default_Ignorable_Code_Point}$/u;
+  const label = new Uint8Array(0x10000);
+  for (let c = 0x80; c < 0x10000; c++) {
+    const ch = String.fromCharCode(c);
+    if (letter.test(ch) && !ignorable.test(ch)) label[c] = 1;
+  }
+  label[ASTRAL_LETTER] = 1;
+  return { FOLD: fold, ASTRAL_FOLD: astral, LABEL: label };
+})();
+
+function foldAstral(cp: number): number {
+  if (cp >= ASTRAL_FROM && cp < ASTRAL_TO) return ASTRAL_FOLD[cp - ASTRAL_FROM]!;
+  return cp >= 0x20000 && cp < 0x40000 ? ASTRAL_LETTER : ASTRAL_OTHER;
+}
+
+// The folded character at s[i], packed. Reads nothing at or past `to`.
+function at(s: string, i: number, to: number): number {
+  const c = s.charCodeAt(i);
+  if (c < 0x80) {
+    if (c === 0x5b && i + 2 < to && s.charCodeAt(i + 1) === 0x2e && s.charCodeAt(i + 2) === 0x5d) return 0x2e + 3 * UNIT;
+    return c + UNIT;
+  }
+  if (c >= 0xd800 && c <= 0xdbff && i + 1 < to) {
+    const d = s.charCodeAt(i + 1);
+    if (d >= 0xdc00 && d <= 0xdfff) return foldAstral(((c - 0xd800) << 10) + (d - 0xdc00) + 0x10000) + 2 * UNIT;
+  }
+  return FOLD[c]! + UNIT;
+}
+
+// The folded character that ends at s[i - 1], packed. Reads nothing before
+// `from`. `[.]` and a surrogate pair cannot overlap another of their kind, so
+// reading backward splits a text into the same characters as reading forward.
+function before(s: string, i: number, from: number): number {
+  const c = s.charCodeAt(i - 1);
+  if (c < 0x80) {
+    if (c === 0x5d && i - 3 >= from && s.charCodeAt(i - 2) === 0x2e && s.charCodeAt(i - 3) === 0x5b) return 0x2e + 3 * UNIT;
+    return c + UNIT;
+  }
+  if (c >= 0xdc00 && c <= 0xdfff && i - 2 >= from) {
+    const h = s.charCodeAt(i - 2);
+    if (h >= 0xd800 && h <= 0xdbff) return foldAstral(((h - 0xd800) << 10) + (c - 0xdc00) + 0x10000) + 2 * UNIT;
+  }
+  return FOLD[c]! + UNIT;
+}
+
+// The end of the folded character `code` at s[j], or -1 when s[j] is something
+// else, j is past the text, or j is -1.
+function past(s: string, j: number, to: number, code: number): number {
+  if (j < 0 || j >= to) return -1;
+  const f = at(s, j, to);
+  return charOf(f) === code ? j + widthOf(f) : -1;
+}
 
 function isAlnum(c: number): boolean {
   return (c >= 0x30 && c <= 0x39) || (c >= 0x41 && c <= 0x5a) || (c >= 0x61 && c <= 0x7a);
@@ -218,16 +355,16 @@ function isLetter(c: number): boolean {
   return (c >= 0x41 && c <= 0x5a) || (c >= 0x61 && c <= 0x7a);
 }
 
-// '.', and the ideographic, fullwidth and halfwidth full stops IDNA maps to it,
-// so `evil\u3002com` is the domain a browser and a model both read.
-function isDot(c: number): boolean {
-  return c === 0x2e || c === 0x3002 || c === 0xff0e || c === 0xff61;
+// A folded character of a label: an ASCII letter or digit, or an IDN letter.
+function isLabelChar(c: number): boolean {
+  return c < 0x80 ? isAlnum(c) : LABEL[c] === 1;
 }
 
-// A run the scanner splits into labels: letters, digits, '-', '_' and dots. '_'
-// is kept in the run so a label holding one can mark it as code.
+// A folded character of a run the scanner splits into labels: a label
+// character, '-', '_' or a dot. '_' is kept in the run so a label holding one
+// can mark it as code.
 function isRunChar(c: number): boolean {
-  return isAlnum(c) || c === 0x2d || c === 0x5f || isDot(c);
+  return isLabelChar(c) || c === 0x2d || c === 0x5f || c === 0x2e;
 }
 
 // What may follow `scheme://` in a URL: anything but whitespace, controls,
@@ -242,33 +379,43 @@ function isTrailingPunct(c: number): boolean {
   return c === 0x2e || c === 0x2c || c === 0x3b || c === 0x3a || c === 0x21 || c === 0x3f || c === 0x29 || c === 0x5d;
 }
 
-/** Every URL (with a scheme, or `www.`), email address and known-TLD domain in s[from, to), in order. One forward pass. */
+/** Every URL (with a scheme, or `www.`), email address, known-TLD domain and IP address in s[from, to), in order, read through the URL fold. One forward pass. */
 export function scanUrls(s: string, from: number, to: number, emit: UrlSink): void {
   // One chain for every run, reset after each, so a run costs no allocation.
-  const ch: Chain = { start: -1, firstEnd: -1, labels: 0, lastEnd: -1, prevStart: -1, tldStart: -1, tldEnd: -1, sldStart: -1, resume: from };
+  const ch: Chain = { start: -1, firstEnd: -1, labels: 0, octets: 0, firstOctet: -1, lastOctet: -1, lastEnd: -1, prevStart: -1, prevEnd: -1, tldStart: -1, tldEnd: -1, tldKind: 0, sldStart: -1, sldEnd: -1, resume: from };
   let i = from;
   while (i < to) {
-    if (!isRunChar(s.charCodeAt(i))) {
-      i++;
+    let f = at(s, i, to);
+    if (!isRunChar(charOf(f))) {
+      const e = charOf(f) === 0x5b ? ipv6End(s, i, to) : -1;
+      if (e >= 0) {
+        const end = hostTail(s, e, to);
+        emit(i, end, "ip");
+        i = end;
+      } else {
+        i += widthOf(f);
+      }
       continue;
     }
     const p = i;
-    while (i < to && isRunChar(s.charCodeAt(i))) i++;
+    while (i < to && isRunChar(charOf((f = at(s, i, to))))) i += widthOf(f);
     const q = i;
     // scheme://…
-    if (q + 2 < to && s.charCodeAt(q) === 0x3a && s.charCodeAt(q + 1) === 0x2f && s.charCodeAt(q + 2) === 0x2f) {
+    const body = past(s, past(s, past(s, q, to, 0x3a), to, 0x2f), to, 0x2f);
+    if (body >= 0) {
       const st = schemeStart(s, p, q);
       if (st >= 0) {
-        const end = urlEnd(s, q + 3, to);
+        const end = urlEnd(s, body, to);
         emit(st, end, "url");
         i = end;
         continue;
       }
     }
     // local@domain
-    if (q < to && s.charCodeAt(q) === 0x40) {
-      const e = emailDomainEnd(s, q + 1, to);
-      const st = Math.max(p, q - 64);
+    const d = past(s, q, to, 0x40);
+    if (d >= 0) {
+      const e = emailDomainEnd(s, d, to);
+      const st = localStart(s, p, q);
       if (e >= 0 && st < q) {
         emit(st, e, "email");
         i = e;
@@ -283,115 +430,198 @@ export function scanUrls(s: string, from: number, to: number, emit: UrlSink): vo
 // of the run, from their first letter. -1 when there is no letter.
 function schemeStart(s: string, p: number, q: number): number {
   let k = q;
-  while (k > p && q - k < 32) {
-    const c = s.charCodeAt(k - 1);
+  for (let n = 0; k > p && n < 32; n++) {
+    const f = before(s, k, p);
+    const c = charOf(f);
     if (!isAlnum(c) && c !== 0x2b && c !== 0x2d && c !== 0x2e) break;
-    k--;
+    k -= widthOf(f);
   }
-  while (k < q && !isLetter(s.charCodeAt(k))) k++;
-  return k < q ? k : -1;
+  while (k < q) {
+    const f = at(s, k, q);
+    if (isLetter(charOf(f))) return k;
+    k += widthOf(f);
+  }
+  return -1;
+}
+
+// Where the local part of an email address ending at `q` starts: at most 64
+// characters back, within the run that began at `p`.
+function localStart(s: string, p: number, q: number): number {
+  let st = q;
+  for (let n = 0; n < 64 && st > p; n++) st -= widthOf(before(s, st, p));
+  return st;
 }
 
 // The end of a URL body starting at `j`, without the punctuation that ends a sentence.
 function urlEnd(s: string, j: number, to: number): number {
   const start = j;
-  while (j < to && isUrlChar(s.charCodeAt(j))) j++;
-  while (j > start && isTrailingPunct(s.charCodeAt(j - 1))) j--;
+  while (j < to) {
+    const f = at(s, j, to);
+    if (!isUrlChar(charOf(f))) break;
+    j += widthOf(f);
+  }
+  while (j > start) {
+    const f = before(s, j, start);
+    if (!isTrailingPunct(charOf(f))) break;
+    j -= widthOf(f);
+  }
   return j;
 }
 
-// The end of the domain after an '@' at d - 1, or -1 when what follows is not a
-// dotted name ending in an alphabetic (or xn--) label.
+// Whether a path ('/') or a port (':' then a letter or digit) starts at s[j].
+function pathOrPortAt(s: string, j: number, to: number): boolean {
+  if (j >= to) return false;
+  const f = at(s, j, to);
+  const c = charOf(f);
+  if (c === 0x2f) return true;
+  const k = j + widthOf(f);
+  return c === 0x3a && k < to && isAlnum(charOf(at(s, k, to)));
+}
+
+// The end of a host ending at `j`, past the port and path that follow it.
+function hostTail(s: string, j: number, to: number): number {
+  return pathOrPortAt(s, j, to) ? urlEnd(s, j, to) : j;
+}
+
+// The end of the domain after an '@' that ends at `d`, or -1 when what follows
+// is not a dotted name ending in an alphabetic (or xn--) label.
 function emailDomainEnd(s: string, d: number, to: number): number {
   let e = d;
   while (e < to) {
-    const c = s.charCodeAt(e);
-    if (!isAlnum(c) && c !== 0x2d && !isDot(c)) break;
-    e++;
+    const f = at(s, e, to);
+    const c = charOf(f);
+    if (!isLabelChar(c) && c !== 0x2d && c !== 0x2e) break;
+    e += widthOf(f);
   }
-  while (e > d && (isDot(s.charCodeAt(e - 1)) || s.charCodeAt(e - 1) === 0x2d)) e--;
+  while (e > d) {
+    const f = before(s, e, d);
+    if (charOf(f) !== 0x2e && charOf(f) !== 0x2d) break;
+    e -= widthOf(f);
+  }
   let labels = 0;
-  let k = d;
   let lastStart = d;
+  let k = d;
   while (k < e) {
     let j = k;
-    while (j < e && !isDot(s.charCodeAt(j))) j++;
-    if (j === k || j - k > 63) return -1;
+    let len = 0;
+    let f = 0;
+    while (j < e && charOf((f = at(s, j, e))) !== 0x2e) {
+      j += widthOf(f);
+      len++;
+    }
+    if (len === 0 || len > 63) return -1;
     labels++;
     lastStart = k;
-    k = j + 1;
+    k = j < e ? j + widthOf(f) : j;
   }
   if (labels < 2) return -1;
   return isTopLabel(s, lastStart, e) ? e : -1;
 }
 
-// An alphabetic label of 2 to 63 letters, or an IDN `xn--` label.
+// A label of 2 to 63 letters, ASCII or IDN, or an IDN `xn--` label.
 function isTopLabel(s: string, k: number, e: number): boolean {
-  if (e - k < 2 || e - k > 63) return false;
-  if (e - k > 4 && s.slice(k, k + 4).toLowerCase() === "xn--") return true;
-  for (let j = k; j < e; j++) if (!isLetter(s.charCodeAt(j))) return false;
-  return true;
+  let len = 0;
+  let prefix = 0; // how many leading characters match `xn--`
+  let letters = true;
+  for (let j = k; j < e; len++) {
+    const f = at(s, j, e);
+    const c = charOf(f);
+    if (prefix === len && len < 4 && (c | 0x20) === "xn--".charCodeAt(len)) prefix++;
+    if (c < 0x80 ? !isLetter(c) : LABEL[c] !== 1) letters = false;
+    j += widthOf(f);
+  }
+  if (len < 2 || len > 63) return false;
+  return letters || (prefix === 4 && len > 4);
 }
 
-function isKnownTld(s: string, k: number, e: number): boolean {
-  return e - k >= 2 && e - k <= MAX_TLD_LENGTH && TLDS.get(s, k, e) !== 0;
-}
-
+// Whether s[k, e) is `www`, folded.
 function isWww(s: string, k: number, e: number): boolean {
-  return e - k === 3 && (s.charCodeAt(k) | 0x20) === 0x77 && (s.charCodeAt(k + 1) | 0x20) === 0x77 && (s.charCodeAt(k + 2) | 0x20) === 0x77;
+  let n = 0;
+  for (let j = k; j < e; n++) {
+    const f = at(s, j, e);
+    if (n === 3 || (charOf(f) | 0x20) !== 0x77) return false;
+    j += widthOf(f);
+  }
+  return n === 3;
 }
 
 // A chain of valid labels inside one run, as scanHosts walks it.
 interface Chain {
-  start: number; //    first label's start
-  firstEnd: number; // first label's end
-  labels: number; //   labels so far
-  lastEnd: number; //  last label's end
-  prevStart: number; // start of the label before the last
-  tldStart: number; // the last known-TLD label at position 2 or later, or -1
+  start: number; //      first label's start
+  firstEnd: number; //   first label's end
+  labels: number; //     labels so far
+  octets: number; //     labels so far that read as an IPv4 octet: 0 to 255, no leading zero
+  firstOctet: number; // the first label's octet value, or -1
+  lastOctet: number; //  the last label's octet value, or -1
+  lastEnd: number; //    last label's end
+  prevStart: number; //  the last label's start, then the one before it
+  prevEnd: number;
+  tldStart: number; //   the last known-TLD label at position 2 or later, or -1
   tldEnd: number;
-  sldStart: number; // the label before that TLD
-  resume: number; //   where the scan goes on: past a `www.` URL path, else the run end
+  tldKind: number; //    its TLDS value
+  sldStart: number; //   the label before that TLD
+  sldEnd: number;
+  resume: number; //     where the scan goes on: past a `www.` URL or an IP's port and path, else the run end
 }
 
-// The `www.` hosts and known-TLD domains in the run s[p, q). The run splits at
-// dots into labels; a chain is a maximal sequence of valid labels. An empty,
-// over-long or underscored label (`tool_call.name`) is code, not a host, so the
-// chain restarts after it. In a chain, the domain runs to the last label that
-// is a known TLD: `evil.com.Then` is `evil.com`. Returns where the scan goes
-// on, past the path of a `www.` URL that ends the run so the path is not
-// rescanned (`www.a.com/` repeated would be quadratic).
+// The `www.` hosts, known-TLD domains and IPv4 addresses in the run s[p, q).
+// The run splits at dots into labels; a chain is a maximal sequence of valid
+// labels. An empty, over-long or underscored label (`tool_call.name`) is code,
+// not a host, so the chain restarts after it. In a chain, the domain runs to
+// the last label that is a known TLD: `evil.com.Then` is `evil.com`. Returns
+// where the scan goes on, past the path of a `www.` URL or an IP that ends the
+// run so the path is not rescanned (`www.a.com/` repeated would be quadratic).
 function scanHosts(s: string, p: number, q: number, to: number, ch: Chain, emit: UrlSink): number {
   ch.resume = q;
   let k = p;
   while (k < q) {
-    let e = k;
-    let underscore = false;
-    while (e < q && !isDot(s.charCodeAt(e))) {
-      if (s.charCodeAt(e) === 0x5f) underscore = true;
-      e++;
-    }
-    // A chain's first label may carry leading hyphens (`--evil.com`); drop them.
+    // One label, to the next dot. A chain's first label drops leading hyphens (`--evil.com`).
     let ks = k;
-    if (ch.labels === 0) while (ks < e && s.charCodeAt(ks) === 0x2d) ks++;
-    const len = e - ks;
-    if (len < 1 || len > 63 || underscore || s.charCodeAt(ks) === 0x2d || s.charCodeAt(e - 1) === 0x2d) {
+    let e = k;
+    let len = 0;
+    let first = -1;
+    let last = -1;
+    let underscore = false;
+    let octet = 0; // the label's value while it reads as an IPv4 octet, else -1
+    let f = 0;
+    while (e < q && charOf((f = at(s, e, q))) !== 0x2e) {
+      const c = charOf(f);
+      e += widthOf(f);
+      if (len === 0 && c === 0x2d && ch.labels === 0) {
+        ks = e;
+        continue;
+      }
+      if (c === 0x5f) underscore = true;
+      if (len === 0) first = c;
+      last = c;
+      len++;
+      if (octet >= 0) octet = c >= 0x30 && c <= 0x39 && len <= 3 && (len === 1 || first !== 0x30) ? octet * 10 + (c - 0x30) : -1;
+    }
+    if (len === 0 || octet > 255) octet = -1;
+    if (len < 1 || len > 63 || underscore || first === 0x2d || last === 0x2d) {
       emitChain(s, ch, q, to, emit);
     } else {
       if (ch.labels === 0) {
         ch.start = ks;
         ch.firstEnd = e;
+        ch.firstOctet = octet;
       }
       ch.labels++;
-      if (ch.labels >= 2 && isKnownTld(s, ks, e)) {
+      if (octet >= 0) ch.octets++;
+      ch.lastOctet = octet;
+      const kind = ch.labels >= 2 ? TLDS.getFolded(s, ks, e) : 0;
+      if (kind) {
         ch.tldStart = ks;
         ch.tldEnd = e;
+        ch.tldKind = kind;
         ch.sldStart = ch.prevStart;
+        ch.sldEnd = ch.prevEnd;
       }
       ch.prevStart = ks;
+      ch.prevEnd = e;
       ch.lastEnd = e;
     }
-    k = e + 1; // past the dot
+    k = e < q ? e + widthOf(f) : e; // past the dot
   }
   emitChain(s, ch, q, to, emit);
   return ch.resume;
@@ -401,44 +631,87 @@ function scanHosts(s: string, p: number, q: number, to: number, ch: Chain, emit:
 function emitChain(s: string, ch: Chain, q: number, to: number, emit: UrlSink): void {
   if (ch.labels > 0) {
     const www = isWww(s, ch.start, ch.firstEnd);
-    if (www && ch.labels === 1 && ch.lastEnd < q && isDot(s.charCodeAt(ch.lastEnd))) {
-      emit(ch.start, ch.lastEnd + 1, "url"); // a bare `www.` that a template builds a URL on
+    if (www && ch.labels === 1 && ch.lastEnd < q) {
+      // The chain ended at a dot: a bare `www.` that a template builds a URL on.
+      emit(ch.start, ch.lastEnd + widthOf(at(s, ch.lastEnd, q)), "url");
     } else if (www && ch.labels >= 2) {
       const end = ch.lastEnd === q ? urlEnd(s, q, to) : ch.lastEnd;
       emit(ch.start, end, "url");
+      if (end > ch.resume) ch.resume = end;
+    } else if (ch.labels === 4 && ch.octets === 4 && ch.firstOctet > 0 && ch.lastOctet > 0) {
+      // An IPv4 address. One starting or ending in 0 (`1.0.0.0`) is a version, not a host.
+      const end = ch.lastEnd === q ? hostTail(s, q, to) : ch.lastEnd;
+      emit(ch.start, end, "ip");
       if (end > ch.resume) ch.resume = end;
     } else if (ch.tldEnd > 0 && isHost(s, ch, q, to)) {
       emit(ch.start, ch.tldEnd, "domain");
     }
   }
-  ch.start = ch.firstEnd = ch.lastEnd = ch.prevStart = ch.tldStart = ch.tldEnd = ch.sldStart = -1;
-  ch.labels = 0;
+  ch.start = ch.firstEnd = ch.firstOctet = ch.lastOctet = ch.lastEnd = ch.prevStart = ch.prevEnd = ch.tldStart = ch.tldEnd = ch.sldStart = ch.sldEnd = -1;
+  ch.labels = ch.octets = ch.tldKind = 0;
 }
 
 // Whether a chain ending in a known TLD is a host, not something shaped like
-// one. Three shapes are not: a method call or subscript (`re.search(`); a file
+// one. Four shapes are not: a method call or subscript (`re.search(`); a file
 // name under a TLD that is also a file extension (`config.py`), unless a path,
-// a port or a registry second-level label says it is a host; and a number
-// before a capitalized word (`1.Do`, `3.5.It`), which is a list item or a
-// missing space.
+// a port or a registry second-level label says it is a host; an IDN TLD after
+// the ideographic full stop, which in CJK prose ends a sentence before a word
+// that happens to be a TLD; and a number before a capitalized word (`1.Do`,
+// `3.5.It`), which is a list item or a missing space.
 function isHost(s: string, ch: Chain, q: number, to: number): boolean {
-  const next = ch.tldEnd < to ? s.charCodeAt(ch.tldEnd) : -1;
+  const next = ch.tldEnd < to ? charOf(at(s, ch.tldEnd, to)) : -1;
   if (ch.tldEnd === q && (next === 0x28 || next === 0x5b)) return false; // '(' '['
-  if (TLDS.get(s, ch.tldStart, ch.tldEnd) === FILE_EXTENSION_TLD) {
-    const sld = ch.sldStart >= 0 && SECOND_LEVEL.get(s, ch.sldStart, ch.tldStart - 1) !== 0;
-    const pathOrPort = ch.tldEnd === q && (next === 0x2f || (next === 0x3a && ch.tldEnd + 1 < to && isAlnum(s.charCodeAt(ch.tldEnd + 1))));
-    if (!sld && !pathOrPort) return false;
+  if (ch.tldKind === FILE_EXTENSION_TLD) {
+    const sld = ch.sldStart >= 0 && SECOND_LEVEL.getFolded(s, ch.sldStart, ch.sldEnd) !== 0;
+    if (!sld && !(ch.tldEnd === q && pathOrPortAt(s, q, to))) return false;
   }
-  const c = s.charCodeAt(ch.tldStart);
+  const dot = s.charCodeAt(ch.sldEnd);
+  if (ch.tldKind === IDN_TLD && (dot === 0x3002 || dot === 0xff61)) return false;
+  const c = charOf(at(s, ch.tldStart, to));
   if (c >= 0x41 && c <= 0x5a) {
-    let numeric = true;
-    for (let j = ch.start; j < ch.tldStart && numeric; j++) {
-      const d = s.charCodeAt(j);
-      if (!(d >= 0x30 && d <= 0x39) && !isDot(d)) numeric = false;
+    for (let j = ch.start; j < ch.tldStart; ) {
+      const f = at(s, j, ch.tldStart);
+      const d = charOf(f);
+      if (!(d >= 0x30 && d <= 0x39) && d !== 0x2e) return true;
+      j += widthOf(f);
     }
-    if (numeric) return false;
+    return false;
   }
   return true;
+}
+
+// The end past ']' of a bracketed IPv6 address at s[i] === '[', else -1:
+// colon-separated groups of 1 to 4 hex digits, eight of them, or fewer around
+// one '::', and at least two, so a slice such as `[::2]` is not one. Reads at
+// most about 50 characters, so a text of brackets stays linear.
+function ipv6End(s: string, i: number, to: number): number {
+  let j = i + 1;
+  let groups = 0;
+  let double = false;
+  if (j + 1 < to && s.charCodeAt(j) === 0x3a && s.charCodeAt(j + 1) === 0x3a) {
+    double = true;
+    j += 2;
+  }
+  for (;;) {
+    let digits = 0;
+    while (j < to && digits < 5 && isHexDigit(s.charCodeAt(j))) {
+      j++;
+      digits++;
+    }
+    if (digits === 0 || digits > 4 || ++groups > 8 || j >= to) return -1;
+    const c = s.charCodeAt(j);
+    if (c === 0x5d) break;
+    if (c !== 0x3a) return -1;
+    j++;
+    if (j < to && s.charCodeAt(j) === 0x3a) {
+      if (double) return -1;
+      double = true;
+      j++;
+      if (j < to && s.charCodeAt(j) === 0x5d) break;
+    }
+  }
+  if (groups < 2 || (double ? groups > 7 : groups !== 8)) return -1;
+  return j + 1;
 }
 
 // ---- ISC-20: encoded blobs ----

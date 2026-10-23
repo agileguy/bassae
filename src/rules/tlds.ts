@@ -110,6 +110,3 @@ zappos zara zero zip zm zone zuerich zw
     .split(/\s+/)
     .filter(Boolean),
 );
-
-/** Longest entry in KNOWN_TLDS, so a scanner can skip longer labels without a lookup. */
-export const MAX_TLD_LENGTH = 24;

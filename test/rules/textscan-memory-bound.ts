@@ -38,6 +38,15 @@ const SHAPES: Record<string, { unit: string; tail?: string }> = {
   "one base64 run": { unit: "aB3c" },
   "one string of \\u200b escapes": { unit: "\\u200b", tail: "' }}" },
   "one string of \\N{ZWSP} escapes": { unit: "\\N{ZWSP}", tail: "' }}" },
+  // The URL fold: every character read through the fold table, as a surrogate
+  // pair or as a defang. A tail of "info" fills 64 MiB exactly, so the run ends in it.
+  "all fullwidth 'evil.com '": { unit: String.fromCharCode(0xff45, 0xff56, 0xff49, 0xff4c, 0xff0e, 0xff43, 0xff4f, 0xff4d, 0x20) },
+  "one fullwidth dotted run": { unit: String.fromCharCode(0xff41, 0xff0e), tail: "info" },
+  "one math bold dotted run": { unit: String.fromCodePoint(0x1d41a, 0x2e), tail: "info" },
+  "one Cyrillic dotted run": { unit: String.fromCharCode(0x43f, 0x2e), tail: String.fromCharCode(0x440, 0x444) },
+  "one defanged dotted run": { unit: "a[.]", tail: "info" },
+  "all '1.2.3.4 '": { unit: "1.2.3.4 " },
+  "all '[1:2:3:4:5:6:7:8]'": { unit: "[1:2:3:4:5:6:7:8]" },
 };
 
 // The template as ONE byte buffer, as a reader hands makeTemplate the file bytes.
