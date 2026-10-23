@@ -73,7 +73,8 @@ describe("env_profile_divergence (ISC-22.2)", () => {
         );
       },
     };
-    const d = await diffRender(input("{{ raise_exception('no jinja2 here') }}"), datePayload, []);
+    // Integrity is held out: an output that drops every content is a content_integrity finding of its own.
+    const d = await diffRenderWith(input("{{ raise_exception('no jinja2 here') }}"), datePayload, [], { checkContent: () => [], checkTools: () => [] });
     expect(d.findings.map((f) => f.ruleId)).toEqual(["render_divergence"]);
   });
 });

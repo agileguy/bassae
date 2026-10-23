@@ -222,6 +222,16 @@ describe("trigger candidates", () => {
     expect(messages(tested!)[1]).toMatchObject({ role: "assistant", meta: { source: expect.any(String) } });
   });
 
+  test("a key tested on a tool holds what the template reads under it, where no candidate compares anything", () => {
+    // gemma-4 29af862b: `'response' in tool_data['function']`, then reads only through `set response_declaration = ...`.
+    const t = [trigger("response", { op: "in", input: "tools[].function", test: "presence" })];
+    const reads = ["tools[].function.response.description", "tools[].function.response.type"];
+    const [tested] = buildProbes(t, { reads }).probes.filter((p) => p.label.startsWith("trigger:"));
+    expect((tested!.tools[0] as { function: Record<string, unknown> }).function.response).toEqual({ description: expect.any(String), type: expect.any(String) });
+    const [bare] = buildProbes(t).probes.filter((p) => p.label.startsWith("trigger:"));
+    expect(typeof (bare!.tools[0] as { function: Record<string, unknown> }).function.response).toBe("string");
+  });
+
   test("a path through __proto__ writes nothing into Object.prototype and is sent as plain content", () => {
     const inputs = ["messages[].__proto__.polluted", "tools[].function.__proto__.polluted", "__proto__.polluted", "documents[].__proto__.polluted"];
     const probes = triggerProbes(inputs.map((input) => trigger("yes", { input })));

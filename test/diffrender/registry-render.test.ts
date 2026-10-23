@@ -1,6 +1,6 @@
 // ISC-22 acceptance: differential rendering must not flag the templates people actually ship. Every distinct
-// registry template, scanned as if unknown (its own injected text and trigger candidates, no registry literals as
-// scaffolding), renders through the sandbox with zero render_divergence and zero env_profile_divergence.
+// registry template, scanned as if unknown (its own injected text, trigger candidates and read paths, no registry
+// literals as scaffolding), renders through the sandbox with no differential-rendering or integrity finding.
 //
 // A template may refuse a probe through its own raise_exception; any other gap fails here. The render worker
 // polyfills the jinja2 builtins the stock templates use (reject, positional map), so none is excused for those.
@@ -31,7 +31,7 @@ describe.skipIf(!status.available)("registry templates through differential rend
   const sandbox = createRenderer();
 
   test(
-    "every distinct registry template renders with zero render_divergence and zero env_profile_divergence",
+    "every distinct registry template renders with no divergence, render_dos or integrity finding",
     async () => {
       expect(templates.length).toBeGreaterThan(0);
       const flagged: string[] = [];
@@ -49,10 +49,10 @@ describe.skipIf(!status.available)("registry templates through differential rend
         };
         const template = makeTemplateFromString({ kind: "bare", path: "/chat_template.jinja", realPath: "/chat_template.jinja", name: known.entry.templateName }, known.text);
         const analysis = analyzeInjection({ template, scaffolding: buildScaffolding(NO_TOKENS), knownGood: false });
-        const r = await diffRender({ template, injected: analysis.injected, triggers: analysis.triggers }, recording, transforms);
+        const r = await diffRender({ template, injected: analysis.injected, triggers: analysis.triggers, reads: analysis.reads }, recording, transforms);
 
         for (const f of r.findings) {
-          if (["render_divergence", "env_profile_divergence", "render_dos", "scanner_error"].includes(f.ruleId)) flagged.push(`${name}: ${f.ruleId}: ${f.message}`);
+          if (["render_divergence", "env_profile_divergence", "render_dos", "content_integrity", "tool_integrity", "scanner_error"].includes(f.ruleId)) flagged.push(`${name}: ${f.ruleId}: ${f.message}`);
         }
         if (r.complete) continue;
         const unexplained = failures.filter((f) => !isRefusal(f, known.text));

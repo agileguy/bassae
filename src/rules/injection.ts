@@ -198,13 +198,14 @@ export function analyzeInjection(ctx: AnalysisContext): InjectionAnalysis {
   // template is parsed and interpreted once (ISC-17, ISC-22.1).
   const walk: Walk = {};
   const r = analyzeRules(ctx, walk);
-  return { ...r, injected: walk.injected ?? [], triggers: walk.triggers ?? [] };
+  return { ...r, injected: walk.injected ?? [], triggers: walk.triggers ?? [], reads: walk.reads ?? [] };
 }
 
 /** What the rules' walk found besides findings, for the caller to keep. */
 interface Walk {
   injected?: InjectedText[];
   triggers?: TriggerCandidate[];
+  reads?: string[];
 }
 
 function analyzeRules(ctx: AnalysisContext, walk: Walk = {}): RuleResult {
@@ -233,6 +234,7 @@ function analyze(ctx: AnalysisContext, base: FindingBase, walk: Walk): RuleResul
     const ex = extract(outcome, t.text, scaffolding);
     walk.injected = ex.items;
     walk.triggers = ex.triggers;
+    walk.reads = ex.reads;
     pushAll(findings, itemFindings(ex.items, ctx, base, t.text));
     for (const n of ex.nondeterministic) {
       pushAll(findings, [{ ruleId: "nondeterministic_trigger", severity: "HIGH", message: n.message, ...base, span: n.span, excerpt: clip(t.text.slice(n.span.start, n.span.end)) }]);

@@ -103,6 +103,8 @@ export interface Extraction {
   nondeterministic: Trigger[];
   /** Every literal compared with runtime input, from the same walk (ISC-22.1). */
   triggers: TriggerCandidate[];
+  /** Every input path read at a member, through set names and macro arguments, from the same walk. */
+  reads: string[];
   /** False when a budget stopped the walk before every emission was seen, or there were more trigger candidates than MAX_TRIGGERS. */
   complete: boolean;
 }
@@ -147,6 +149,8 @@ const MAX_TRIE_CHARS = 4 * 1024 * 1024;
 // Trigger candidates listed for one template. Past this the list is cut and
 // the walk is incomplete, never silently short (ISC-22.1).
 const MAX_TRIGGERS = 1024;
+// Read paths only shape what a probe adds, so a cut list costs a probe detail, never a verdict.
+const MAX_READS = 1024;
 // Ordering a literal from the other side: `40 < n` is `n > 40`.
 const FLIPPED: Readonly<Record<string, TriggerOp>> = { "<": ">", ">": "<", "<=": ">=", ">=": "<=", "==": "==", "!=": "!=" };
 // The select filters' comparison tests, as the operator each one is (ISC-22.1).
@@ -165,7 +169,7 @@ const NON_SPACE = /\S/u;
 export function extract(outcome: ParseOutcome, text: string, scaffolding: ReadonlySet<string>): Extraction {
   const matcher = new Scaffold(scaffolding);
   if (!outcome.program || !outcome.pre || !outcome.lines) {
-    return { items: rawItems(outcome, matcher), joined: { urls: [], blobs: [] }, nondeterministic: [], triggers: [], complete: false };
+    return { items: rawItems(outcome, matcher), joined: { urls: [], blobs: [] }, nondeterministic: [], triggers: [], reads: [], complete: false };
   }
   const interp = new Interp(outcome, outcome.lines);
   const lits = interp.run();
@@ -179,7 +183,7 @@ export function extract(outcome: ParseOutcome, text: string, scaffolding: Readon
   }
   // A list cut at the cap is never passed off as whole (ISC-22.1).
   const triggers = [...interp.triggers.values()];
-  return { items, joined, nondeterministic: [...interp.nondet.values()], triggers, complete: interp.complete && !interp.triggersCut && matcher.complete && joined.complete };
+  return { items, joined, nondeterministic: [...interp.nondet.values()], triggers, reads: [...interp.reads], complete: interp.complete && !interp.triggersCut && matcher.complete && joined.complete };
 }
 
 /**
@@ -303,6 +307,7 @@ class Interp {
   private recording = false;
   private readonly tests = new Map<Node, TestClass>();
   readonly triggers = new Map<string, TriggerCandidate>();
+  readonly reads = new Set<string>();
   triggersCut = false;
 
   constructor(
@@ -965,6 +970,7 @@ class Interp {
       path,
       src: o.src === "loop" && (key === "previtem" || key === "nextitem") ? c.loopItem : o.src === undefined ? undefined : typeof key === "string" ? `${o.src}.${key}` : `${o.src}[]`,
     };
+    if (this.recording && v.src !== undefined && typeof key === "string" && this.reads.size < MAX_READS) this.reads.add(v.src);
     return refine(withHeld(v, entryHeld(o.genAt, key)), path, c);
   }
 

@@ -152,7 +152,7 @@ function isRefusal(r: RenderResult, templateText: string): boolean {
 async function run(input: DiffRenderInput, renderer: Renderer, transforms: readonly Transform[], checks: IntegrityChecks, base: FindingBase): Promise<DiffRenderResult> {
   const text = input.template.text;
   // A template that never reads `tools` gets no probe passing any: it cannot render them (ISC-22.4).
-  const { probes, cut } = buildProbes(input.triggers, { tools: readsTools(text), text });
+  const { probes, cut } = buildProbes(input.triggers, { tools: readsTools(text), text, ...(input.reads ? { reads: input.reads } : {}) });
   const { outcomes, breach } = await renderAll(text, probes, renderer);
 
   let rendered = 0;

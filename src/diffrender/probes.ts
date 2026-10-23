@@ -236,7 +236,7 @@ function parsePath(input: string): Token[] {
   return path.includes("__proto__") ? [] : path;
 }
 
-// What the candidates' paths show a template reading under each node, so a key a probe adds holds the shape the
+// What the template's read paths show it reading under each node, so a key a probe adds holds the shape the
 // template reads from it: a mapping of the keys it reads, a list when it reads elements, else a note.
 type Reads = Map<string, Set<Token>>;
 const readKey = (path: Token[]) => path.map((t) => (isIndex(t) ? "[]" : t)).join(".");
@@ -248,10 +248,10 @@ function normalPath(path: Token[]): Token[] {
   return p;
 }
 
-function readsOf(triggers: readonly TriggerCandidate[]): Reads {
+function readsOf(inputs: readonly (string | undefined)[]): Reads {
   const reads: Reads = new Map();
-  for (const t of triggers) {
-    const path = t.input ? normalPath(parsePath(t.input)) : [];
+  for (const input of inputs) {
+    const path = input ? normalPath(parsePath(input)) : [];
     for (let i = 1; i < path.length; i++) {
       const key = readKey(path.slice(0, i));
       reads.set(key, (reads.get(key) ?? new Set<Token>()).add(path[i]!));
@@ -678,13 +678,15 @@ export interface ProbeOptions {
   tools?: boolean;
   /** The template's text, where a trigger's span is read. */
   text?: string;
+  /** Input paths the template reads members at (InjectionAnalysis.reads), beside the candidates' own. */
+  reads?: readonly string[];
 }
 
 /** The fixed matrix plus each trigger candidate's probes, deduplicated and capped at MAX_PROBES. */
 export function buildProbes(triggers: readonly TriggerCandidate[], options: ProbeOptions = {}): ProbeMatrix {
   const withTools = options.tools !== false;
   const specs = [...explainSpecs(withTools), ...varySpecs(withTools)];
-  const reads = readsOf(triggers);
+  const reads = readsOf([...triggers.map((t) => t.input), ...(options.reads ?? [])]);
   let cut = 0;
   triggers.forEach((t, i) => {
     const r = triggerSpecs(t, i, options.text, reads);

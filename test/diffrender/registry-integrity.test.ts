@@ -16,9 +16,11 @@ const transforms = loadTransforms();
 const renderer = createRenderer();
 const PROFILES: EnvProfile[] = ["hf-default", "jinja2-globals"];
 
-// The renderer does not implement these filters yet; another phase-3 track is adding them. A template that fails
-// only on them is pending, not failed.
-const PENDING_FILTER = /Unknown \w+ filter: (reject|map)\b|map\(.?upper/;
+/** A template's own raise_exception: the raised text is a literal in the template, so the probe is skipped. */
+const isRefusal = (message: string, text: string) => message.startsWith("Error: ") && text.includes(message.slice("Error: ".length));
+// Content parts are an optional OpenAI form, and two stock templates (qwen3 87a2728c, xlam-2 0ce792ef) call string
+// methods on content: a render error on a probe passing them is skipped too. Every other failure fails the sweep.
+const hasParts = (p: Probe) => (p.request.context.messages as { content?: unknown }[]).some((m) => Array.isArray(m.content));
 
 // gemma-3 and gemma-3n never read `tools`: they have no tool format, so there is nothing for a tool probe to check.
 // Tool probes go only to templates whose parse reads the `tools` identifier, as the probe matrix decides; one that
@@ -93,14 +95,13 @@ function distinct(): KnownGoodTemplate[] {
 interface Sweep {
   names: string[];
   failures: string[];
-  pending: Set<string>;
   checked: number;
   withTools: number;
 }
 
 /** Renders each distinct registry template on `probes` under both profiles and runs both checks on every output. */
 async function sweep(probes: Probe[]): Promise<Sweep> {
-  const out: Sweep = { names: [], failures: [], pending: new Set(), checked: 0, withTools: 0 };
+  const out: Sweep = { names: [], failures: [], checked: 0, withTools: 0 };
   for (const known of distinct()) {
     const name = `${known.entry.family} ${known.entry.sha256.slice(0, 12)}`;
     for (const profile of PROFILES) {
@@ -109,8 +110,7 @@ async function sweep(probes: Probe[]): Promise<Sweep> {
       for (const [i, r] of results.entries()) {
         const p = sent[i]!;
         if (!r.ok) {
-          if (r.failure === "render_error" && PENDING_FILTER.test(r.message)) out.pending.add(name);
-          else if (r.failure !== "render_error") out.failures.push(`${name} ${p.label} ${profile}: ${r.failure}: ${r.message}`);
+          if (r.failure !== "render_error" || !(isRefusal(r.message, known.text) || hasParts(p))) out.failures.push(`${name} ${p.label} ${profile}: ${r.failure}: ${r.message}`);
           continue; // a probe the template refuses is skipped
         }
         out.checked++;
@@ -127,16 +127,13 @@ async function sweep(probes: Probe[]): Promise<Sweep> {
 test.if(live)(
   "every registry template gives zero content and tool issues on every probe it renders",
   async () => {
-    const { names, failures, pending, checked, withTools } = await sweep(standardProbes());
+    const { names, failures, checked, withTools } = await sweep(standardProbes());
     const toolless = distinct()
       .filter((k) => !readsTools(k.text))
       .map((k) => `${k.entry.family} ${k.entry.sha256.slice(0, 12)}`);
-    console.log(`[integrity] ${names.length} templates, ${checked} renders checked (${withTools} with tools); pending: ${[...pending].join(", ") || "none"}; no tool format: ${toolless.join(", ") || "none"}`);
+    console.log(`[integrity] ${names.length} templates, ${checked} renders checked (${withTools} with tools); no tool format: ${toolless.join(", ") || "none"}`);
     expect(failures).toEqual([]);
     expect(names.length).toBe(distinct().length);
-    // Only the qwen3-coder template waits on the missing |reject; every other template renders its tool probes.
-    // Once the filter lands it renders too, and its tool list is then held to the qwen-xml-tool-list matcher.
-    expect([...pending].filter((n) => n !== "qwen3-coder 672e747c77e9")).toEqual([]);
     expect(withTools).toBeGreaterThan(30);
     expect(toolless.sort()).toEqual(["gemma-3 7de1c58e208e", "gemma-3n ac03dcb3b097"].sort());
   },

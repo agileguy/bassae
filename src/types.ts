@@ -304,6 +304,8 @@ export interface InjectionAnalysis extends RuleResult {
   injected: InjectedText[];
   /** Every literal compared against an input-derived expression (ISC-22.1). */
   triggers: TriggerCandidate[];
+  /** Every input path the template reads a member at, through the names it sets, such as `tools[].function.response.type`. */
+  reads: string[];
 }
 
 // ---- differential rendering (ISC-22) ----
@@ -351,6 +353,8 @@ export interface DiffRenderInput {
   /** From the injection rules: used to place a render_divergence finding on the literal that printed it. */
   injected: readonly InjectedText[];
   triggers: readonly TriggerCandidate[];
+  /** From the injection rules: a key a probe adds holds what the template reads under it (ISC-22). */
+  reads?: readonly string[];
 }
 
 export interface DiffRenderResult extends RuleResult {
