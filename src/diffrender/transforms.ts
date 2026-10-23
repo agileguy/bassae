@@ -263,8 +263,9 @@ function delimited(output: string, open: string, close: string, name: (inner: st
 
 // gpt-oss lines 10-105, macro render_typescript_type. The port prints what the template prints, losses included
 // (each listed in the allowlist entry): integer as number, null as `any`, an array of scalar items as the bare
-// element type (`string[]`), whatever else the items hold unprinted, and an element type longer than 50 characters
-// as `any[]`. A node's description and default are printed only at the top level, by the tool loop below.
+// element type (`string[]`), whatever else the items hold unprinted, an element type longer than 50 characters
+// as `any[]`, and an empty required list as none. A node's description and default are printed only at the top
+// level, by the tool loop below.
 // `nullable` is printed only on a string without an enum and on an array; anywhere else it would vanish, so the
 // tool is not explained.
 const SCALAR_ARRAYS: Record<string, string> = { string: "string[]", number: "number[]", integer: "number[]", boolean: "boolean[]" };
@@ -422,8 +423,8 @@ function gemmaParameters(properties: Record<string, Schema>, g: Gemma): string |
 
 /**
  * One property: its description, then its enum (a string) or items (an array), then `nullable:true` (gemma-4),
- * then its properties and required list (an object), then its upper-cased type. A property's own default is not
- * printed: a loss the allowlist entry lists.
+ * then its properties and non-empty required list (an object), then its upper-cased type. A property's own default
+ * is not printed, and an empty required list prints as none does: losses the allowlist entry lists.
  */
 function gemmaProperty(key: string, s: Schema, g: Gemma): string | undefined {
   const { q } = g;
@@ -452,7 +453,11 @@ function gemmaProperty(key: string, s: Schema, g: Gemma): string | undefined {
   return `${key}:{${parts.join(",")}}`;
 }
 
-/** An array's items, key by key in dictsort order, none values skipped: properties and required as on an object, type upper-cased, anything else through format_argument. */
+/**
+ * An array's items, key by key in dictsort order, none values skipped: properties and required as on an object, type
+ * upper-cased, anything else through format_argument. The only none a schema node holds is a default, so an item's
+ * none default prints as no default does: a loss the allowlist entry lists.
+ */
 function gemmaItems(items: Schema, g: Gemma): string | undefined {
   const { q } = g;
   const parts: string[] = [];

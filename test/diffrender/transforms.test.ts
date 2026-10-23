@@ -271,11 +271,21 @@ function nodesOf(root: Schema, path = "parameters"): [string, Schema][] {
   return out;
 }
 
-const OTHER_TYPE: Record<string, string> = { string: "boolean", number: "string", integer: "string", boolean: "string", null: "string" };
+// Each type changes to types every port prints apart from it, and integer and number also to each other, which
+// gpt-oss prints alike (a listed loss). gpt-oss prints null as `any`, so changes to and from null are made too.
+const OTHER_TYPES: Record<string, string[]> = { string: ["boolean", "null"], number: ["string", "integer"], integer: ["string", "number"], boolean: ["string"], null: ["string"] };
 /** A different default of the same kind. */
 const otherDefault = (d: unknown) => (typeof d === "string" ? `${d} again` : typeof d === "number" ? d + 1 : typeof d === "boolean" ? !d : null);
+const padded = (text: string) => `  ${text}\n`;
+/** Spellings a key's tag may normalise to the same tag: `-` or a space for `_`, or a leading `$`. */
+const respellings = (key: string) => (key.includes("_") ? [key.replaceAll("_", "-"), key.replaceAll("_", " "), `$${key}`] : []);
 
-/** Each one-field change the brief says a rendering must show: a name, a description, a type, an enum value, a default or a required list, at any node. */
+/**
+ * Each one-field change the brief says a rendering must show: a name, a description, a type, an enum value, a default
+ * or a required list, at any node. Beside them, the changes a documented loss hides: whitespace around a description,
+ * a key respelled, a number or boolean sent as its string form, an empty required list where there was none, an
+ * item's default set to none, and a function response's type changed.
+ */
 function mutants(tool: Tool): [string, Tool][] {
   const out: [string, Tool][] = [];
   const change = (what: string, edit: (copy: Tool) => void) => {
@@ -285,15 +295,26 @@ function mutants(tool: Tool): [string, Tool][] {
   };
   change("function name", (c) => (c.function.name += "_x"));
   change("function description", (c) => (c.function.description = "A different purpose entirely."));
+  change("function description padded", (c) => (c.function.description = padded(c.function.description)));
+  const responseOf = (t: Tool) => (t.function as unknown as { response?: { type: string; description?: string } }).response;
+  const response = responseOf(tool);
+  if (response) {
+    change("function response type", (c) => (responseOf(c)!.type = response.type === "string" ? "number" : "string"));
+    change("function response description", (c) => (responseOf(c)!.description = "A different receipt."));
+  }
   const params = paramsOf(tool);
   if (!params) return out;
   const at = (c: Tool, k: number) => nodesOf(paramsOf(c)!)[k]![1];
   for (const [k, [path, node]] of nodesOf(params).entries()) {
-    if (node.description !== undefined) change(`${path} description`, (c) => (at(c, k).description = "Changed wording here."));
-    else change(`${path} description added`, (c) => (at(c, k).description = "An added description."));
+    if (node.description !== undefined) {
+      change(`${path} description`, (c) => (at(c, k).description = "Changed wording here."));
+      change(`${path} description padded`, (c) => (at(c, k).description = padded(node.description as string)));
+    } else change(`${path} description added`, (c) => (at(c, k).description = "An added description."));
     if (node.enum) change(`${path} enum`, (c) => (at(c, k).enum = ["other_value", ...node.enum!.slice(1)]));
     if (node.default !== undefined) change(`${path} default`, (c) => (at(c, k).default = otherDefault(node.default)));
+    if (path.endsWith("[]") && node.default !== null) change(`${path} default none`, (c) => (at(c, k).default = null));
     if (node.required?.length) change(`${path} required dropped`, (c) => at(c, k).required!.pop());
+    if (node.type === "object" && node.required === undefined) change(`${path} required empty`, (c) => (at(c, k).required = []));
     const optional = Object.keys(node.properties ?? {}).find((p) => !node.required?.includes(p));
     if (optional) change(`${path} required added`, (c) => (at(c, k).required = [...(node.required ?? []), optional]));
     for (const p of Object.keys(node.properties ?? {})) {
@@ -303,9 +324,20 @@ function mutants(tool: Tool): [string, Tool][] {
         if (n.required) n.required = n.required.map((r) => (r === p ? `${p}_x` : r));
       });
     }
-    const other = OTHER_TYPE[node.type as string];
-    if (other && k > 0) {
-      change(`${path} type`, (c) => {
+    for (const [key, value] of Object.entries(node)) {
+      if (typeof value === "number" || typeof value === "boolean") change(`${path} ${key} as string`, (c) => (at(c, k)[key] = String(value)));
+      for (const spelling of respellings(key)) {
+        change(`${path} key ${key} as ${spelling}`, (c) => {
+          const n = at(c, k);
+          for (const [x, v] of Object.entries(n)) {
+            delete n[x];
+            n[x === key ? spelling : x] = v;
+          }
+        });
+      }
+    }
+    for (const other of k > 0 ? (OTHER_TYPES[node.type as string] ?? []) : []) {
+      change(`${path} type ${other}`, (c) => {
         const n = at(c, k);
         n.type = other;
         delete n.enum;
@@ -336,6 +368,23 @@ describe("tool renderings over standard JSON Schema", () => {
   const user = [{ role: "user", content: "hi" }];
   // Both tool sets the probe matrix has passed, then the rest of the rich set.
   const SETS = [...PIPELINE_TOOLS, ...HARBOR_TOOLS, ...RICH_TOOLS.slice(2)];
+  // Beside them for the mutants, two tools only one port explains: a gemma-4 function response, and keys outside
+  // standard JSON Schema, which Qwen3-Coder prints as tags.
+  const FILE_REPORT = {
+    type: "function",
+    function: {
+      name: "file_report",
+      description: "File the day's report with the harbor office.",
+      parameters: { type: "object", properties: { day: { type: "string", description: "The day the report covers." } }, required: ["day"] },
+      response: { description: "The filing receipt.", type: "string" },
+    },
+  } as unknown as Tool;
+  const MEASURE_DEPTH = fn("measure_depth", "Measure the depth at a mooring.", {
+    type: "object",
+    properties: { mooring: { type: "string", description: "The mooring's code.", max_length: 8, pattern_note: "Two letters, then digits." } },
+    required: ["mooring"],
+  }) as unknown as Tool;
+  const MUTANT_SETS = [...SETS, FILE_REPORT, MEASURE_DEPTH];
 
   test.if(live)("gpt-oss: the port prints what the pinned template prints", async () => {
     expectParity(TOOL_MATCHERS["gpt-oss-typescript-tools"]!, await render(pinned("a4c9919c"), { messages: user, tools: SETS }), SETS);
@@ -394,48 +443,144 @@ describe("tool renderings over standard JSON Schema", () => {
   // because the stock template does not print that field. The test below holds the changes that leave a rendering
   // as it was to exactly these, so a later change to a port cannot widen them unnoticed; everywhere else a
   // rendering shows every change byte for byte.
+  // Every port: an empty required list where there was none prints as no list does.
+  const EMPTY_REQUIRED = ["clear_slot parameters", "tag_note parameters", "noop parameters", "log_cargo parameters.extra"].map((n) => `${n} required empty`);
+  // gemma-4 and functiongemma: a property's default is not printed, so neither is its string form; an item's default
+  // of none is not printed, so it reads as no default (contracts C). A none inside a printed item is refused.
+  const GEMMA_LOST = [
+    ...["label", "hour", "loud", "tone"].map((p) => `set_alarm parameters.${p} default`),
+    ...["hour", "loud"].map((p) => `set_alarm parameters.${p} default as string`),
+    ...["search_inventory parameters.tags[]", "book_harbor_tour parameters.stops[]", "log_cargo parameters.crates[]", "plot_grid parameters.grid[]"].map((n) => `${n} default none`),
+    ...EMPTY_REQUIRED,
+  ];
+  const trimmed = (tool: string, params: string[]) => [`${tool} function description padded`, ...params.map((p) => `${tool} parameters.${p} description padded`)];
   const LOST: Record<string, string[]> = {
     "gpt-oss-typescript-tools": [
-      // A description below the top level.
+      // A description or default below the top level.
       "book_harbor_tour parameters.party.adults description",
       "book_harbor_tour parameters.party.children description",
       "search_inventory parameters.filter.region description",
       "search_inventory parameters.filter.aisle description",
       "plot_grid parameters.grid[] description added",
+      "book_harbor_tour parameters.party.adults description padded",
+      "book_harbor_tour parameters.party.children description padded",
+      "search_inventory parameters.filter.region description padded",
+      "search_inventory parameters.filter.aisle description padded",
+      "plot_grid parameters.grid[] default none",
       // Scalar items print as their bare element type: their description, enum and default go.
       "book_harbor_tour parameters.stops[] description",
+      "book_harbor_tour parameters.stops[] description padded",
+      "book_harbor_tour parameters.stops[] default none",
       "search_inventory parameters.tags[] description added",
+      "search_inventory parameters.tags[] default none",
       "plot_grid parameters.grid[][] description added",
+      "plot_grid parameters.grid[][] default none",
       "tag_note parameters.tags[] description",
+      "tag_note parameters.tags[] description padded",
       "tag_note parameters.tags[] enum",
       "tag_note parameters.tags[] default",
+      "tag_note parameters.tags[] default none",
       // An element type longer than 50 characters prints as any[]: everything inside it goes.
       "log_cargo parameters.crates[] description",
+      "log_cargo parameters.crates[] description padded",
+      "log_cargo parameters.crates[] default none",
       "log_cargo parameters.crates[] required dropped",
       "log_cargo parameters.crates[] required added",
       "log_cargo parameters.crates[].mark renamed",
       "log_cargo parameters.crates[].weight renamed",
       "log_cargo parameters.crates[].mark description",
-      "log_cargo parameters.crates[].mark type",
+      "log_cargo parameters.crates[].mark description padded",
+      "log_cargo parameters.crates[].mark type boolean",
+      "log_cargo parameters.crates[].mark type null",
       "log_cargo parameters.crates[].weight description",
-      "log_cargo parameters.crates[].weight type",
+      "log_cargo parameters.crates[].weight description padded",
+      "log_cargo parameters.crates[].weight type integer",
+      "log_cargo parameters.crates[].weight type string",
+      // Integer and number both print as number.
+      "get_weather parameters.days type number",
+      "search_inventory parameters.limit type number",
+      "search_inventory parameters.max_price type integer",
+      "search_inventory parameters.filter.aisle type number",
+      "book_harbor_tour parameters.max_fare type integer",
+      "book_harbor_tour parameters.party.adults type number",
+      "book_harbor_tour parameters.party.children type number",
+      "set_alarm parameters.hour type number",
+      "set_alarm parameters.snooze type number",
+      "plot_grid parameters.grid[][] type number",
+      ...EMPTY_REQUIRED,
     ],
-    // A property's default.
-    "gemma4-tool-declarations": ["label", "hour", "loud", "tone"].map((p) => `set_alarm parameters.${p} default`),
-    "functiongemma-tool-declarations": ["label", "hour", "loud", "tone"].map((p) => `set_alarm parameters.${p} default`),
+    "gemma4-tool-declarations": [
+      ...GEMMA_LOST,
+      // The cited template prints a response's type only when it is OBJECT (the 29af862b variant prints any).
+      "file_report function response type",
+    ],
+    "functiongemma-tool-declarations": GEMMA_LOST,
+    "qwen-xml-tool-list": [
+      // Descriptions are trimmed: the function's and each parameter's. A nested one prints inside JSON, untrimmed.
+      ...trimmed("get_weather", ["city", "unit"]),
+      ...trimmed("search_inventory", ["query", "limit", "max_price", "in_stock", "tags", "filter"]),
+      ...trimmed("get_weather", ["city", "units", "days", "include_wind"]),
+      ...trimmed("book_harbor_tour", ["tour_date", "party", "stops", "max_fare"]),
+      ...trimmed("set_alarm", ["label", "hour", "loud", "tone"]),
+      ...trimmed("clear_slot", ["slot"]),
+      ...trimmed("log_cargo", ["crates", "notes", "extra"]),
+      ...trimmed("plot_grid", []),
+      ...trimmed("tag_note", ["tags"]),
+      ...trimmed("noop", []),
+      ...trimmed("measure_depth", ["mooring"]),
+      // A key's tag is normalised: `-` and space become `_`, and `$` is dropped.
+      ...["max_length", "pattern_note"].flatMap((k) => respellings(k).map((s) => `measure_depth parameters.mooring key ${k} as ${s}`)),
+      // A value printed in its string form reads the same as the string it spells.
+      "set_alarm parameters.hour default as string",
+      "set_alarm parameters.loud default as string",
+      "measure_depth parameters.mooring max_length as string",
+      ...EMPTY_REQUIRED,
+    ],
   };
 
   test("a change to any name, description, type, enum value, default or required list shows, unless it is a documented loss", () => {
+    const unchanged: Record<string, string[]> = {};
     for (const [id, m] of Object.entries(TOOL_MATCHERS)) {
-      const unchanged: string[] = [];
-      for (const tool of SETS) {
+      unchanged[id] = [];
+      for (const tool of MUTANT_SETS) {
         const base = m.render(tool);
         if (base === undefined) continue;
-        for (const [what, changed] of mutants(tool)) if (m.render(changed) === base) unchanged.push(`${nameOf(tool)} ${what}`);
+        for (const [what, changed] of mutants(tool)) if (m.render(changed) === base) unchanged[id].push(`${nameOf(tool)} ${what}`);
       }
-      expect([id, unchanged.sort()]).toEqual([id, [...(LOST[id] ?? [])].sort()]);
+      unchanged[id].sort();
     }
+    expect(unchanged).toEqual(Object.fromEntries(Object.keys(TOOL_MATCHERS).map((id) => [id, [...(LOST[id] ?? [])].sort()])));
   });
+
+  // A port that prints the stock template's text for a tool and for its mutant, and prints them alike, holds a loss
+  // the stock template has too: this is what makes each LOST entry the template's, not the port's.
+  test.if(live)("every mutant a port explains prints as the stock template prints it", async () => {
+    const cases: [string, string[]][] = [
+      ["gpt-oss-typescript-tools", [pinned("a4c9919c")]],
+      ["gemma4-tool-declarations", GEMMA4_SHAS.map(pinned)],
+      ["functiongemma-tool-declarations", [pinned("db61fb01")]],
+      ["qwen-xml-tool-list", [qwenTemplate()]],
+    ];
+    for (const [id, templates] of cases) {
+      const m = TOOL_MATCHERS[id]!;
+      // One render per tool, of the mutants the port explains, so each output stays small.
+      const batches = MUTANT_SETS.map((tool) => mutants(tool).filter(([, t]) => m.render(t) !== undefined)).filter((b) => b.length > 0);
+      for (const template of templates) {
+        const requests = batches.map((b, i) => ({ id: String(i), context: { messages: [{ role: "user", content: "hi" }], tools: b.map(([, t]) => t), bos_token: "<s>" }, profile: "hf-default" as const }));
+        const results = await renderer.renderBatch(template, requests);
+        for (const [i, batch] of batches.entries()) {
+          const r = results.find((x) => x.id === String(i))!;
+          if (!r.ok) throw new Error(`${id}: ${nameOf(batch[0]![1])}: ${r.failure}: ${r.message}`);
+          const sites = m.sites(r.output);
+          expect([id, sites.length]).toEqual([id, batch.length]);
+          for (const [j, [what, tool]] of batch.entries()) {
+            const text = r.output.slice(sites[j]!.start, sites[j]!.end);
+            expect([id, nameOf(tool), what, [m.render(tool), ...(m.variants?.(tool) ?? [])].includes(text)]).toEqual([id, nameOf(tool), what, true]);
+          }
+        }
+      }
+    }
+  }, 60_000);
 
   test("each documented loss prints exactly as the stock template prints it", async () => {
     // gpt-oss: integer as number, null as any, scalar items as the bare element type, a nested description and
@@ -475,19 +620,21 @@ describe("tool renderings over standard JSON Schema", () => {
       "}) => any;\n\n";
     expect(gptOss.render(lossy)).toBe(gptText);
 
-    // gemma-4 and functiongemma: a property's default is not printed, at any depth; an item's is. gemma-4 prints a
-    // property's nullable, which functiongemma never reads, so there the tool stays unexplained.
+    // gemma-4 and functiongemma: a property's default is not printed, at any depth; an item's is, unless it is none.
+    // gemma-4 prints a property's nullable, which functiongemma never reads, so there the tool stays unexplained.
     const defaults = fn("lossy", "Defaults gemma prints in part.", {
       type: "object",
       properties: {
         level: { type: "integer", description: "Its default is not printed.", default: 3, nullable: true },
         spot: { type: "object", properties: { row: { type: "integer", default: 1 } }, default: { row: 2 } },
         marks: { type: "array", items: { type: "string", default: "x", nullable: true } },
+        blanks: { type: "array", items: { type: "string", default: null } },
       },
     });
     const q = '<|"|>';
     const gemmaText =
       `declaration:lossy{description:${q}Defaults gemma prints in part.${q},parameters:{properties:{` +
+      `blanks:{items:{type:${q}STRING${q}},type:${q}ARRAY${q}},` +
       `level:{description:${q}Its default is not printed.${q},nullable:true,type:${q}INTEGER${q}},` +
       `marks:{items:{default:${q}x${q},nullable:true,type:${q}STRING${q}},type:${q}ARRAY${q}},` +
       `spot:{properties:{row:{type:${q}INTEGER${q}}},type:${q}OBJECT${q}}},type:${q}OBJECT${q}}}`;
@@ -498,6 +645,7 @@ describe("tool renderings over standard JSON Schema", () => {
     const e = "<escape>";
     expect(TOOL_MATCHERS["functiongemma-tool-declarations"]!.render(withoutNullable)).toBe(
       `declaration:lossy{description:${e}Defaults gemma prints in part.${e},parameters:{properties:{` +
+        `blanks:{description:${e}${e},items:{type:${e}STRING${e}},type:${e}ARRAY${e}},` +
         `level:{description:${e}Its default is not printed.${e},type:${e}INTEGER${e}},` +
         `marks:{description:${e}${e},items:{default:${e}x${e},nullable:true,type:${e}STRING${e}},type:${e}ARRAY${e}},` +
         `spot:{description:${e}${e},properties:{row:{description:${e}${e},type:${e}INTEGER${e}}},type:${e}OBJECT${e}}},type:${e}OBJECT${e}}}`,
