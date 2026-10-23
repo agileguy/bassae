@@ -33,7 +33,7 @@ test("decodeChild drops extra fields", () => {
 });
 
 test("the worker cannot claim failures only the parent can see", () => {
-  for (const failure of ["timeout", "sandbox", "made_up"]) {
+  for (const failure of ["timeout", "sandbox", "skipped", "made_up"]) {
     const line = JSON.stringify({ t: "res", result: { id: "a", ok: false, failure, message: "m" } });
     expect(decodeChild(line)).toBeUndefined();
   }

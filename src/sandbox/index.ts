@@ -16,7 +16,8 @@ function serializable(request: RenderRequest): boolean {
 }
 
 // Each render that times out costs a fresh worker and a full timeout. Two in a row say the template hangs
-// whatever the context, so the rest of the batch fails at once rather than costing a timeout each.
+// whatever the context, so the rest of the batch fails at once rather than costing a timeout each. Those are
+// `skipped`, not `timeout`: they never ran, so they breached no cap of their own.
 const TIMEOUTS_IN_A_ROW = 2;
 
 async function renderAll(template: string, requests: RenderRequest[], limits: RenderLimits, options: WorkerOptions): Promise<RenderResult[]> {
@@ -25,7 +26,7 @@ async function renderAll(template: string, requests: RenderRequest[], limits: Re
   while (results.length < requests.length) {
     if (timeouts >= TIMEOUTS_IN_A_ROW) {
       const message = `not attempted: the ${TIMEOUTS_IN_A_ROW} renders before it timed out on this template`;
-      for (const { id } of requests.slice(results.length)) results.push({ id, ok: false, failure: "timeout", message });
+      for (const { id } of requests.slice(results.length)) results.push({ id, ok: false, failure: "skipped", message });
       break;
     }
     let sandboxError: string | undefined;

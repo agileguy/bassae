@@ -35,30 +35,27 @@ export const JINJA2_BUILTIN_TESTS = new Set([
   "<", "lt", "lessthan", "<=", "le",
 ]);
 
-// Filters the interpreter actually handles. `map` is implemented only with
-// `attribute=`; a bare `map('upper')` throws at render, so it is not "safe".
+// Filters the renderer handles: the library's own, and those the render worker
+// polyfills to jinja2's semantics (src/sandbox/polyfills.ts): select, reject,
+// selectattr and rejectattr with a named test, map with a filter name, count, d,
+// min and max, and jinja2's versions of first, last, length, list and default.
 // `bool`, `keys`, `values` and `get` work here but are not jinja2 builtins, so
 // a template using them as filters is still HIGH.
 export const IMPLEMENTED_FILTERS = new Set([
   "safe", "tojson", "list", "first", "last", "length", "reverse", "sort", "join", "string", "unique",
   "upper", "lower", "title", "capitalize", "trim", "indent", "int", "float", "abs", "items", "bool",
   "selectattr", "rejectattr", "map", "default", "replace", "dictsort", "keys", "values", "get",
+  "select", "reject", "count", "d", "min", "max",
 ]);
 
 // Jinja2 builtin filters the library lacks. Per ISC-12.1 and ISA Decision
 // "2026-10-22 17:50": jinja2 3.1 builtin filters and tests that the library
 // doesn't implement and that can't reach attributes are MEDIUM unanalyzable;
 // `attr`, `format` and `random` stay HIGH, and so does any name that isn't a
-// jinja2 builtin. Moving one here to HIGH is a one-line change. One more MEDIUM
-// filter path lives in parse.ts: `map` with a positional filter name
-// (map('upper') throws at render, only `attribute=` is implemented).
+// jinja2 builtin. Moving one here to HIGH is a one-line change. A filter or
+// test that map, select or reject names is classified the same way in parse.ts.
 export const BENIGN_UNIMPLEMENTED_FILTERS = new Set([
-  "reject", //         calls a named test on each item; tests cannot reach attributes
-  "select", //         same as reject, inverted
-  "count", //          alias of length
   "sum", //            arithmetic over items, attribute= is a dotted lookup like map
-  "min", //            comparison over items, attribute= as in sum
-  "max", //            comparison over items, attribute= as in sum
   "batch", //          regroups a sequence into fixed-size chunks
   "slice", //          regroups a sequence into n columns
   "groupby", //        regroups by a dotted attribute path, no call
@@ -72,7 +69,6 @@ export const BENIGN_UNIMPLEMENTED_FILTERS = new Set([
   "e", //              alias of escape
   "escape", //         HTML-escapes a string
   "forceescape", //    HTML-escapes a string even when marked safe
-  "d", //              alias of default
   "filesizeformat", // formats a number as a byte size
   "urlencode", //      percent-encodes a string or the items of a dict
   "wordwrap", //       wraps a string at a width
@@ -85,24 +81,24 @@ export const BENIGN_UNIMPLEMENTED_FILTERS = new Set([
 // templates use, and none of the HIGH three appears in any local template.
 export const DANGEROUS_FILTERS = new Set(["attr", "format", "random"]);
 
+// Tests the renderer handles: the library's own, and in, float and the
+// comparison aliases, which the render worker polyfills (src/sandbox/polyfills.ts).
+// The parser takes no test arguments, so `x is in y` is a parse failure (ISC-12.2);
+// these reach their argument only through select, reject, selectattr and rejectattr.
 export const IMPLEMENTED_TESTS = new Set([
   "boolean", "callable", "odd", "even", "false", "true", "none", "string", "number", "integer",
   "iterable", "mapping", "sequence", "lower", "upper", "defined", "undefined", "equalto", "eq",
+  "in", "float", "==", "!=", ">", ">=", "<", "<=", "ne", "gt", "ge", "lt", "le", "greaterthan", "lessthan",
 ]);
 
 // Jinja2 builtin tests the library lacks. An unknown test is a render error and
 // a test only sees the value it is applied to: MEDIUM.
 export const BENIGN_UNIMPLEMENTED_TESTS = new Set([
-  "in", //          membership; stock Qwen3-Coder uses it through reject("in", ...)
   "divisibleby", // arithmetic
-  "float", //       type check
   "sameas", //      identity comparison
   "escaped", //     checks for a markup-safe string
   "filter", //      true when a filter of that name exists; also HIGH engine_fingerprint (ENGINE_PROBE_TESTS)
   "test", //        true when a test of that name exists; also HIGH engine_fingerprint (ENGINE_PROBE_TESTS)
-  "==", "!=", ">", ">=", "<", "<=", // comparison operator aliases
-  "ne", "gt", "ge", "lt", "le", //    comparison operator aliases
-  "greaterthan", "lessthan", //       comparison operator aliases
 ]);
 
 // Engine globals the library lacks entirely: any reference — called or not — is

@@ -11,7 +11,12 @@ export interface InitMessage {
   maxOutputBytes: number;
   /** CPU time the worker may spend on the parse, and then on each render, before the kernel kills it. */
   cpuMs: number;
+  /** Resident memory past which the worker ends itself, whether or not the parent is still watching. */
+  maxRssBytes: number;
 }
+
+/** The worker's exit code when its own watchdog found it over maxRssBytes. */
+export const MEMORY_EXIT_CODE = 120;
 
 export interface RequestMessage {
   t: "req";

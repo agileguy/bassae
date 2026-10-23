@@ -66,6 +66,9 @@ const TRICKY = [
   "{% rawx %}{{ x.__class__ }}{% endraw %}{{ y.__init__ }}",
   "{# {% raw %} #}{{ x.__class__ }}",
   '{{ "{% raw %}" }}{{ x.__class__ }}',
+  // A dunder in a string literal spans the literal, once however many it holds.
+  "{{ x['__class__'] ~ '__init__' ~ \"a__b__c__\" }}{{ y['__a__.__b__'] }}",
+  "{{ x['a\\'__mro__'] }}{{ '__x__\" }}{{ \"unclosed __init__",
   // The other raw patterns.
   "{{ x|attr('a') }}{{ y.format(1) }}{{ cycler.__init__ }}{{ os.popen('id') }}",
   "{% if self is defined %}{% endif %}{{ x is callable }}{{ xs|select('callable') }}",
@@ -127,11 +130,31 @@ test("over the size cap, a quoted close or a nested brace does not end a tag", (
   expect(dunderAt(overCap("{{ {'a': {'b': 1}}['a'].__class__ }}"))).toEqual(["2:25"]);
   expect(dunderAt(overCap('{{ "}}" ~ x.__class__ }}'))).toEqual(["2:13"]);
   expect(dunderAt(overCap('{% set z = "%}" ~ x.__globals__ %}'))).toEqual(["2:21"]);
-  expect(dunderAt(overCap("{{ {'k': {}}['k']['__init__'] }}"))).toEqual(["2:20"]);
+  expect(dunderAt(overCap("{{ {'k': {}}['k']['__init__'] }}"))).toEqual(["2:19"]);
   // Control: the plain form was caught before and still is.
   expect(dunderAt(overCap("{{ x.__class__ }}"))).toEqual(["2:6"]);
   // Each is still HIGH unanalyzable for its size.
   expect(overCap("{{ x.__class__ }}").some((f) => f.ruleId === "unanalyzable" && f.severity === "HIGH")).toBe(true);
+});
+
+// The AST rule spans a dunder string subscript as its quoted key; both raw-text scans now do the same, so
+// the finding lands on the same column whichever path found it.
+test("a dunder string key is spanned as the whole quoted literal, at one column under and over the size cap", () => {
+  const spans = (fs: Finding[]) => fs.filter((f) => f.ruleId === "dunder_access").map((f) => `${f.span!.col} ${f.excerpt}`);
+  for (const src of [
+    "{{ {'k': {}}['k']['__init__'] }}",
+    "{{ x['__class__'] }}",
+    '{{ x["__globals__"]["a"] }}',
+    "{{ x['a\\'__mro__'] }}",
+    "{{ x['__a__.__b__'] }}",
+    // Unparseable under the cap, so the region scan finds it there.
+    "{% with a = 1 %}{{ x['__class__'] }}{% endwith %}",
+  ]) {
+    const under = spans(underCap(src));
+    expect({ src, under: under.length }).toEqual({ src, under: 1 });
+    expect({ src, over: spans(overCap(src)) }).toEqual({ src, over: under });
+    expect(under[0]).toMatch(/['"]$/);
+  }
 });
 
 test("over the size cap, a comment is not scanned but what follows it is", () => {

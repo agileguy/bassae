@@ -7,7 +7,7 @@ import { constants } from "node:os";
 import { basename, join } from "node:path";
 import { sandboxAvailable } from "../../src/sandbox/index.ts";
 import { spawnSandboxed } from "../../src/sandbox/launcher.ts";
-import { encode } from "../../src/sandbox/protocol.ts";
+import { encode, MEMORY_EXIT_CODE } from "../../src/sandbox/protocol.ts";
 
 const status = await sandboxAvailable();
 const PARENT = join(import.meta.dir, "orphan-parent.ts");
@@ -64,7 +64,7 @@ test.skipIf(!status.available)(
     const worker = spawnSandboxed([process.execPath, "--no-install", WORKER])!;
     const start = performance.now();
     try {
-      worker.stdin.write(encode({ t: "init", template: spin, maxOutputBytes: 1000, cpuMs: 500 }));
+      worker.stdin.write(encode({ t: "init", template: spin, maxOutputBytes: 1000, cpuMs: 500, maxRssBytes: 2 ** 30 }));
       worker.stdin.write(encode({ t: "req", request: { id: "a", context: {}, profile: "hf-default" } }));
       worker.stdin.end();
       const out = new Response(worker.stdout).text();
@@ -86,6 +86,24 @@ test.skipIf(!status.available)(
   30_000,
 );
 
+test.skipIf(!status.available)(
+  "with no parent watching at all, the worker's own memory watchdog ends a render that keeps allocating",
+  async () => {
+    const worker = spawnSandboxed([process.execPath, "--no-install", WORKER])!;
+    try {
+      worker.stdin.write(encode({ t: "init", template: "{% set xs = range(10**7) %}fine", maxOutputBytes: 1000, cpuMs: 10_000, maxRssBytes: 128 * 2 ** 20 }));
+      worker.stdin.write(encode({ t: "req", request: { id: "a", context: {}, profile: "hf-default" } }));
+      worker.stdin.end();
+      const [out] = await Promise.all([new Response(worker.stdout).text(), new Response(worker.stderr).text(), worker.exited]);
+      expect(out).toBe('{"t":"ready"}\n{"t":"parsed"}\n');
+      expect(worker.exitCode).toBe(MEMORY_EXIT_CODE);
+    } finally {
+      worker.kill("SIGKILL");
+    }
+  },
+  30_000,
+);
+
 // At its hard CPU limit Linux sends SIGKILL, which the parent cannot tell from any other kill. A host that already
 // caps CPU time, here at 3 seconds, sets a hard limit well under what the worker would ask for one render.
 test("a worker under a host's own CPU cap still ends by SIGXCPU, never by the hard limit's SIGKILL", async () => {
@@ -96,7 +114,7 @@ test("a worker under a host's own CPU cap still ends by SIGXCPU, never by the ha
     stderr: "pipe",
   });
   try {
-    worker.stdin.write(encode({ t: "init", template: spin, maxOutputBytes: 1000, cpuMs: 10_000 }));
+    worker.stdin.write(encode({ t: "init", template: spin, maxOutputBytes: 1000, cpuMs: 10_000, maxRssBytes: 2 ** 30 }));
     worker.stdin.write(encode({ t: "req", request: { id: "a", context: {}, profile: "hf-default" } }));
     worker.stdin.end();
     const [out] = await Promise.all([new Response(worker.stdout).text(), new Response(worker.stderr).text(), worker.exited]);

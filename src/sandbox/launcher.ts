@@ -6,7 +6,7 @@ import { existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { constants } from "node:os";
 import { dirname, join } from "node:path";
 import type { RenderFailure, RenderLimits, RenderRequest, RenderResult } from "../types.ts";
-import { clip, decodeChild, encode } from "./protocol.ts";
+import { clip, decodeChild, encode, MEMORY_EXIT_CODE } from "./protocol.ts";
 
 export type SandboxKind = "sandbox-exec" | "bwrap";
 
@@ -38,7 +38,7 @@ const BUN = realpathSync(process.execPath);
 const WORKER_DIR = realpathSync(import.meta.dir);
 const WORKER = join(WORKER_DIR, "worker.ts");
 // The worker and what it imports at runtime. Type-only imports are erased, so ../types.ts is never read.
-const WORKER_FILES = ["worker.ts", "profiles.ts", "protocol.ts"].map((name) => join(WORKER_DIR, name));
+const WORKER_FILES = ["worker.ts", "polyfills.ts", "profiles.ts", "protocol.ts"].map((name) => join(WORKER_DIR, name));
 const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
 
 /**
@@ -60,7 +60,15 @@ const JINJA = findJinja();
 // A fixed 1 MiB JS stack makes a runaway recursion overflow in about 100ms on macOS and Linux alike, where the
 // default stacks race the timeout at different depths on each (ISC-31). Real templates nest nowhere near it.
 // The option is a JSC internal: if bun ever drops it, bun refuses to start and the sandbox reports unavailable.
-const CHILD_ENV = { TZ: "UTC", BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0", NO_COLOR: "1", BUN_JSC_maxPerThreadStackUsage: String(2 ** 20) };
+// On macOS, bun:ffi's dlopen asks xcode-select where the developer tools are; the sandbox denies its read of
+// /var/select/developer_dir, and xcode-select says so on stderr. A DEVELOPER_DIR answers first, with no read.
+const CHILD_ENV = {
+  TZ: "UTC",
+  BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0",
+  NO_COLOR: "1",
+  BUN_JSC_maxPerThreadStackUsage: String(2 ** 20),
+  DEVELOPER_DIR: "/nonexistent",
+};
 
 const STARTUP_MS = 10_000;
 const POLL_MS = 10;
@@ -71,7 +79,16 @@ const STDERR_KEEP = 2048;
 const sbplString = (s: string) => `"${s.replace(/[\\"]/g, "\\$&")}"`;
 const literal = (path: string) => `(literal ${sbplString(path)})`;
 
-// Deny by default. Bun needs exec of itself and sysctl reads at startup. It may read "/", itself,
+// The sysctls bun reads to start, as the sandbox's own report listed them, and no others: not the host's name, not
+// other processes' arguments. Without them bun dies at startup, so a release that needs one more fails closed: the
+// sandbox reports unavailable and nothing renders. hw.optional. is the CPU feature probes, a family per architecture.
+const SYSCTLS = `(allow sysctl-read
+  ${["kern.osproductversion", "kern.osvariant_status", "kern.iossupportversion", "kern.bootargs", "security.mac.lockdown_mode_state", "hw.activecpu", "hw.pagesize_compat"]
+    .map((name) => `(sysctl-name ${sbplString(name)})`)
+    .join(" ")}
+  (sysctl-name-prefix "hw.optional."))`;
+
+// Deny by default. Bun needs exec of itself and a few sysctl reads at startup. It may read "/", itself,
 // system libraries, the ICU and timezone data that Intl needs for strftime, the worker's files and
 // the jinja package, and list the directories it walks to find them. Nothing else, not even a stat:
 // not the rest of the checkout, not $HOME. No writes, no network, no fork, no IPC.
@@ -80,7 +97,7 @@ const sbpl = (readable: string[]) => {
   return `(version 1)
 (deny default)
 (allow process-exec ${literal(BUN)})
-(allow sysctl-read)
+${SYSCTLS}
 (allow file-read* (literal "/") ${[...paths].map(literal).join(" ")} (subpath ${sbplString(JINJA.real)})
   (subpath "/usr/lib") (subpath "/System") (subpath "/usr/share/icu") (subpath "/private/var/db/timezone")
   (literal "/dev/null") (literal "/dev/random") (literal "/dev/urandom"))`;
@@ -405,19 +422,24 @@ export async function runWorker(
       if (overflowed) return fail("output_limit", `worker sent more than ${perRequest} bytes for one request`);
       ended = true;
       const code = await proc.exited;
-      const detail = await stderr;
+      // Should a bun release ask xcode-select anyway, its complaint is about the sandbox, not the template.
+      const detail = (await stderr).split("\n").filter((line) => !line.startsWith("xcode-select:")).join("\n").trim();
       if (settled) return;
       // SIGXCPU is the worker's own CPU limit, so its parse or render ran too long. bwrap reports
       // a child killed by a signal as exit 128 + the signal.
       if (proc.signalCode === "SIGXCPU" || (kind === "bwrap" && code === 128 + constants.signals.SIGXCPU)) {
         return fail("timeout", `worker exceeded its ${cpuMs}ms CPU limit`);
       }
+      // The worker's memory watchdog got there before this side's poll did.
+      if (proc.signalCode === null && code === MEMORY_EXIT_CODE) {
+        return fail("memory", `worker resident memory exceeded the ${mib(limits.maxRssBytes)} cap, by its own reading`);
+      }
       fail("render_error", `worker exited (${proc.signalCode ?? `code ${code}`})${detail ? `: ${detail}` : ""}`);
     });
 
     // The worker reads everything up front. A worker that dies early is reported by the exit path above.
     try {
-      proc.stdin.write(encode({ t: "init", template, maxOutputBytes: limits.maxOutputBytes, cpuMs }));
+      proc.stdin.write(encode({ t: "init", template, maxOutputBytes: limits.maxOutputBytes, cpuMs, maxRssBytes: limits.maxRssBytes }));
       for (const request of requests) proc.stdin.write(encode({ t: "req", request }));
       Promise.resolve(proc.stdin.end()).catch(() => {});
     } catch {

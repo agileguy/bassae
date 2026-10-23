@@ -6,8 +6,9 @@
 import { Template } from "@huggingface/jinja";
 import { dlopen, FFIType, ptr, type FFIFunction } from "bun:ffi";
 import type { RenderFailure, RenderRequest, RenderResult } from "../types.ts";
+import { installPolyfills } from "./polyfills.ts";
 import { profileGlobals } from "./profiles.ts";
-import { clip, encode, type ChildMessage, type InitMessage, type RequestMessage } from "./protocol.ts";
+import { clip, encode, MEMORY_EXIT_CODE, type ChildMessage, type InitMessage, type RequestMessage } from "./protocol.ts";
 
 // macOS has no parent-death signal, so a parent killed with SIGKILL would leave a hung render running
 // for good. RLIMIT_CPU is the backstop: re-armed before the parse and before each render, it lets the
@@ -60,6 +61,31 @@ function limitCpu(ms: number, totalMs?: number): void {
   if (libc.setrlimit(RLIMIT_CPU, ptr(rlimit)) !== 0) throw new Error("setrlimit(RLIMIT_CPU) failed");
 }
 
+// The parent polls this process's resident memory from outside, and that cap dies with the parent too. A thread
+// of the worker's own is the backstop, as RLIMIT_CPU is for time: it polls the same figure and ends the process
+// once it passes the cap. RLIMIT_AS cannot do this, since JSC reserves far more address space than it uses, and
+// macOS enforces no RSS limit. process.exit from a thread ends only the thread, so the thread calls _exit itself.
+// It loads before the ready line for the same reason the CPU backstop does, and learns the cap from the init line.
+const watchdog = new Worker(
+  URL.createObjectURL(
+    new Blob([
+      `const { dlopen, FFIType } = require("bun:ffi");
+const { _exit } = dlopen(${JSON.stringify(LIBC)}, { _exit: { args: [FFIType.i32], returns: FFIType.void } }).symbols;
+onmessage = ({ data: cap }) => {
+  setInterval(() => { if (process.memoryUsage.rss() > cap) _exit(${MEMORY_EXIT_CODE}); }, 10);
+  postMessage("armed");
+};
+postMessage("loaded");`,
+    ]),
+  ),
+);
+const fromWatchdog = (expected: string) =>
+  new Promise<void>((resolve, reject) => {
+    watchdog.onmessage = ({ data }) => (data === expected ? resolve() : reject(new Error(`memory watchdog said ${String(data)}`)));
+    watchdog.onerror = (e) => reject(new Error(`no memory backstop, so the worker will not start: ${e.message}`));
+  });
+await fromWatchdog("loaded");
+
 // strftime_now() reads the wall clock with `new Date()`. Pinning that clock per request lets the
 // library's own strftime_now report the requested instant. The launcher sets TZ=UTC.
 const RealDate = Date;
@@ -108,6 +134,8 @@ function render(template: Template, request: RenderRequest, maxOutputBytes: numb
   }
 }
 
+installPolyfills();
+
 await send({ t: "ready" });
 
 const [head = "", ...rest] = (await Bun.stdin.text()).split("\n").filter(Boolean);
@@ -117,6 +145,10 @@ const requests = rest.map((line) => (JSON.parse(line) as RequestMessage).request
 // The soft limit covers one step at a time; the hard limit, the parse and every render. Each step's soft limit
 // rounds up to a whole second, so the hard limit allows a second more per step, and the second it keeps clear.
 limitCpu(init.cpuMs, (requests.length + 1) * (init.cpuMs + 1000) + 1000);
+watchdog.postMessage(init.maxRssBytes);
+await fromWatchdog("armed");
+// Armed, it need not keep the process alive once the last result is out.
+watchdog.unref();
 let template: Template | undefined;
 let parseFailure = { failure: "parse" as RenderFailure, message: "" };
 try {

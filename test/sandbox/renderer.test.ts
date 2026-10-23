@@ -267,12 +267,13 @@ describe.skipIf(!live)("caps (ISC-43)", () => {
   );
 
   test(
-    "after two renders in a row time out, the rest of the batch fails fast and says it was not attempted",
+    "after two renders in a row time out, the rest of the batch fails fast as skipped and says it was not attempted",
     async () => {
       const eight = Array.from({ length: 8 }, (_, i) => req(`r${i}`));
       const [results, ms] = await timed(() => renderer.renderBatch(SPIN, eight, { timeoutMs: 500 }));
       console.log(`[sandbox] 8 hanging renders at timeoutMs 500: ${ms.toFixed(0)}ms`);
-      expect(results).toEqual(eight.map((r) => failed(r.id, "timeout")));
+      // Only the two that ran timed out; the rest were never attempted, which is no cap breach of their own.
+      expect(results).toEqual(eight.map((r, i) => failed(r.id, i < 2 ? "timeout" : "skipped")));
       const messages = results.map((r) => (r as { message: string }).message);
       expect(messages.map((m) => m.includes("not attempted"))).toEqual([false, false, true, true, true, true, true, true]);
       // Two timeouts' worth, not eight.
@@ -337,6 +338,22 @@ describe.skipIf(!live)("the memory cap fails closed (ISC-43)", () => {
   );
 
   test(
+    "the worker enforces the memory cap itself when the parent's reading never trips it",
+    async () => {
+      // The parent sees one byte for ever, as it would see nothing once killed, so only the worker's own watchdog
+      // can stop range(10**7): ten million boxed integers, some 400 MiB, against a 128 MiB cap.
+      const blind = createRenderer({ residentMemory: () => 1 });
+      const src = "{% if boom %}{% set xs = range(10**7) %}{% endif %}fine";
+      const cap = 128 * 2 ** 20;
+      const [results, ms] = await timed(() => blind.renderBatch(src, [req("a"), req("b", { boom: true }), req("c")], { timeoutMs: 10_000, maxRssBytes: cap }));
+      expect(results).toEqual([ok("a", "fine"), failed("b", "memory"), ok("c", "fine")]);
+      expect((results[1] as { message: string }).message).toBe("worker resident memory exceeded the 128MiB cap, by its own reading");
+      expect(ms).toBeLessThan(5000);
+    },
+    SLOW,
+  );
+
+  test(
     "a memory reader that throws counts as unreadable instead of escaping",
     async () => {
       const broken = createRenderer({
@@ -396,6 +413,12 @@ describe.skipIf(!live)("the parent does not trust the worker", () => {
 
   test("a worker that exits mid-batch fails the in-flight request", async () => {
     expect(await rogue("exit").renderBatch("", two)).toEqual([failed("a", "render_error"), failed("b", "render_error")]);
+  });
+
+  test("a worker's exit message keeps its stderr but not the macOS xcode-select line its FFI load provokes", async () => {
+    expect(await rogue("ffi-exit").renderBatch("", [req("a")])).toEqual([
+      { id: "a", ok: false, failure: "render_error", message: "worker exited (code 7): worker fell over" },
+    ]);
   });
 
   test("results before the ready line mean the worker never started properly", async () => {
