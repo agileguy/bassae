@@ -1,0 +1,377 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:bassae:schema:report:1",
+  "title": "bassae scan report",
+  "description": "What `bassae --json` prints: the ScanReport of src/types.ts, field for field (ISC-27). Every object is closed except Finding.detail. Strings are JSON strings: control, DEL, C1, bidi and invisible characters are written as \\uXXXX escapes (ISC-44), and a lone surrogate U+DC80 to U+DCFF in a GGUF key or template name stands for one invalid UTF-8 byte (0x80 to 0xFF), so names compare byte-exact.",
+  "type": "object",
+  "properties": {
+    "tool": {
+      "type": "object",
+      "properties": {
+        "name": { "const": "bassae" },
+        "version": { "type": "string" }
+      },
+      "required": ["name", "version"],
+      "additionalProperties": false
+    },
+    "schemaVersion": { "const": 1, "description": "Bumped on any change to this shape." },
+    "roots": { "type": "array", "items": { "type": "string" }, "description": "The paths scanned, as given or as defaulted." },
+    "online": { "type": "boolean", "description": "--online: whether a network call was allowed (ISC-36)." },
+    "upstream": {
+      "type": "object",
+      "description": "The pinned upstream compared with, when --online --upstream was given (ISC-41).",
+      "properties": {
+        "repo": { "type": "string" },
+        "revision": { "type": "string" }
+      },
+      "required": ["repo", "revision"],
+      "additionalProperties": false
+    },
+    "renderer": {
+      "description": "The sandboxed renderer differential rendering ran in, or why there was none.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "available": { "const": true },
+            "kind": { "type": "string" },
+            "degraded": { "type": "array", "items": { "type": "string" } }
+          },
+          "required": ["available", "kind", "degraded"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "available": { "const": false },
+            "reason": { "type": "string" }
+          },
+          "required": ["available", "reason"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "models": { "type": "array", "items": { "$ref": "#/$defs/modelReport" } },
+    "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" }, "description": "Findings that belong to no model: unreadable paths, spent budgets, an unavailable renderer." },
+    "summary": {
+      "type": "object",
+      "properties": {
+        "models": { "$ref": "#/$defs/count" },
+        "templates": { "$ref": "#/$defs/count" },
+        "findings": {
+          "type": "object",
+          "properties": {
+            "HIGH": { "$ref": "#/$defs/count" },
+            "MEDIUM": { "$ref": "#/$defs/count" },
+            "LOW": { "$ref": "#/$defs/count" }
+          },
+          "required": ["HIGH", "MEDIUM", "LOW"],
+          "additionalProperties": false
+        },
+        "statuses": {
+          "type": "object",
+          "properties": {
+            "known-good": { "$ref": "#/$defs/count" },
+            "known-good-variant": { "$ref": "#/$defs/count" },
+            "clean-unverified": { "$ref": "#/$defs/count" },
+            "findings": { "$ref": "#/$defs/count" },
+            "incomplete": { "$ref": "#/$defs/count" },
+            "no_template": { "$ref": "#/$defs/count" }
+          },
+          "required": ["known-good", "known-good-variant", "clean-unverified", "findings", "incomplete", "no_template"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["models", "templates", "findings", "statuses"],
+      "additionalProperties": false
+    },
+    "exitCode": {
+      "enum": [0, 1, 2, 3],
+      "description": "ISC-28: 2 for any HIGH; else 3 for any scanner or parse error or incomplete status; else 1 for any MEDIUM; else 0."
+    }
+  },
+  "required": ["tool", "schemaVersion", "roots", "online", "renderer", "models", "findings", "summary", "exitCode"],
+  "additionalProperties": false,
+
+  "$defs": {
+    "count": { "type": "integer", "minimum": 0 },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+
+    "severity": { "enum": ["HIGH", "MEDIUM", "LOW"] },
+
+    "ruleId": {
+      "enum": [
+        "parse_error", "template_list_mismatch", "intra_model_divergence", "unanalyzable",
+        "dunder_access", "format_traversal", "folded_dunder", "dynamic_attribute", "gadget_traversal", "engine_fingerprint", "exec_surface",
+        "unbaselined_text", "prefill_injection", "content_trigger", "nondeterministic_trigger", "url_in_text", "encoded_blob", "invisible_char",
+        "render_divergence", "env_profile_divergence", "content_integrity", "tool_integrity", "render_dos",
+        "local_comparison", "registry_divergence", "local_tamper",
+        "scanner_error"
+      ]
+    },
+
+    "sourceKind": {
+      "enum": ["gguf", "tokenizer_config", "chat_template_jinja", "chat_template_json", "additional_chat_templates", "processor_config", "bare"]
+    },
+
+    "templateStatus": {
+      "enum": ["known-good", "known-good-variant", "clean-unverified", "findings", "incomplete", "no_template"]
+    },
+
+    "testClass": {
+      "enum": ["presence", "content", "nondeterministic"],
+      "description": "How ISC-18 judges a test: presence tests are exempt; content and nondeterministic tests are triggers."
+    },
+
+    "span": {
+      "type": "object",
+      "description": "A location in the template's decoded text: start and end are UTF-16 code-unit offsets, line and col are 1-based with col counted in code points. A finding the scanner could not place on a smaller span carries the whole-template span, start 0, end 0, line 1, col 1; the human report prints it as \"whole template\".",
+      "properties": {
+        "start": { "type": "integer", "minimum": 0 },
+        "end": { "type": "integer", "minimum": 0 },
+        "line": { "type": "integer", "minimum": 1 },
+        "col": { "type": "integer", "minimum": 1 }
+      },
+      "required": ["start", "end", "line", "col"],
+      "additionalProperties": false
+    },
+
+    "finding": {
+      "type": "object",
+      "properties": {
+        "ruleId": { "$ref": "#/$defs/ruleId" },
+        "severity": { "$ref": "#/$defs/severity" },
+        "message": { "type": "string" },
+        "file": { "type": "string", "description": "Absolute path of the file the template or record came from." },
+        "templateName": { "type": "string" },
+        "templateSha256": { "$ref": "#/$defs/sha256" },
+        "span": { "$ref": "#/$defs/span" },
+        "excerpt": { "type": "string", "description": "The matched text, as found, clipped." },
+        "detail": { "type": "object", "description": "Rule-specific data. Open: its keys depend on the rule." }
+      },
+      "required": ["ruleId", "severity", "message", "file"],
+      "additionalProperties": false
+    },
+
+    "hfCacheLocation": {
+      "type": "object",
+      "properties": {
+        "repo": { "type": "string" },
+        "revision": { "type": "string" },
+        "pathInRepo": { "type": "string" }
+      },
+      "required": ["repo", "revision", "pathInRepo"],
+      "additionalProperties": false
+    },
+
+    "templateSite": {
+      "type": "object",
+      "description": "One place a template was found. Identical content found in several places is analyzed once and listed with each (ISC-11).",
+      "properties": {
+        "kind": { "$ref": "#/$defs/sourceKind" },
+        "path": { "type": "string" },
+        "realPath": { "type": "string" },
+        "key": { "type": "string" },
+        "hfCache": { "$ref": "#/$defs/hfCacheLocation" },
+        "shadowed": { "type": "boolean", "description": "Another source in the same model wins for every runtime profile (ISC-7.5)." }
+      },
+      "required": ["kind", "path", "realPath", "shadowed"],
+      "additionalProperties": false
+    },
+
+    "registryEntry": {
+      "type": "object",
+      "properties": {
+        "family": { "type": "string" },
+        "repo": { "type": "string" },
+        "revision": { "type": "string" },
+        "path": { "type": "string" },
+        "templateName": { "type": "string" },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      },
+      "required": ["family", "repo", "revision", "path", "templateName", "sha256"],
+      "additionalProperties": false
+    },
+
+    "injectedText": {
+      "type": "object",
+      "description": "A literal the template can emit that is not scaffolding (ISC-17).",
+      "properties": {
+        "text": { "type": "string" },
+        "span": { "$ref": "#/$defs/span" },
+        "condition": {
+          "type": "object",
+          "description": "The strongest test among every conditional the emission sits under; absent when unconditional.",
+          "properties": {
+            "span": { "$ref": "#/$defs/span" },
+            "test": { "$ref": "#/$defs/testClass" }
+          },
+          "required": ["span", "test"],
+          "additionalProperties": false
+        },
+        "afterGenerationPrompt": { "type": "boolean" }
+      },
+      "required": ["text", "span", "afterGenerationPrompt"],
+      "additionalProperties": false
+    },
+
+    "triggerCandidate": {
+      "type": "object",
+      "description": "A literal compared against an input-derived expression (ISC-22.1).",
+      "properties": {
+        "value": { "anyOf": [{ "type": "string" }, { "type": "number" }] },
+        "op": { "enum": ["==", "!=", "in", "not in", "startswith", "endswith", "slice", "<", "<=", ">", ">="] },
+        "input": { "type": "string" },
+        "test": { "$ref": "#/$defs/testClass" },
+        "span": { "$ref": "#/$defs/span" }
+      },
+      "required": ["value", "op", "test", "span"],
+      "additionalProperties": false
+    },
+
+    "templateReport": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "description": "\"default\" or the template's own name." },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "status": { "enum": ["known-good", "known-good-variant", "clean-unverified", "findings", "incomplete"] },
+        "severity": { "$ref": "#/$defs/severity" },
+        "validUtf8": { "type": "boolean" },
+        "sites": { "type": "array", "items": { "$ref": "#/$defs/templateSite" } },
+        "registry": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": { "enum": ["exact", "whitespace"] },
+                "entry": { "$ref": "#/$defs/registryEntry" }
+              },
+              "required": ["kind", "entry"],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": { "kind": { "const": "none" } },
+              "required": ["kind"],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "baseline": {
+          "description": "What the template was compared with (ISC-25, ISC-41.2). A sibling file is never a baseline.",
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": { "const": "registry" },
+                "entry": { "$ref": "#/$defs/registryEntry" }
+              },
+              "required": ["kind", "entry"],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": { "const": "upstream" },
+                "repo": { "type": "string" },
+                "revision": { "type": "string" },
+                "path": { "type": "string" },
+                "templateName": { "type": "string" }
+              },
+              "required": ["kind", "repo", "revision", "path", "templateName"],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": { "kind": { "const": "none" } },
+              "required": ["kind"],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
+        "injected": { "type": "array", "items": { "$ref": "#/$defs/injectedText" } },
+        "triggers": { "type": "array", "items": { "$ref": "#/$defs/triggerCandidate" } },
+        "probes": {
+          "type": "object",
+          "properties": {
+            "total": { "$ref": "#/$defs/count" },
+            "rendered": { "$ref": "#/$defs/count" },
+            "refused": { "$ref": "#/$defs/count" },
+            "failed": { "$ref": "#/$defs/count" }
+          },
+          "required": ["total", "rendered", "refused", "failed"],
+          "additionalProperties": false
+        },
+        "gaps": { "type": "array", "items": { "type": "string" }, "description": "Why the status is incomplete, or would be without a HIGH finding: one line per gap." }
+      },
+      "required": ["name", "sha256", "status", "validUtf8", "sites", "registry", "baseline", "findings", "injected", "triggers", "probes", "gaps"],
+      "additionalProperties": false
+    },
+
+    "profileSource": {
+      "type": "object",
+      "properties": {
+        "kind": { "$ref": "#/$defs/sourceKind" },
+        "path": { "type": "string" },
+        "name": { "type": "string" }
+      },
+      "required": ["kind", "path", "name"],
+      "additionalProperties": false
+    },
+
+    "profileChoice": {
+      "description": "The source the runtime would load as its default template, or null (ISC-7.4).",
+      "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/profileSource" }]
+    },
+
+    "modelReport": {
+      "type": "object",
+      "properties": {
+        "format": { "enum": ["gguf", "hf", "bare"] },
+        "id": { "type": "string", "description": "realpath of the GGUF file or model directory." },
+        "paths": { "type": "array", "items": { "type": "string" } },
+        "hfCache": { "$ref": "#/$defs/hfCacheLocation" },
+        "status": { "$ref": "#/$defs/templateStatus" },
+        "hints": {
+          "type": "object",
+          "description": "mlx-lm hints from tokenizer_config.json (ISC-7.3).",
+          "properties": {
+            "chatTemplateType": { "type": "string" },
+            "toolParserType": { "type": "string" }
+          },
+          "additionalProperties": false
+        },
+        "profiles": {
+          "type": "object",
+          "properties": {
+            "transformers-tokenizer": { "$ref": "#/$defs/profileChoice" },
+            "transformers-processor": { "$ref": "#/$defs/profileChoice" },
+            "mlx-lm": { "$ref": "#/$defs/profileChoice" },
+            "llama.cpp": { "$ref": "#/$defs/profileChoice" }
+          },
+          "required": ["transformers-tokenizer", "transformers-processor", "mlx-lm", "llama.cpp"],
+          "additionalProperties": false
+        },
+        "upstreamCandidates": {
+          "type": "array",
+          "description": "Hub repos named by GGUF general.* metadata. Untrusted, never a baseline (ISC-41.1).",
+          "items": {
+            "type": "object",
+            "properties": {
+              "repo": { "type": "string" },
+              "key": { "type": "string" }
+            },
+            "required": ["repo", "key"],
+            "additionalProperties": false
+          }
+        },
+        "extractionComplete": { "type": "boolean" },
+        "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
+        "templates": { "type": "array", "items": { "$ref": "#/$defs/templateReport" } }
+      },
+      "required": ["format", "id", "paths", "status", "hints", "profiles", "upstreamCandidates", "extractionComplete", "findings", "templates"],
+      "additionalProperties": false
+    }
+  }
+}
