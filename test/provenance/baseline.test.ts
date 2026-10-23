@@ -76,6 +76,8 @@ describe("upstreamCandidates (ISC-41.1)", () => {
     ]);
     expect(upstreamCandidates(model)).toEqual([]);
     expect(upstreamCandidates(gguf("/m/y.gguf", CHATML))).toEqual([]);
+    // A bare id naming a dataset or a Space is no model either (round-1 review).
+    for (const id of ["datasets/acme", "spaces/acme"]) expect(upstreamCandidates(gguf("/m/z.gguf", CHATML, [["general.source.huggingface.repository", str(id)]]))).toEqual([]);
   });
 });
 

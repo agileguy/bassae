@@ -169,6 +169,8 @@ describe("validation before any URL is built", () => {
     ["a/b?x=", REV],
     ["a/b#", REV],
     ["https://huggingface.co/a/b", REV],
+    ["datasets/x", REV],
+    ["spaces/x", REV],
     ["a/b", "main"],
     ["a/b", "v1.0"],
     ["a/b", REV.slice(0, 12)],
