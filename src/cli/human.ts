@@ -45,8 +45,11 @@ function byFinding(a: Finding, b: Finding): number {
   return SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity] || (a.span?.start ?? 0) - (b.span?.start ?? 0) || a.ruleId.localeCompare(b.ruleId);
 }
 
-function findingRows(f: Finding, templateName: string | undefined, indent: string): string[] {
-  const head = [f.ruleId, f.templateName ?? templateName, position(f.span), f.file].filter((part) => part !== undefined).join(" · ");
+// A finding listed outside any template is about no template, so its whole-template span (the one every
+// finding without a place of its own gets) prints no position rather than a false "whole template".
+function findingRows(f: Finding, templateName: string | undefined, indent: string, inTemplate = true): string[] {
+  const at = inTemplate || !f.span || !isWholeTemplate(f.span) ? position(f.span) : undefined;
+  const head = [f.ruleId, f.templateName ?? templateName, at, f.file].filter((part) => part !== undefined).join(" · ");
   const rows = [`${indent}${f.severity.padEnd(7)} ${head}`, `${indent}        ${f.message}`];
   if (f.excerpt) rows.push(`${indent}        excerpt: ${f.excerpt}`);
   return rows;
@@ -175,7 +178,7 @@ export function renderHuman(report: ScanReport): string {
   const out = [...header(report), ""];
 
   const outside = [...report.findings, ...report.models.flatMap((m) => m.findings)].sort(byFinding);
-  if (outside.length > 0) out.push("Findings outside templates", ...outside.flatMap((f) => findingRows(f, undefined, "  ")), "");
+  if (outside.length > 0) out.push("Findings outside templates", ...outside.flatMap((f) => findingRows(f, undefined, "  ", false)), "");
 
   const templates = report.models
     .flatMap((m) => m.templates.map((t) => ({ t, m, rank: rankOf(t.severity ?? highestSeverity(t.findings), t.status) })))
