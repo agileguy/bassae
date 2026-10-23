@@ -221,7 +221,7 @@ function modelReport(record: ModelRecord, modelFindings: Finding[], drafts: Draf
     id: record.id,
     paths: record.paths,
     ...(record.hfCache ? { hfCache: record.hfCache } : {}),
-    status: modelStatus(templates, record.extractionComplete),
+    status: modelStatus(templates, record.extractionComplete, rest),
     hints: { ...record.hints },
     profiles,
     upstreamCandidates: upstreamCandidateHints(record).map(({ repo, key }) => ({ repo, key })),

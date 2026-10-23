@@ -121,6 +121,7 @@ describe("ISC-42: one status per template, one fixture per status", () => {
     expect(m.extractionComplete).toBe(false);
     expect(m.templates[0]!.status).toBe("incomplete");
     expect(m.templates[0]!.gaps).toContain("model extraction incomplete: a template may exist that was not extracted");
-    expect(m.status).toBe("incomplete");
+    // The unreadable tokenizer_config.json is a HIGH parse_error on the model itself, and a HIGH outranks the gap.
+    expect(m.status).toBe("findings");
   });
 });

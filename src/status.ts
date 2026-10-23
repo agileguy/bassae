@@ -32,16 +32,25 @@ export function statusOf(findings: readonly Finding[], gaps: readonly string[], 
   return "clean-unverified";
 }
 
-/** A model with no template is `no_template` when its extraction completed and `incomplete` when it did not, never clean (ISC-42). */
-export function modelStatus(templates: readonly { status: TemplateStatus }[], extractionComplete: boolean): TemplateStatus {
-  if (templates.length === 0) return extractionComplete ? "no_template" : "incomplete";
-  let worst = templates[0]!.status;
-  for (const t of templates) if (STATUS_ORDER.indexOf(t.status) < STATUS_ORDER.indexOf(worst)) worst = t.status;
-  return worst;
-}
-
 // Rules that say the scanner could not read something, rather than that something is wrong with it.
 const SCANNER_ERRORS: ReadonlySet<Finding["ruleId"]> = new Set(["scanner_error", "parse_error"]);
+
+/**
+ * The worst of the model's own standing and its templates' statuses (ISC-42). The model's own findings are the ones
+ * no template took: a HIGH among them gives `findings`, a scanner or parse error or an unfinished extraction gives
+ * `incomplete`, any other gives `findings`, in statusOf's order. A model with no template and nothing of its own is
+ * `no_template`, never clean.
+ */
+export function modelStatus(templates: readonly { status: TemplateStatus }[], extractionComplete: boolean, findings: readonly Finding[] = []): TemplateStatus {
+  const top = highestSeverity(findings);
+  const own: TemplateStatus | undefined =
+    top === "HIGH" ? "findings" : !extractionComplete || findings.some((f) => SCANNER_ERRORS.has(f.ruleId)) ? "incomplete" : top ? "findings" : undefined;
+  const statuses = [...(own ? [own] : []), ...templates.map((t) => t.status)];
+  if (statuses.length === 0) return "no_template";
+  let worst = statuses[0]!;
+  for (const s of statuses) if (STATUS_ORDER.indexOf(s) < STATUS_ORDER.indexOf(worst)) worst = s;
+  return worst;
+}
 
 /** ISC-28: 2 for any HIGH; else 3 for any scanner or parse error or any `incomplete` status; else 1 for any MEDIUM; else 0, LOW included. */
 export function exitCodeOf(report: Pick<ScanReport, "models" | "findings">): ExitCode {

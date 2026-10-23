@@ -64,6 +64,14 @@ describe("modelStatus", () => {
     expect(modelStatus([{ status: "known-good" }, { status: "clean-unverified" }], true)).toBe("clean-unverified");
     expect(modelStatus([{ status: "incomplete" }, { status: "findings" }], true)).toBe("findings");
   });
+  test("findings no template took count toward the model's own status", () => {
+    expect(modelStatus([{ status: "known-good" }], true, [finding("HIGH", "local_tamper")])).toBe("findings");
+    expect(modelStatus([], false, [finding("HIGH", "parse_error")])).toBe("findings");
+    expect(modelStatus([{ status: "known-good" }], true, [finding("MEDIUM", "scanner_error")])).toBe("incomplete");
+    expect(modelStatus([{ status: "known-good" }], true, [finding("LOW")])).toBe("findings");
+    expect(modelStatus([{ status: "known-good" }], false)).toBe("incomplete");
+    expect(modelStatus([{ status: "findings" }], true, [finding("MEDIUM", "parse_error")])).toBe("findings");
+  });
 });
 
 describe("exitCodeOf (ISC-28)", () => {

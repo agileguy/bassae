@@ -23,7 +23,8 @@ describe("ISC-9: a malformed GGUF is a finding and the scan goes on", () => {
 
     const [bad, ok] = report.models;
     expect(bad!.extractionComplete).toBe(false);
-    expect(bad!.status).toBe("incomplete");
+    // The parse_error is HIGH and sits on the model, so the model reads as findings: a HIGH outranks a gap.
+    expect(bad!.status).toBe("findings");
     const errors = [...bad!.findings, ...bad!.templates.flatMap((t) => t.findings)].filter((f) => f.ruleId === "parse_error");
     expect(errors.length).toBeGreaterThan(0);
     expect(errors.some((f) => f.severity === "HIGH")).toBe(true);
