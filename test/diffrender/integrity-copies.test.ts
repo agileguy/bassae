@@ -83,11 +83,15 @@ function build(texts: readonly string[], parts: readonly Part[]): { output: stri
   return { output, spans };
 }
 
-/** Both scans over one case, and what they found. */
+/**
+ * Both scans over one case, and what they found. firstCopies runs twice: with its own hash filter, and with one of 32
+ * bits, which nearly every window passes, so the windows that pass it and are no copy are read too.
+ */
 function both(texts: readonly string[], parts: readonly Part[], held: readonly string[] = [], skip: ReadonlySet<number> = new Set()) {
   const { output, spans } = build(texts, parts);
   const want = reference(output, texts, held, spans, skip);
   expect([output, firstCopies(output, texts, held, spans, skip)]).toEqual([output, want]);
+  expect([output, firstCopies(output, texts, held, spans, skip, 5)]).toEqual([output, want]);
   return want;
 }
 
@@ -120,6 +124,12 @@ describe("firstCopies against the slicing scan: edge cases", () => {
     expect(both([a, b], [{ place: [0] }, { place: [1] }, "\n", "one two three four five six seven eight nine"])).toEqual([
       { i: 0, at: a.length + b.length + 1, length: a.length, prior: 2 },
       { i: 1, at: a.length + b.length + 1 + 19, length: b.length, prior: 2 },
+    ]);
+    // The scan goes on past the end of a copy, so a window that starts on its last character is not read: a 16-character
+    // content has no other window to be found by.
+    const c = "e six seven eigh";
+    expect(both([a, c], [{ place: [0] }, { place: [1] }, "\n", "one two three four five six seven eigh"])).toEqual([
+      { i: 0, at: a.length + c.length + 1, length: a.length, prior: 2 },
     ]);
     // A copy repeated many times is reported once.
     expect(both([PORTO, la], [{ place: [0] }, { place: [1] }, PORTO.repeat(50)])).toEqual([{ i: 0, at: PORTO.length + la.length, length: PORTO.length, prior: 2 }]);

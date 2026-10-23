@@ -271,6 +271,32 @@ interface Span {
   inputs: number[];
 }
 
+// A window's hash is Σ c[j]·B^(W-1-j) mod 2^32 over its W = TRUNCATION_MIN UTF-16 code units, the units slice
+// counts, so the next position's hash takes out the first unit and brings in the next one in a few steps.
+const B = 0x01000193;
+const TOP = (() => {
+  let t = 1;
+  for (let j = 1; j < TRUNCATION_MIN; j++) t = Math.imul(t, B);
+  return t;
+})();
+
+function windowHash(s: string, k: number): number {
+  let h = 0;
+  for (let j = k; j < k + TRUNCATION_MIN; j++) h = (Math.imul(h, B) + s.charCodeAt(j)) | 0;
+  return h;
+}
+
+/** The first p in [from, stop) whose window's hash has its bit set in `live`, or `stop` when there is none. */
+function nextLive(output: string, from: number, stop: number, live: Int32Array, shift: number): number {
+  let p = from;
+  for (let h = windowHash(output, p); ; ) {
+    const x = h >>> shift;
+    if (live[x >>> 5]! & (1 << (x & 31))) return p;
+    if (++p >= stop) return stop;
+    h = (Math.imul(h - Math.imul(output.charCodeAt(p - 1), TOP), B) + output.charCodeAt(p + TRUNCATION_MIN - 1)) | 0;
+  }
+}
+
 /** A content's first copy: `length` of its characters at output[at, at + length), found past the first `prior` spans. */
 export interface Copy {
   i: number;
@@ -282,9 +308,10 @@ export interface Copy {
 /**
  * The first copy of each distinctive content in `spans`, outside `skip`, that appears again outside every span,
  * whole or as a slice of at least TRUNCATION_MIN characters. `texts` are the contents, `held` every input the probe
- * passes. Spans are in output order and do not overlap.
+ * passes. Spans are in output order and do not overlap. `bits` sizes the hash filter below: a test passes a small one,
+ * which lets most windows through, to show the filter decides nothing.
  */
-export function firstCopies(output: string, texts: readonly string[], held: readonly string[], spans: readonly Pick<Span, "start" | "end" | "inputs">[], skip: ReadonlySet<number>): Copy[] {
+export function firstCopies(output: string, texts: readonly string[], held: readonly string[], spans: readonly Pick<Span, "start" | "end" | "inputs">[], skip: ReadonlySet<number>, bits?: number): Copy[] {
   const W = TRUNCATION_MIN;
   // Each distinctive window of a checked content, with the content and where in it the window starts.
   const owner = new Map<string, [number, number]>();
@@ -311,17 +338,39 @@ export function firstCopies(output: string, texts: readonly string[], held: read
   }
   for (const [w, n] of holders) if (n > 1) owner.delete(w);
 
+  // The output's windows are not sliced one by one: a window is sliced and looked up only when its hash may be a
+  // live window's, one whose content is not yet reported. `live` has a bit per hash prefix, set for each live window:
+  // 256 to 512 bits a window, so one that is not live seldom passes, and from 2^16 to 2^24 bits in all.
+  const hashes = [...owner].map(([w, [i]]) => [windowHash(w, 0), i] as const);
+  const size = bits ?? Math.min(24, Math.max(16, 40 - Math.clz32(owner.size)));
+  const shift = 32 - size;
+  const live = new Int32Array(1 << (size - 5));
+  const set = (h: number, on: boolean) => {
+    const x = h >>> shift;
+    live[x >>> 5] = on ? live[x >>> 5]! | (1 << (x & 31)) : live[x >>> 5]! & ~(1 << (x & 31));
+  };
+  for (const [h] of hashes) set(h, true);
+  // The contents still to report. Once there are none, nothing more can be found.
+  let left = new Set(hashes.map(([, i]) => i)).size;
+
   const found: Copy[] = [];
   const reported = new Set<number>();
   let s = 0; // the first span that ends after p
-  for (let p = 0; p + W <= output.length; p++) {
+  for (let p = 0; p + W <= output.length && left > 0; ) {
     while (s < spans.length && spans[s]!.end <= p) s++;
     if (s < spans.length && spans[s]!.start <= p) {
-      p = spans[s]!.end - 1;
+      p = spans[s]!.end;
       continue;
     }
+    // Up to the next span, the hash rolls on a character at a time.
+    const stop = Math.min(s < spans.length ? spans[s]!.start : output.length, output.length - W + 1);
+    p = nextLive(output, p, stop, live, shift);
+    if (p === stop) continue;
     const hit = owner.get(output.slice(p, p + W));
-    if (!hit || reported.has(hit[0])) continue;
+    if (!hit || reported.has(hit[0])) {
+      p++;
+      continue;
+    }
     const [i, k] = hit;
     const text = texts[i]!;
     let before = 0;
@@ -330,7 +379,11 @@ export function firstCopies(output: string, texts: readonly string[], held: read
     while (k + after < text.length && output[p + after] === text[k + after]) after++;
     reported.add(i);
     found.push({ i, at: p - before, length: before + after, prior: s });
-    p += after - 1;
+    p += after;
+    // Its windows no longer pass, but a live window whose hash shares a prefix with one of them still does.
+    for (const [h, j] of hashes) if (j === i) set(h, false);
+    for (const [h, j] of hashes) if (!reported.has(j)) set(h, true);
+    left--;
   }
   return found;
 }
