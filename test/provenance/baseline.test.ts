@@ -76,30 +76,49 @@ describe("upstreamCandidates (ISC-41.1)", () => {
     ]);
     expect(upstreamCandidates(model)).toEqual([]);
     expect(upstreamCandidates(gguf("/m/y.gguf", CHATML))).toEqual([]);
+    // A bare id naming a dataset or a Space is no model either (round-1 review).
+    for (const id of ["datasets/acme", "spaces/acme"]) expect(upstreamCandidates(gguf("/m/z.gguf", CHATML, [["general.source.huggingface.repository", str(id)]]))).toEqual([]);
   });
 });
 
+/** selectBaseline with the match a caller computes first, as Phase 3 does. */
+const select = (t: ExtractedTemplate, model: ModelRecord, registry: Registry, upstream?: readonly Baseline[]) => selectBaseline(t, model, registry.match(t), registry, upstream);
+
 describe("selectBaseline (ISC-41.2)", () => {
+  test("the match the caller computed decides; the registry is never asked again (round-1 review)", () => {
+    const entry = known({ repo: "acme/tiny-chat" });
+    let asked = 0;
+    const registry: Registry = { ...stubRegistry([entry]), match: () => (asked++, { kind: "exact", known: entry }) };
+    const exact = gguf("/m/a.gguf", CHATML);
+    const t = exact.templates[0]!;
+    // A caller whose match said none gets no registry baseline from a second lookup that would have matched.
+    expect(selectBaseline(t, exact, { kind: "none" }, registry)).toEqual({ kind: "none" });
+    // And the entry the caller matched is the baseline, whatever a second lookup would say.
+    const other = known({ repo: "acme/other" }, EDITED);
+    expect(selectBaseline(t, exact, { kind: "whitespace", known: other }, registry)).toEqual({ kind: "registry", known: other });
+    expect(asked).toBe(0);
+  });
+
   test("probe: a GGUF whose general.* names a pinned repo lists it, but offline its baseline is none", () => {
     const model = gguf("/models/qwen-0.5b-q4.gguf", EDITED, HINTS);
     const registry = stubRegistry([known({ repo: "Qwen/Qwen2.5-0.5B-Instruct", path: "tokenizer_config.json" }), known({ repo: "Qwen/Qwen2.5-0.5B" })]);
     expect(upstreamCandidates(model)).toContain("Qwen/Qwen2.5-0.5B-Instruct");
-    expect(selectBaseline(model.templates[0]!, model, registry)).toEqual({ kind: "none" });
+    expect(select(model.templates[0]!, model, registry)).toEqual({ kind: "none" });
   });
 
   test("probe: an offline GGUF with no sibling and no registry match has baseline none", () => {
     const model = gguf("/models/lonely.gguf", EDITED);
-    expect(selectBaseline(model.templates[0]!, model, stubRegistry([known({ repo: "acme/tiny-chat" })]))).toEqual({ kind: "none" });
-    expect(selectBaseline(model.templates[0]!, model, stubRegistry([]), [])).toEqual({ kind: "none" });
+    expect(select(model.templates[0]!, model, stubRegistry([known({ repo: "acme/tiny-chat" })]))).toEqual({ kind: "none" });
+    expect(select(model.templates[0]!, model, stubRegistry([]), [])).toEqual({ kind: "none" });
   });
 
   test("first: the registry entry the template matches, exactly or as a whitespace-only variant", () => {
     const entry = known({ repo: "acme/tiny-chat" });
     const registry = stubRegistry([entry]);
     const exact = gguf("/m/a.gguf", CHATML);
-    expect(selectBaseline(exact.templates[0]!, exact, registry)).toEqual({ kind: "registry", known: entry });
+    expect(select(exact.templates[0]!, exact, registry)).toEqual({ kind: "registry", known: entry });
     const variant = gguf("/m/b.gguf", `${CHATML}\n`);
-    expect(selectBaseline(variant.templates[0]!, variant, registry)).toEqual({ kind: "registry", known: entry });
+    expect(select(variant.templates[0]!, variant, registry)).toEqual({ kind: "registry", known: entry });
   });
 
   test("second: the entry pinned to the cache repo the model sits in, same name, preferring its revision and file", async () => {
@@ -114,17 +133,17 @@ describe("selectBaseline (ISC-41.2)", () => {
     const registry = stubRegistry([elsewhere, old, config, jinja, tool]);
 
     // The fixture's templates are edited relative to every entry, so none matches and the pinned entry decides.
-    expect(selectBaseline(byKind("chat_template_jinja"), hf, registry)).toEqual({ kind: "registry", known: jinja });
-    expect(selectBaseline(byKind("tokenizer_config"), hf, registry)).toEqual({ kind: "registry", known: config });
-    expect(selectBaseline(byKind("additional_chat_templates"), hf, registry)).toEqual({ kind: "registry", known: tool });
-    expect(selectBaseline(byKind("chat_template_jinja"), hf, stubRegistry([old]))).toEqual({ kind: "registry", known: old });
-    expect(selectBaseline(byKind("chat_template_jinja"), hf, stubRegistry([elsewhere]))).toEqual({ kind: "none" });
+    expect(select(byKind("chat_template_jinja"), hf, registry)).toEqual({ kind: "registry", known: jinja });
+    expect(select(byKind("tokenizer_config"), hf, registry)).toEqual({ kind: "registry", known: config });
+    expect(select(byKind("additional_chat_templates"), hf, registry)).toEqual({ kind: "registry", known: tool });
+    expect(select(byKind("chat_template_jinja"), hf, stubRegistry([old]))).toEqual({ kind: "registry", known: old });
+    expect(select(byKind("chat_template_jinja"), hf, stubRegistry([elsewhere]))).toEqual({ kind: "none" });
   });
 
   test("a GGUF inside a cache snapshot takes its repo from the path", () => {
     const model = gguf(`/c/models--acme--tiny-GGUF/snapshots/${REV}/tiny.gguf`, EDITED);
     const entry = known({ repo: "acme/tiny-GGUF", path: "tiny.gguf" });
-    expect(selectBaseline(model.templates[0]!, model, stubRegistry([entry]))).toEqual({ kind: "registry", known: entry });
+    expect(select(model.templates[0]!, model, stubRegistry([entry]))).toEqual({ kind: "registry", known: entry });
   });
 
   test("third: a supplied upstream baseline of the same name, preferring identical text, then the same file", async () => {
@@ -135,15 +154,15 @@ describe("selectBaseline (ISC-41.2)", () => {
     const supplied = [tool, { kind: "none" } as Baseline, config, jinja];
 
     const g = gguf("/m/a.gguf", EDITED);
-    expect(selectBaseline(g.templates[0]!, g, stubRegistry([]), supplied)).toBe(config);
+    expect(select(g.templates[0]!, g, stubRegistry([]), supplied)).toBe(config);
     const same = up("chat_template.jinja", CHATML);
     const g2 = gguf("/m/b.gguf", CHATML);
-    expect(selectBaseline(g2.templates[0]!, g2, stubRegistry([]), [config, same])).toBe(same);
+    expect(select(g2.templates[0]!, g2, stubRegistry([]), [config, same])).toBe(same);
 
     const hf = await readHfModel(SNAPSHOT);
     const jinjaTemplate = hf.templates.find((t) => t.source.kind === "chat_template_jinja")!;
-    expect(selectBaseline(jinjaTemplate, hf, stubRegistry([]), supplied)).toBe(jinja);
-    expect(selectBaseline(jinjaTemplate, hf, stubRegistry([]), [tool])).toEqual({ kind: "none" });
+    expect(select(jinjaTemplate, hf, stubRegistry([]), supplied)).toBe(jinja);
+    expect(select(jinjaTemplate, hf, stubRegistry([]), [tool])).toEqual({ kind: "none" });
   });
 
   test("a registry baseline wins over a supplied upstream one", async () => {
@@ -151,6 +170,6 @@ describe("selectBaseline (ISC-41.2)", () => {
     const t = hf.templates.find((x) => x.source.kind === "chat_template_jinja")!;
     const pinned = known({ repo: "acme/tiny-chat" }, EDITED);
     const fetched: Baseline = { kind: "upstream", repo: "acme/tiny-chat", revision: REV, path: "chat_template.jinja", templateName: "default", text: t.text };
-    expect(selectBaseline(t, hf, stubRegistry([pinned]), [fetched])).toEqual({ kind: "registry", known: pinned });
+    expect(select(t, hf, stubRegistry([pinned]), [fetched])).toEqual({ kind: "registry", known: pinned });
   });
 });

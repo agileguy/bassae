@@ -7,10 +7,11 @@
 // carry to the output, and how strongly it depends on runtime input. Literals
 // reach the output through text, `{{ }}`, set and set blocks, namespace
 // attributes, macro parameters and bodies, `caller()`, `~`/`+`/`%`, joins,
-// filters and string methods, so all of those carry them. Variables follow
-// jinja2's scoping: a `set` replaces the value on the path it is on, `if`
-// branches join where they meet, and what a `for` body or a macro sets is gone
-// after it, except namespace attributes and mutated lists. A loop's body starts
+// filters, string methods and calls the walk has no rule for, so all of those
+// carry them. Variables follow jinja2's scoping: a `set` replaces the value on
+// the path it is on, `if` branches join where they meet, and what a `for` body
+// or a macro sets is gone after it, except namespace attributes and mutated
+// lists. A macro's extra arguments are its `varargs` and `kwargs`. A loop's body starts
 // from the join of its entry and what the body left on earlier passes, computed
 // to a fixpoint, so a loop-carried value is never missed. Macros are inlined at
 // every call site, so their emissions inherit the call site's conditions
@@ -18,6 +19,9 @@
 // as a value. An assignment under a test carries the test onto its literals,
 // except text the test only moves: what the variable already held, and text
 // split out of the value the test reads, when that text is printed another way.
+// Text a test chooses without wrapping it takes the test as well: a literal
+// only one arm of an `if` leaves in a variable, and text picked by a subscript
+// key, slice bound, `.get` key, replace needle or repeat count.
 //
 // The walk is bounded: a work budget over every node visit and every literal
 // copied, a cap on literals per value, a budget on folded constants, a cap on
@@ -26,6 +30,7 @@
 // rather than throwing (ISC-42.1), and the text between tags is still reported.
 
 import type { InjectedText, Span } from "../types.ts";
+import { scanBlobs, scanUrls } from "./textscan.ts";
 import { WHOLE_TEMPLATE, type ParseOutcome } from "../parse/parse.ts";
 import { children, type LineMap, type Node } from "../parse/support.ts";
 import type { PreToken } from "../parse/prelexer.ts";
@@ -35,6 +40,7 @@ import {
   condOf,
   elementField,
   factsFrom,
+  FLAG_FILTERS,
   genPolarity,
   isRuntime,
   KEY_FIELD,
@@ -67,6 +73,8 @@ export interface Trigger {
 
 export interface Extraction {
   items: InjectedText[];
+  /** URLs and blobs only the printed text as a whole holds: across literals printed one after another, or in a folded literal (ISC-19, ISC-20). */
+  joined: { urls: InjectedText[]; blobs: InjectedText[] };
   nondeterministic: Trigger[];
   /** False when a budget stopped the walk before every emission was seen. */
   complete: boolean;
@@ -91,6 +99,8 @@ const MAX_KONST = 64 * 1024;
 // `set s = s ~ 'x'` folds ever longer strings; past this, the pieces stay as
 // written, which the matcher reads as more residue, never less.
 const KONST_BUDGET = 4 * 1024 * 1024;
+// Characters of printed text joined for the URL and blob scans.
+const JOIN_BUDGET = 16 * 1024 * 1024;
 // Tokens the text aligner looks ahead before it gives a literal a fallback span.
 const ALIGN_LOOKAHEAD = 256;
 // Trie steps the scaffolding matcher may take over the whole template.
@@ -102,23 +112,25 @@ const MAX_TRIE_CHARS = 4 * 1024 * 1024;
 
 const EMPTY: Val = { lits: [], data: "none", truth: "none" };
 const WORDISH = /[\p{L}\p{N}]/u;
+const NON_SPACE = /\S/u;
 
 /** Run the extraction over a parsed template. */
 export function extract(outcome: ParseOutcome, text: string, scaffolding: ReadonlySet<string>): Extraction {
   const matcher = new Scaffold(scaffolding);
   if (!outcome.program || !outcome.pre || !outcome.lines) {
-    return { items: rawItems(outcome, matcher), nondeterministic: [], complete: false };
+    return { items: rawItems(outcome, matcher), joined: { urls: [], blobs: [] }, nondeterministic: [], complete: false };
   }
   const interp = new Interp(outcome, outcome.lines);
   const lits = interp.run();
   const items = toItems(lits, matcher);
+  const joined = joinedText(lits, matcher);
   if (!interp.complete) {
     // Out of budget, the walk may have stopped before some text: every text run
     // between tags it did not reach is still reported, as on the no-AST path.
     const seen = new Set(items.map((i) => i.span.start));
     for (const r of rawItems(outcome, matcher)) if (!seen.has(r.span.start)) items.push(r);
   }
-  return { items, nondeterministic: [...interp.nondet.values()], complete: interp.complete && matcher.complete };
+  return { items, joined, nondeterministic: [...interp.nondet.values()], complete: interp.complete && matcher.complete && joined.complete };
 }
 
 /** With no AST (parse error or shape cap), every text run between tags is a candidate: it is emitted whenever it is reached. */
@@ -205,6 +217,9 @@ class Interp {
   // Macros the template used as values (`set f = m`, `[m]`, `{'k': m}`). A
   // call the extraction cannot resolve may reach any of them.
   private readonly escaped = new Set<string>();
+  // The same for strftime_now and random put in a list or dict, or passed to
+  // a function: a call through a value the walk lost track of may be them.
+  private readonly escapedFns = new Set<string>();
   private work = 0;
   private changed = false;
   private outputLits = 0;
@@ -307,18 +322,18 @@ class Interp {
           const name = callee?.type === "Identifier" ? String(callee.value) : undefined;
           const caller: Caller = { body: (s.body as Node[]) ?? [], params: (s.callerArgs as Node[] | null) ?? [], ctx: c };
           const m = name ? this.macroNamed(name, c) : undefined;
-          this.emit(m ? this.callMacro(m, (call.args as Node[]) ?? [], c, caller) : this.eval(call, c), c, sink);
+          this.emit(m ? this.callMacro(m, (call.args as Node[]) ?? [], c, caller) : this.eval(call, c), c, sink, s);
           break;
         }
         case "FilterStatement": {
           const inner: Sink = { lits: [], data: "none", truth: "none" };
           this.exec(s.body, c, inner);
           const f = s.filter as Node;
-          this.emit(this.applyFilter({ lits: inner.lits, data: inner.data, truth: inner.truth }, filterName(f), filterArgs(f), c, f), c, sink);
+          this.emit(this.applyFilter({ lits: inner.lits, data: inner.data, truth: inner.truth }, filterName(f), filterArgs(f), c, f), c, sink, s);
           break;
         }
         default:
-          this.emit(this.eval(s, c), c, sink);
+          this.emit(this.eval(s, c), c, sink, s);
       }
     }
   }
@@ -332,7 +347,7 @@ class Interp {
     const sa = new State(c.st);
     const body: Ctx = { ...c, cond, subject, fresh: false, st: sb, facts: factsFrom(test, true, c.facts) };
     const alt: Ctx = { ...c, cond, subject, fresh: false, st: sa, facts: factsFrom(test, false, c.facts) };
-    const polarity = genPolarity(test);
+    const polarity = genPolarity(test, (x) => (x.type === "Identifier" || x.type === "MemberExpression") && this.eval(x, c).genFlag === true);
     if (polarity) {
       let id = this.genIds.get(s);
       if (id === undefined) this.genIds.set(s, (id = this.genIds.size));
@@ -348,7 +363,7 @@ class Interp {
     const oa: Sink = { lits: [], data: "none", truth: "none" };
     this.exec(s.body, body, ob);
     this.exec(s.alternate, alt, oa);
-    this.spend(joinLayers(c.st, sb, sa) + ob.lits.length + oa.lits.length);
+    this.spend(this.joinBranches(c.st, sb, sa, tc) + ob.lits.length + oa.lits.length);
     // A literal both branches print, with no test between the branch and the
     // print, is there whichever way the test goes: it does not depend on it.
     const inB = new Set(ob.lits.map(printKey));
@@ -359,11 +374,37 @@ class Interp {
     sink.truth = stronger(sink.truth, stronger(ob.truth, oa.truth));
   }
 
+  // Where an `if`'s branches meet, each variable either branch set takes the
+  // join of both branches' values. A literal only one branch's value holds is
+  // there only when the test went that way (`set x = '...'` then `if not T`
+  // `set x = ''`), so it takes the test, as a print in one branch does.
+  private joinBranches(into: State, a: State, b: State, test: Cond | undefined): number {
+    let copied = 0;
+    for (const k of new Set([...a.own.keys(), ...b.own.keys()])) {
+      const va = a.get(k);
+      const vb = b.get(k);
+      const v = va && vb && va !== vb ? join(this.oneSided(va, vb, test), this.oneSided(vb, va, test)) : (va ?? vb);
+      if (v) into.own.set(k, v);
+      copied += (va?.lits.length ?? 0) + (vb?.lits.length ?? 0);
+    }
+    return copied;
+  }
+
+  // `v` with `test` on each literal `other` does not hold.
+  private oneSided(v: Val, other: Val, test: Cond | undefined): Val {
+    if (!test) return v;
+    const there = new Set<string>();
+    for (const l of other.lits) there.add(litKey(l));
+    for (const l of other.keys ?? []) there.add(litKey(l));
+    const mark = (l: Lit): Lit => (there.has(litKey(l)) ? l : { ...l, cond: strongest(l.cond, test), via: ++this.vias });
+    return { ...v, lits: v.lits.map(mark), keys: v.keys?.map(mark) };
+  }
+
   // Move a literal printed in an `if` branch out to the enclosing sink, under
   // the test when only that branch prints it.
   private repush(l: Lit, oneSided: boolean, test: Cond | undefined, c: Ctx, sink: Sink): void {
     const cond = oneSided ? strongest(l.cond, test) : l.cond;
-    if (cond) sink.truth = stronger(sink.truth, cond.test);
+    if (cond && WORDISH.test(l.text)) sink.truth = stronger(sink.truth, cond.test);
     sink.lits.push({ ...l, cond, via: oneSided || c.fresh ? ++this.vias : l.via });
   }
 
@@ -447,8 +488,10 @@ class Interp {
     }
   }
 
-  private emit(v: Val, c: Ctx, sink: Sink): void {
+  private emit(v: Val, c: Ctx, sink: Sink, at: Node): void {
     if (!this.spend(v.lits.length)) return;
+    // Runtime text separates the literals printed before and after it.
+    if (isRuntime(v) && v.lits.length === 0 && !v.keys?.length) this.pushLit({ text: "", span: this.exprSpan(at), brk: true }, c, sink);
     for (const l of v.lits) this.pushLit(l, c, sink);
     if (v.keys) for (const l of v.keys) this.pushLit(l, c, sink);
     sink.data = stronger(sink.data, v.data);
@@ -458,16 +501,22 @@ class Interp {
   }
 
   private pushLit(l: Lit, c: Ctx, sink: Sink): void {
-    // Text with no letter or digit (whitespace, punctuation) is never injected
-    // text, and is never taken as the generation-prompt marker.
-    if (!WORDISH.test(l.text)) return;
+    if (l.text === "" && !l.brk) return;
+    // Whitespace never continues a URL or a blob: it separates the literals
+    // around it as runtime text does. One break stands for a run of them.
+    if (l.brk || !NON_SPACE.test(l.text)) {
+      if (!sink.lits.at(-1)?.brk) sink.lits.push({ text: "", span: l.span, brk: true });
+      return;
+    }
     if (++this.outputLits > MAX_OUTPUT_LITS) {
       this.complete = false;
       return;
     }
     const cond = strongest(l.cond, c.emitCond);
-    if (cond) sink.truth = stronger(sink.truth, cond.test);
-    sink.lits.push({ text: l.text, span: l.span, cond, via: c.fresh ? ++this.vias : l.via, routed: l.routed, gen: l.gen ?? c.gen, genElse: l.genElse ?? c.genElse });
+    // Punctuation is never injected text and is never the generation-prompt
+    // marker; it is kept only to join the literals around it (`http{{ ':' }}//`).
+    if (cond && WORDISH.test(l.text)) sink.truth = stronger(sink.truth, cond.test);
+    sink.lits.push({ text: l.text, span: l.span, cond, via: c.fresh ? ++this.vias : l.via, routed: l.routed, gen: l.gen ?? c.gen, genElse: l.genElse ?? c.genElse, folded: l.folded });
   }
 
   // ---- variables ----
@@ -605,7 +654,9 @@ class Interp {
       case "FilterExpression": {
         const o = this.eval(node.operand, c);
         const f = node.filter as Node;
-        return this.applyFilter(o, filterName(f), filterArgs(f), c, f);
+        const v = this.applyFilter(o, filterName(f), filterArgs(f), c, f);
+        // `add_generation_prompt|default(false)` is still the flag.
+        return o.genFlag && FLAG_FILTERS.has(filterName(f)) ? { ...v, genFlag: true } : v;
       }
       case "TestExpression":
         return boolVal(this.testClass(node, c));
@@ -635,6 +686,7 @@ class Interp {
         let allKonst = true;
         for (const el of (node.value as Node[]) ?? []) {
           const e = this.eval(el, c);
+          this.holds(e);
           if (typeof e.konst === "string") konsts.push(e.konst);
           else allKonst = false;
           v = join(v, { ...e, konst: undefined, konstList: undefined, ns: undefined, macro: undefined, path: undefined });
@@ -650,6 +702,7 @@ class Interp {
             const kv = this.eval(k, c);
             keys.push(...kv.lits);
             const vv = this.eval(val, c);
+            this.holds(vv);
             v = join(v, { ...vv, konst: undefined, konstList: undefined, ns: undefined, macro: undefined, path: undefined, fields: undefined });
           }
         }
@@ -688,8 +741,11 @@ class Interp {
       return { ...EMPTY, macro: name };
     }
     if (name === "random") this.flagNondet(n, "uses `random`");
+    // The clock and chance are values too: `set f = strftime_now` then `f()`.
+    if (NONDET_FNS.has(name)) return { ...EMPTY, fns: [name] };
     if (BUILTINS.has(name)) return EMPTY;
-    return refine(runtimeVal(rootField(name), name), name, c);
+    const v = refine(runtimeVal(rootField(name), name), name, c);
+    return name === "add_generation_prompt" ? { ...v, genFlag: true } : v;
   }
 
   private member(n: Node, c: Ctx): Val {
@@ -701,12 +757,12 @@ class Interp {
       if (prop?.type === "Identifier") key = String(prop.value);
     } else if (prop?.type === "SliceExpression") {
       // A slice keeps the container: `messages[1:]` is still the messages.
-      for (const part of [prop.start, prop.stop, prop.step]) if (part) keyGate = strongest(keyGate, this.eval(part, c).gate);
-      return { ...o, path: undefined, konst: undefined, konstList: undefined, gate: strongest(o.gate, keyGate) };
+      for (const part of [prop.start, prop.stop, prop.step]) if (part) keyGate = strongest(keyGate, this.selCond(this.eval(part, c), part as Node));
+      return { ...o, lits: this.choose(o.lits, keyGate), keys: o.keys && this.choose(o.keys, keyGate), path: undefined, konst: undefined, konstList: undefined, gate: strongest(o.gate, keyGate) };
     } else {
       const kv = this.eval(prop, c);
       if (typeof kv.konst === "string" || typeof kv.konst === "number") key = kv.konst;
-      keyGate = strongest(kv.gate, condOf(kv.data === "presence" ? "none" : kv.data, this.exprSpan(prop)));
+      keyGate = this.selCond(kv, prop);
     }
     if (o.ns !== undefined && typeof key === "string") {
       const v = c.st.get(`${o.ns}.${key}`);
@@ -716,7 +772,8 @@ class Interp {
     const fields = o.fields ? mapFields(o.fields, (f) => memberField(f, typeof key === "string" ? key : undefined)) : undefined;
     const path = o.path !== undefined && typeof key === "string" ? `${o.path}.${key}` : undefined;
     const v: Val = {
-      lits: o.lits,
+      // The key chooses which entry is printed: the entries depend on it.
+      lits: this.choose(o.lits, keyGate),
       data: fields ? clsOf(fields) : o.data,
       truth: fields ? "presence" : o.truth,
       gate: strongest(o.gate, keyGate),
@@ -766,37 +823,68 @@ class Interp {
             const keys: Lit[] = [];
             for (const a of args) {
               if (a?.type === "KeywordArgumentExpression") keys.push({ text: String((a.key as Node).value), span: this.exprSpan(a.key as Node) });
-              v = join(v, { ...this.eval(a, c), konst: undefined, fields: undefined, path: undefined });
+              const av = this.eval(a, c);
+              this.holds(av);
+              v = join(v, { ...av, konst: undefined, fields: undefined, path: undefined });
             }
             return { ...v, keys, truth: "none" };
           }
         }
       }
-      // Any other function (range, a runtime callable): its result carries the
-      // arguments' data, never their text.
+      // Any other function (range, zip, a runtime callable, a value called as
+      // one): its result carries the arguments' data, and may hold their text
+      // or the called value's, so it keeps those too.
       let data: TestClass = "none";
       let gate: Cond | undefined;
+      const lits: Lit[] = [...(bound?.lits ?? []), ...(bound?.keys ?? [])];
       for (const a of args) {
         const v = this.eval(a, c);
+        this.holds(v);
         data = stronger(data, v.data);
         gate = strongest(gate, v.gate);
+        lits.push(...v.lits, ...(v.keys ?? []));
       }
       if (name === "random") this.flagNondet(callee, "calls `random`");
-      const out: Val = { lits: [], data, truth: data, gate };
-      // A local that is not a known macro may hold one taken from a list or dict.
-      return bound ? join(out, this.callEscaped(args, c, bound.gate)) : out;
+      const out: Val = { lits, data, truth: data, gate };
+      // A local that is not a known macro may hold one taken from a list or
+      // dict, or the clock bound to it.
+      return bound ? join(join(out, this.callFns(bound.fns, n)), this.callEscaped(args, c, bound.gate)) : out;
     }
     if (callee?.type === "MemberExpression") {
       const r = this.eval(callee.object, c);
       const prop = callee.property as Node;
       const method = !callee.computed && prop?.type === "Identifier" ? String(prop.value) : prop?.type === "StringLiteral" ? String(prop.value) : "";
       const out = this.method(r, method, args, c, callee.object as Node);
-      // `d.k()` with no such string, list or dict method: an entry holding a macro.
-      return KNOWN_METHODS.has(method) ? out : join(out, this.callEscaped(args, c, r.gate));
+      if (KNOWN_METHODS.has(method)) return out;
+      // `d.k()` with no such string, list or dict method: an entry holding a
+      // macro or the clock.
+      const slot = r.ns !== undefined ? c.st.get(`${r.ns}.${method}`)?.fns : undefined;
+      return join(join(out, this.callFns([...(r.fns ?? []), ...(slot ?? [])], n)), this.callEscaped(args, c, r.gate));
     }
     const fv = this.eval(callee, c);
-    for (const a of args) this.eval(a, c);
-    return this.callEscaped(args, c, fv.gate);
+    for (const a of args) this.holds(this.eval(a, c));
+    return join(this.callFns(fv.fns, n), this.callEscaped(args, c, fv.gate));
+  }
+
+  // A call through a value that may be strftime_now or random, or one the
+  // walk lost track of after either went into a list, dict or function.
+  private callFns(fns: string[] | undefined, at: Node): Val {
+    let v: Val = EMPTY;
+    for (const f of new Set([...(fns ?? []), ...this.escapedFns])) {
+      if (f === "random") this.flagNondet(at, "calls `random`");
+      v = { lits: [], data: "nondeterministic", truth: "nondeterministic" };
+    }
+    return v;
+  }
+
+  // `v` goes where the walk does not follow a value it calls: a list or dict
+  // entry, or a function argument.
+  private holds(v: Val): void {
+    for (const f of v.fns ?? []) {
+      if (this.escapedFns.has(f)) continue;
+      this.escapedFns.add(f);
+      this.changed = true;
+    }
   }
 
   // A call the extraction cannot resolve runs every macro the template used as
@@ -821,13 +909,22 @@ class Interp {
       return { name: id?.type === "Identifier" ? String(id.value) : "", def: kw ? (p.value as Node) : undefined };
     });
     // The parameters are the macro's own layer; its `set` shadows them.
+    // Arguments past the formals reach the body as `varargs` and `kwargs`.
     const layer = new State(c.st);
+    let varargs: Val = { lits: [], data: "none", truth: "presence" };
+    let kwargs: Val = { lits: [], keys: [], data: "none", truth: "presence" };
     let pos = 0;
     for (const a of argNodes) {
-      if (a?.type === "KeywordArgumentExpression") layer.own.set(String((a.key as Node).value), this.eval(a.value, c));
-      else if (pos < formals.length) layer.own.set(formals[pos++]!.name, this.eval(a, c));
-      else this.eval(a, c);
+      if (a?.type === "KeywordArgumentExpression") {
+        const key = a.key as Node;
+        const v = this.eval(a.value, c);
+        layer.own.set(String(key.value), v);
+        if (!formals.some((f) => f.name === String(key.value))) kwargs = join(kwargs, { ...element(v), keys: [{ text: String(key.value), span: this.exprSpan(key) }] });
+      } else if (pos < formals.length) layer.own.set(formals[pos++]!.name, this.eval(a, c));
+      else varargs = join(varargs, element(this.eval(a, c)));
     }
+    if (!formals.some((f) => f.name === "varargs")) layer.own.set("varargs", varargs);
+    if (!formals.some((f) => f.name === "kwargs")) layer.own.set("kwargs", kwargs);
     for (const f of formals) if (!layer.own.has(f.name)) layer.own.set(f.name, f.def ? this.eval(f.def, c) : EMPTY);
     // The body runs under the call site's conditions: its text inherits them.
     const inner: Ctx = { cond: c.cond, emitCond: c.emitCond, facts: NO_FACTS, st: layer, scope: { macro: name, caller }, gen: c.gen, genElse: c.genElse, stack: [...c.stack, name] };
@@ -877,7 +974,7 @@ class Interp {
         // Case and whitespace changes keep the text and its emptiness.
         return { ...base, lits: r.lits, data: r.data, truth: r.truth, konst: typeof r.konst === "string" ? caseMap(r.konst, m) : undefined };
       case "replace":
-        return { ...base, lits: [...r.lits, ...(a[1]?.lits ?? [])], data: r.data, truth: r.data };
+        return { ...base, ...this.replaced(r, a, argNodes, receiver) };
       case "format":
         return { ...base, lits: [...r.lits, ...a.flatMap((x) => [...x.lits, ...(x.keys ?? [])])], data: maxData(r, a), truth: maxData(r, a) };
       case "join": {
@@ -895,7 +992,9 @@ class Interp {
       case "get": {
         const k = a[0]?.konst;
         const fields = r.fields ? mapFields(r.fields, (f) => memberField(f, typeof k === "string" ? k : undefined)) : undefined;
-        return { ...base, lits: [...r.lits, ...(a[1]?.lits ?? [])], data: fields ? clsOf(fields) : r.data, truth: fields ? "presence" : r.truth, fields };
+        // The key chooses an entry or the default: both depend on it.
+        const sel = argNodes[0] ? this.selCond(a[0]!, argNodes[0]) : undefined;
+        return { ...base, lits: this.choose([...r.lits, ...(a[1]?.lits ?? [])], sel), data: fields ? clsOf(fields) : r.data, truth: fields ? "presence" : r.truth, fields };
       }
       case "items":
       case "keys":
@@ -909,6 +1008,7 @@ class Interp {
       case "update":
       case "add": {
         // A mutating method: the receiver now holds the argument too.
+        for (const x of a) this.holds(x);
         const v = { ...(a[a.length - 1] ?? EMPTY), konst: undefined, konstList: undefined, ns: undefined, macro: undefined, path: undefined };
         const k = receiver?.type === "Identifier" ? String(receiver.value) : receiver?.type === "MemberExpression" ? this.slot(receiver, c) : undefined;
         if (k !== undefined) this.assign(k, v, c, c.st.get(k), true);
@@ -918,8 +1018,15 @@ class Interp {
         return { ...base, lits: r.lits, data: r.data, truth: r.truth };
       default:
         // startswith, endswith, find, count, isdigit and the rest compute from
-        // the receiver's text: they reveal it.
-        return { ...base, lits: [], data: maxData(r, a), truth: maxData(r, a) };
+        // the receiver's text: they reveal it and print none of it.
+        if (TEXTLESS_METHODS.has(m)) return { ...base, lits: [], data: maxData(r, a), truth: maxData(r, a) };
+        // Any other method (ljust, zfill, removeprefix, encode, format_map,
+        // loop.cycle, or one this list does not know) may return the
+        // receiver's text or its arguments', so it keeps them all: extracting
+        // too much costs a MEDIUM, dropping text would pass it silently. A
+        // name that is no Python method calls a dict entry, which never
+        // returns the dict's keys.
+        return { ...base, lits: [...r.lits, ...(KNOWN_METHODS.has(m) ? (r.keys ?? []) : []), ...a.flatMap((x) => [...x.lits, ...(x.keys ?? [])])], data: maxData(r, a), truth: maxData(r, a) };
     }
   }
 
@@ -941,7 +1048,7 @@ class Interp {
         return { ...keep, lits: this.folded(lits, konst, fnode), konst };
       }
       case "replace":
-        return { ...keep, lits: [...o.lits, ...(a[1]?.lits ?? [])], truth: o.data };
+        return { ...keep, ...this.replaced(o, a, argNodes, fnode) };
       case "format":
         return { ...keep, lits: [...o.lits, ...a.flatMap((x) => x.lits)], data: maxData(o, a), truth: maxData(o, a) };
       case "upper":
@@ -964,10 +1071,12 @@ class Interp {
       case "indent":
       case "center":
       case "wordwrap":
-      case "truncate":
       case "striptags":
       case "urlencode":
         return keep;
+      case "truncate":
+        // How much survives depends on the length argument.
+        return { ...keep, lits: this.choose(o.lits, this.argsCond(a, argNodes)) };
       case "list":
       case "reverse":
       case "sort":
@@ -983,7 +1092,8 @@ class Interp {
       case "min":
       case "max": {
         const fields = o.fields ? mapFields(o.fields, elementField) : undefined;
-        return { ...keep, data: fields ? clsOf(fields) : o.data, truth: fields ? "presence" : o.truth, fields };
+        // `min(attribute=x)`: the attribute chooses the element.
+        return { ...keep, lits: this.choose(o.lits, this.argsCond(a, argNodes)), data: fields ? clsOf(fields) : o.data, truth: fields ? "presence" : o.truth, fields };
       }
       case "length":
       case "count":
@@ -1002,7 +1112,8 @@ class Interp {
           const fs = mapFields(efs, (f) => memberField(f, attr));
           return { ...keep, data: clsOf(fs), fields: mapFields(fs, listOf) };
         }
-        return keep;
+        // An attribute name computed at runtime chooses which entries are printed.
+        return { ...keep, lits: this.choose(o.lits, this.argsCond(a, argNodes)) };
       }
       case "selectattr":
       case "rejectattr":
@@ -1011,19 +1122,23 @@ class Interp {
         // Which elements survive depends on the test applied to each one.
         const efs = o.fields ? mapFields(o.fields, elementField) : undefined;
         let read: TestClass;
-        let testArg: Val | undefined;
+        let testAt: number;
         if (name === "selectattr" || name === "rejectattr") {
           const attr = typeof a[0]?.konst === "string" ? a[0].konst : undefined;
           const fs = efs ? mapFields(efs, (f) => memberField(f, attr)) : undefined;
           read = fs ? clsOf(fs) : o.data;
-          testArg = a[1];
+          testAt = 1;
         } else {
           read = efs ? clsOf(efs) : o.data;
-          testArg = a[0];
+          testAt = 0;
         }
+        const testArg = a[testAt];
         const test = typeof testArg?.konst === "string" ? testArg.konst : "";
-        const sel: TestClass = test === "" || SHAPE_SELECT_TESTS.has(test) ? (read === "none" ? "none" : "presence") : read;
-        return { ...keep, keys: o.keys, fields: o.fields, truth: stronger(o.truth, sel) };
+        let sel: TestClass = test === "" || SHAPE_SELECT_TESTS.has(test) ? (read === "none" ? "none" : "presence") : read;
+        // What the elements are compared with (`select('in', x)`) decides too.
+        for (const x of a.slice(testAt + 1)) sel = stronger(sel, x.data);
+        const cond = strongest(this.argsCond(a, argNodes), condOf(sel === "presence" ? "none" : sel, this.exprSpan(fnode)));
+        return { ...keep, lits: this.choose(o.lits, cond), keys: o.keys && this.choose(o.keys, cond), fields: o.fields, truth: stronger(o.truth, sel) };
       }
       case "random": {
         this.flagNondet(fnode, "uses the `random` filter");
@@ -1059,10 +1174,50 @@ class Interp {
       if (o === "~" && l.konst !== undefined && r.konst !== undefined) konst = konstText(l.konst) + konstText(r.konst);
       else if (o === "+" && typeof l.konst === "string" && typeof r.konst === "string") konst = l.konst + r.konst;
       konst = this.fold(konst);
-      const lits = [...l.lits, ...r.lits];
+      // A runtime operand with no text of its own separates the others'.
+      const gap: Lit[] = (isRuntime(l) && !l.lits.length) || (isRuntime(r) && !r.lits.length) ? [{ text: "", span: this.exprSpan(n), brk: true }] : [];
+      const lits = [...l.lits, ...gap, ...r.lits];
       return { lits: this.folded(lits, konst, n), keys: concatKeys(l, r), data, truth: stronger(l.truth, r.truth), gate, konst };
     }
+    if (o === "*") {
+      // `'text' * n`: the count decides whether the text is printed at all.
+      const lits = [...this.choose(l.lits, this.selCond(r, n.right as Node)), ...this.choose(r.lits, this.selCond(l, n.left as Node))];
+      return { lits, data, truth: stronger(l.truth, r.truth), gate };
+    }
     return { lits: [...l.lits, ...r.lits], data, truth: stronger(l.truth, r.truth), gate };
+  }
+
+  // A value used to choose text (a subscript key, a slice bound, a `.get`
+  // key, a repeat count): the test that choice amounts to, its own gate or the
+  // class of what it reads. Data known only by its shape chooses nothing that
+  // matters. A choice by the clock is a nondeterministic trigger (ISC-18.1).
+  private selCond(v: Val, at: Node): Cond | undefined {
+    if (v.data === "nondeterministic") this.flagNondet(at, "the clock or chance chooses template text");
+    return strongest(v.gate, condOf(v.data === "presence" ? "none" : v.data, this.exprSpan(at)));
+  }
+
+  // The strongest choice among a filter's or method's arguments.
+  private argsCond(a: Val[], nodes: Node[]): Cond | undefined {
+    let cond: Cond | undefined;
+    a.forEach((x, i) => {
+      if (typeof x.konst !== "string" && nodes[i]) cond = strongest(cond, this.selCond(x, nodes[i]!));
+    });
+    return cond;
+  }
+
+  // Literals a choice decides: each takes its test, with a new provenance.
+  private choose(lits: Lit[], cond: Cond | undefined): Lit[] {
+    if (!cond) return lits;
+    return lits.map((l) => ({ ...l, cond: strongest(l.cond, cond), via: ++this.vias }));
+  }
+
+  // `s.replace(old, new)` and `s|replace(old, new)`: `new` is printed only
+  // where `s` holds `old`, so it depends on what `s` is; text of `s`
+  // survives only where `old` does not match it.
+  private replaced(s: Val, a: Val[], argNodes: Node[], at: Node): Pick<Val, "lits" | "data" | "truth"> {
+    const old = argNodes[0] ? this.selCond(a[0]!, argNodes[0]) : undefined;
+    const into = strongest(old, condOf(s.data === "presence" ? "none" : s.data, this.exprSpan(at)));
+    return { lits: [...this.choose(s.lits, old), ...this.choose(a[1]?.lits ?? [], into)], data: s.data, truth: s.data };
   }
 
   // Replace the literals a constant was folded from with one literal for the
@@ -1079,7 +1234,7 @@ class Interp {
     if (konst === undefined || lits.length === 0) return lits;
     let cond: Cond | undefined;
     for (const l of lits) cond = strongest(cond, l.cond);
-    return [{ text: konst, span: this.exprSpan(at), cond }];
+    return [{ text: konst, span: this.exprSpan(at), cond, folded: true }];
   }
 
   // ---- tests ----
@@ -1138,10 +1293,18 @@ class Interp {
 // ---- values ----
 
 const BUILTINS = new Set(["namespace", "dict", "range", "strftime_now", "raise_exception", "cycler", "joiner", "lipsum", "caller", "zip", "enumerate"]);
+// The functions whose result is the clock or chance.
+const NONDET_FNS = new Set(["strftime_now", "random"]);
 const SHAPE_SELECT_TESTS = new Set(["defined", "undefined", "none", "string", "mapping", "iterable", "sequence", "number", "integer", "float", "boolean", "true", "false"]);
 
 function runtimeVal(field: Field, path: string | undefined): Val {
   return { lits: [], data: field.cls, truth: "presence", fields: [field], path };
+}
+
+// `v` as one element of a list or dict the template builds: its text and
+// classes, none of its identity as a constant, namespace or macro.
+function element(v: Val): Val {
+  return { ...v, konst: undefined, konstList: undefined, ns: undefined, nsInit: undefined, path: undefined };
 }
 
 function boolVal(cls: TestClass): Val {
@@ -1156,11 +1319,18 @@ function refine(v: Val, path: string | undefined, c: Ctx): Val {
   return { ...v, path, shape };
 }
 
-/** Where two branches meet: each variable either branch set takes the join of both branches' values. */
 // `c` with one more test on everything it does and prints.
 function gated(c: Ctx, gate: Cond | undefined): Ctx {
   return gate ? { ...c, cond: strongest(c.cond, gate), emitCond: strongest(c.emitCond, gate) } : c;
 }
+
+// Methods whose result holds none of the receiver's or the arguments' text: a
+// truth value, a position or a count, or None from an in-place change.
+const TEXTLESS_METHODS = new Set([
+  "startswith", "endswith", "find", "rfind", "index", "rindex", "count", "isalnum", "isalpha", "isascii", "isdecimal",
+  "isdigit", "isidentifier", "islower", "isnumeric", "isprintable", "isspace", "istitle", "isupper", "clear", "remove",
+  "sort", "reverse",
+]);
 
 // Python's string, list and dict methods: a call to one of these names is never
 // a call to a macro stored under that key.
@@ -1172,18 +1342,6 @@ const KNOWN_METHODS = new Set([
   "title", "translate", "upper", "zfill", "append", "clear", "copy", "extend", "insert", "pop", "remove", "reverse", "sort",
   "get", "items", "keys", "values", "update", "setdefault", "popitem", "fromkeys", "add",
 ]);
-
-function joinLayers(into: State, a: State, b: State): number {
-  let copied = 0;
-  for (const k of new Set([...a.own.keys(), ...b.own.keys()])) {
-    const va = a.get(k);
-    const vb = b.get(k);
-    const v = va && vb && va !== vb ? join(va, vb) : (va ?? vb);
-    if (v) into.own.set(k, v);
-    copied += v?.lits.length ?? 0;
-  }
-  return copied;
-}
 
 function printKey(l: Lit): string {
   return `${litKey(l)}:${l.via ?? ""}`;
@@ -1305,6 +1463,8 @@ function join(a: Val, b: Val): Val {
     konstList: a.konstList && b.konstList && a.konstList.join("\u0000") === b.konstList.join("\u0000") ? a.konstList : undefined,
     ns: a.ns === b.ns ? a.ns : undefined,
     macro: a.macro === b.macro ? a.macro : undefined,
+    fns: a.fns || b.fns ? [...new Set([...(a.fns ?? []), ...(b.fns ?? [])])].sort() : undefined,
+    genFlag: a.genFlag && b.genFlag ? true : undefined,
     pairs: a.pairs && b.pairs ? true : undefined,
     nsInit: a.nsInit ?? b.nsInit,
   };
@@ -1314,6 +1474,7 @@ function sameVal(a: Val, b: Val): boolean {
   if (a.lits.length !== b.lits.length || (a.keys?.length ?? 0) !== (b.keys?.length ?? 0)) return false;
   if (a.data !== b.data || a.truth !== b.truth || a.gate?.test !== b.gate?.test) return false;
   if (!sameFields(a.fields, b.fields) || a.konst !== b.konst || a.ns !== b.ns || a.macro !== b.macro || a.pairs !== b.pairs) return false;
+  if (String(a.fns) !== String(b.fns) || a.genFlag !== b.genFlag) return false;
   if ((a.konstList === undefined) !== (b.konstList === undefined)) return false;
   for (let i = 0; i < a.lits.length; i++) if (a.lits[i]!.cond?.test !== b.lits[i]!.cond?.test) return false;
   return true;
@@ -1500,10 +1661,15 @@ interface TrieNode {
   bare?: boolean;
 }
 
-/** The residue of a literal: the non-scaffolding runs that hold a letter or digit, and where the last scaffolding match ended. */
+// An assistant role in a header: `assistant`, `<|assistant|>`, Gemma's
+// `model`, ShareGPT's `gpt`, `bot`.
+const ASSISTANT_ROLE = /(?:^|[^\p{L}\p{N}])(?:assistant|model|gpt|bot)(?:$|[^\p{L}\p{N}])/iu;
+
+/** The residue of a literal: the non-scaffolding runs that hold a letter or digit, where the first scaffolding match ends, and where the last one naming the assistant ends (-1 for none). */
 export interface Residue {
   frags: [number, number][];
-  lastPieceEnd: number;
+  firstPieceEnd: number;
+  assistantEnd: number;
 }
 
 // Word characters for the boundary rule, by UTF-16 unit. A surrogate half is
@@ -1555,7 +1721,8 @@ export class Scaffold {
     const hit = this.cache.get(text);
     if (hit) return hit;
     const frags: [number, number][] = [];
-    let lastPieceEnd = -1;
+    let firstPieceEnd = -1;
+    let assistantEnd = -1;
     let segStart = 0;
     let i = 0;
     const n = text.length;
@@ -1580,13 +1747,14 @@ export class Scaffold {
       }
       if (matchEnd > i) {
         pushFrag(text, segStart, i, frags);
-        lastPieceEnd = matchEnd;
+        if (firstPieceEnd < 0) firstPieceEnd = matchEnd;
+        if (ASSISTANT_ROLE.test(text.slice(i, matchEnd))) assistantEnd = matchEnd;
         i = matchEnd;
         segStart = i;
       } else i++;
     }
     pushFrag(text, segStart, n, frags);
-    const r = { frags, lastPieceEnd };
+    const r = { frags, firstPieceEnd, assistantEnd };
     if (this.cache.size < 100_000) this.cache.set(text, r);
     return r;
   }
@@ -1613,11 +1781,97 @@ function pushFrag(text: string, s: number, e: number, out: [number, number][]): 
 // ---- items ----
 
 /**
- * Turn the ordered output literals into injected-text items. The generation-
- * prompt marker is the first literal emitted in an `add_generation_prompt`
- * branch: residue after its last scaffolding match, and every literal emitted
- * after it in program order, is prefilled assistant text (ISC-17.2). The
- * branch's `else` is exclusive with it and is never after it.
+ * The URLs and blobs only the printed text as a whole holds (ISC-19, ISC-20).
+ * Literals printed one after another with no runtime text between them are one
+ * text: `evil{{ '' }}.com`, `{{ 'evil' }}.com`, `http{{ ':' }}//`. A URL is
+ * kept when it crosses a literal boundary, since one inside a literal is the
+ * item scan's; a blob also when it lies in a folded literal (`'a' ~ 'b'`),
+ * which the template-literal scan never sees. Either must touch injected text,
+ * so joined scaffolding raises nothing.
+ */
+export function joinedText(lits: Lit[], matcher: Scaffold): { urls: InjectedText[]; blobs: InjectedText[]; complete: boolean } {
+  const urls: InjectedText[] = [];
+  const blobs: InjectedText[] = [];
+  let budget = JOIN_BUDGET;
+  let complete = true;
+  let run: Lit[] = [];
+  let runChars = 0;
+  const scan = (): void => {
+    if (run.length === 0 || (run.length === 1 && !run[0]!.folded)) return;
+    if ((budget -= runChars) < 0) {
+      complete = false;
+      return;
+    }
+    const offs: number[] = [];
+    let text = "";
+    for (const l of run) {
+      offs.push(text.length);
+      text += l.text;
+    }
+    const at = (p: number): number => {
+      let lo = 0;
+      let hi = offs.length - 1;
+      while (lo < hi) {
+        const mid = (lo + hi + 1) >> 1;
+        if (offs[mid]! <= p) lo = mid;
+        else hi = mid - 1;
+      }
+      return lo;
+    };
+    // The literals a match covers, when it touches residue in one of them.
+    const covered = (s: number, e: number): [number, number] | undefined => {
+      const i = at(s);
+      const j = at(e - 1);
+      for (let k = i; k <= j; k++) {
+        const o = offs[k]!;
+        if (matcher.residue(run[k]!.text).frags.some(([fs, fe]) => fs + o < e && fe + o > s)) return [i, j];
+      }
+      return undefined;
+    };
+    const item = (s: number, e: number, [i, j]: [number, number]): InjectedText => {
+      let first = run[i]!.span;
+      let end = first.end;
+      for (let k = i; k <= j; k++) {
+        const sp = run[k]!.span;
+        if (sp.start < first.start) first = sp;
+        end = Math.max(end, sp.end);
+      }
+      return { text: text.slice(s, e), span: { ...first, end }, afterGenerationPrompt: false };
+    };
+    scanUrls(text, 0, text.length, (s, e) => {
+      const c = covered(s, e);
+      if (c && c[0] !== c[1]) urls.push(item(s, e, c));
+    });
+    scanBlobs(text, 0, text.length, (s, e) => {
+      const c = covered(s, e);
+      if (c && (c[0] !== c[1] || run[c[0]]!.folded)) blobs.push(item(s, e, c));
+    });
+  };
+  for (const l of lits) {
+    if (l.brk) {
+      scan();
+      run = [];
+      runChars = 0;
+    } else {
+      run.push(l);
+      runChars += l.text.length;
+    }
+  }
+  scan();
+  return { urls, blobs, complete };
+}
+
+/**
+ * Turn the ordered output literals into injected-text items. Residue after an
+ * assistant header the prompt ends in is prefilled assistant text (ISC-17.2):
+ * - The generation prompt's header is the first literal emitted in an
+ *   `add_generation_prompt` branch. Residue after its first scaffolding match
+ *   (a scripted `<think>` inside the header literal), and every literal
+ *   emitted after it in program order, is prefill. A header literal with no
+ *   scaffolding is all header (`### Response:`). The branch's `else` is
+ *   exclusive with it and is never after it.
+ * - An assistant header left open: the last one in program order, when no
+ *   token after it ends the turn or starts another, whatever test gates it.
  */
 export function toItems(lits: Lit[], matcher: Scaffold): InjectedText[] {
   const items = new Map<string, InjectedText>();
@@ -1640,20 +1894,57 @@ export function toItems(lits: Lit[], matcher: Scaffold): InjectedText[] {
     if (!routed) direct.add(key);
     items.set(key, { text, span: l.span, condition: cond ? { span: cond.span, test: cond.test } : undefined, afterGenerationPrompt: afterGen });
   };
-  for (const l of lits) {
-    const r = matcher.residue(l.text);
+  const res = lits.map((l) => matcher.residue(l.text));
+  const open = openHeader(lits, res);
+  const openGen = open && lits[open.index]!.gen;
+  for (let i = 0; i < lits.length; i++) {
+    const l = lits[i]!;
+    const r = res[i]!;
     if (l.genElse !== undefined && seen.has(l.genElse)) {
       add(l, r.frags, false);
-    } else if (l.gen !== undefined && !seen.has(l.gen)) {
-      seen.add(l.gen);
-      const cut = r.lastPieceEnd >= 0 ? r.lastPieceEnd : l.text.length;
-      add(l, r.frags.filter((f) => f[0] < cut), after);
-      add(l, r.frags.filter((f) => f[0] >= cut), true);
-      after = true;
-    } else {
-      add(l, r.frags, after);
+      continue;
     }
+    // Residue from `cut` on is prefill.
+    let cut = after ? 0 : Infinity;
+    if (l.gen !== undefined && !seen.has(l.gen) && WORDISH.test(l.text)) {
+      seen.add(l.gen);
+      cut = Math.min(cut, r.firstPieceEnd >= 0 ? r.firstPieceEnd : l.text.length);
+      after = true;
+    }
+    if (open && i === open.index) cut = Math.min(cut, open.at);
+    else if (open && i > open.index && (openGen === undefined || l.genElse !== openGen)) cut = 0;
+    add(l, r.frags.filter((f) => f[0] < cut), false);
+    add(l, r.frags.filter((f) => f[0] >= cut), true);
   }
   return [...items.values()];
+}
+
+// A token-shaped string, and the names that end a turn or start another
+// (`<|im_end|>`, `<end_of_turn>`, `<|eot_id|>`, `<turn|>`, `<|im_start|>`,
+// `<|start_header_id|>`, `<|user|>`). `<|end_header_id|>` and
+// `<|end_of_role|>` close a role name, not a turn.
+const TOKEN = /<\/s>|<[^<>\s]{1,48}>/gu;
+const TURN_EDGE = /end|eot|eos|eom|return|start|turn|user|system|human|observation/i;
+
+function closesTurn(text: string): boolean {
+  for (const m of text.matchAll(TOKEN)) {
+    const t = m[0];
+    if (t === "</s>") return true;
+    if (/header|role/i.test(t) && !/start/i.test(t)) continue;
+    if (TURN_EDGE.test(t)) return true;
+  }
+  return false;
+}
+
+// The last assistant header in program order, and where it ends, unless a
+// token after it closes the turn.
+function openHeader(lits: Lit[], res: Residue[]): { index: number; at: number } | undefined {
+  for (let i = lits.length - 1; i >= 0; i--) {
+    const text = lits[i]!.text;
+    const at = res[i]!.assistantEnd;
+    if (at >= 0) return closesTurn(text.slice(at)) ? undefined : { index: i, at };
+    if (closesTurn(text)) return undefined;
+  }
+  return undefined;
 }
 

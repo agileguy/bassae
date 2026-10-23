@@ -8,11 +8,16 @@
 // namespace, because a pinned upstream is always org/name.
 const REPO_PART = /^[A-Za-z0-9_](?:[A-Za-z0-9_.-]{0,94}[A-Za-z0-9_])?$/;
 const REVISION = /^[0-9a-f]{40}$/;
+// First path segments that are hub pages, not model namespaces.
+const NOT_MODELS = new Set(["datasets", "spaces", "api", "docs", "blog", "papers", "collections", "models", "organizations", "settings", "login", "join", "tasks", "learn"]);
 
-/** Why `repo` is not an org/name hub id, or undefined when it is one. */
+/** Why `repo` is not an org/name model id, or undefined when it is one. */
 export function repoIdProblem(repo: string): string | undefined {
   const parts = repo.split("/");
   if (parts.length !== 2) return "must be org/name, with exactly one slash";
+  // huggingface.co/datasets/x/resolve/... serves dataset x, and spaces/x a Space, as readily as a model:
+  // anyone's dataset would pass for an upstream model. No model namespace can be one of the hub's own paths.
+  if (NOT_MODELS.has(parts[0]!.toLowerCase())) return `${parts[0]} is a hub path, not a model namespace; datasets and Spaces are not model repos`;
   if (!parts.every((p) => REPO_PART.test(p))) return "each part must be 1 to 96 of A-Z a-z 0-9 _ . -, starting and ending on a letter, digit or _";
   if (repo.includes("--") || repo.includes("..")) return "cannot contain -- or ..";
   if (repo.endsWith(".git")) return "cannot end in .git";
@@ -30,8 +35,6 @@ export function normalizeRevision(revision: string): string | undefined {
 }
 
 const HUB_HOSTS = new Set(["huggingface.co", "www.huggingface.co", "hf.co"]);
-// First path segments that are hub pages, not model namespaces.
-const NOT_MODELS = new Set(["datasets", "spaces", "api", "docs", "blog", "papers", "collections", "models", "organizations", "settings", "login", "join", "tasks", "learn"]);
 
 /** The model repo id a huggingface.co URL points at, e.g. https://huggingface.co/Qwen/Qwen3-8B/tree/main gives Qwen/Qwen3-8B. Datasets, spaces and other pages give undefined. */
 export function repoFromHubUrl(value: string): string | undefined {

@@ -12,7 +12,7 @@
 
 import { relative, sep } from "node:path";
 import { hfCacheLocations, parseHfCachePath } from "../hf/cache.ts";
-import type { Baseline, ExtractedTemplate, HfCacheLocation, KnownGoodTemplate, ModelRecord, Registry } from "../types.ts";
+import type { Baseline, ExtractedTemplate, HfCacheLocation, KnownGoodTemplate, ModelRecord, Registry, RegistryMatch } from "../types.ts";
 import { isRepoId, repoFromHubUrl } from "./hub.ts";
 
 export interface CandidateHint {
@@ -58,9 +58,11 @@ export function upstreamCandidates(model: ModelRecord): string[] {
  * In order: the registry entry the template matches; else a registry entry pinned to the repo the model sits
  * in inside a Hugging Face cache, with the same template name; else a supplied upstream baseline with the
  * same template name; else `none`. The repo comes only from the cache path, never from general.* hints.
+ *
+ * `match` is the caller's own registry.match(template), the one that decided knownGood for the rules, so
+ * the rules and the baseline can never be told two different things about the same template.
  */
-export function selectBaseline(template: ExtractedTemplate, model: ModelRecord, registry: Registry, upstream: readonly Baseline[] = []): Baseline {
-  const match = registry.match(template);
+export function selectBaseline(template: ExtractedTemplate, model: ModelRecord, match: RegistryMatch, registry: Registry, upstream: readonly Baseline[] = []): Baseline {
   if (match.kind !== "none") return { kind: "registry", known: match.known };
 
   const path = pathInRepo(template, model);
