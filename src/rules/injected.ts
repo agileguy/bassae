@@ -43,6 +43,7 @@ import {
   countedIn,
   countPick,
   countsOf,
+  countTest,
   eitherRest,
   elementField,
   factsFrom,
@@ -799,26 +800,45 @@ class Interp {
     const prop = n.property as Node;
     let key: string | number | undefined;
     let keyGate: Cond | undefined;
+    let counted: Cond | undefined;
     if (!n.computed) {
       if (prop?.type === "Identifier") key = String(prop.value);
     } else if (prop?.type === "SliceExpression") {
+      const parts = [prop.start, prop.stop, prop.step] as (Node | undefined)[];
+      const vals = parts.map((p) => (p ? this.eval(p, c) : undefined));
+      if (vals.every((v) => v === undefined || Number.isInteger(v.konst))) {
+        const [start, stop, step] = vals.map((v) => v?.konst as number | undefined);
+        const cut = this.sliced(o, start, stop, step, vals, n);
+        if (cut) return cut;
+      }
       // A slice keeps the container: `messages[1:]` is still the messages.
-      for (const part of [prop.start, prop.stop, prop.step]) if (part) keyGate = strongest(keyGate, this.selCond(this.eval(part, c), part as Node));
+      parts.forEach((part, i) => {
+        if (part) keyGate = strongest(keyGate, strongest(this.selCond(vals[i]!, part), this.positionCond(o, vals[i]!, part, c, i === 2 ? "step" : "bound")));
+      });
       return { ...o, lits: this.choose(o.lits, keyGate), keys: o.keys && this.choose(o.keys, keyGate), path: undefined, konst: undefined, konstList: undefined, gate: strongest(o.gate, keyGate) };
     } else {
       const kv = this.eval(prop, c);
       if (typeof kv.konst === "string" || typeof kv.konst === "number") key = kv.konst;
+      const items = Number.isInteger(kv.konst) ? (typeof o.konst === "string" ? Array.from(o.konst) : o.konstList) : undefined;
+      if (items) {
+        const i = kv.konst as number;
+        // Past either end the subscript is undefined, which prints nothing.
+        const cut = this.cut(o, items[i < 0 ? i + items.length : i] ?? "", [kv], n);
+        if (cut) return cut;
+      }
+      counted = this.positionCond(o, kv, prop, c, "index");
       keyGate = this.selCond(kv, prop);
       // A role looking up a dict of constant keys is compared with each key (review round 2, ruling c).
       const kd = keyed(kv, o);
       if (kd !== kv) keyGate = this.selCond(kd, prop);
     }
+    keyGate = strongest(keyGate, counted);
     if (o.ns !== undefined && typeof key === "string") {
       const v = c.st.get(`${o.ns}.${key}`);
       return v ? refine(v, pathOf(n), c) : EMPTY;
     }
     if (o.macro !== undefined) return EMPTY;
-    const fields = o.fields ? mapFields(o.fields, (f) => memberField(f, typeof key === "string" ? key : undefined)) : undefined;
+    const fields = o.fields ? mapFields(o.fields, (f) => (typeof key === "number" ? positionField(f, key, memberField(f, undefined)) : memberField(f, key))) : undefined;
     const path = o.path !== undefined && typeof key === "string" ? `${o.path}.${key}` : undefined;
     const v: Val = {
       // The key chooses which entry is printed: the entries depend on it.
@@ -1172,13 +1192,26 @@ class Interp {
       case "truncate":
         // How much survives depends on the length argument.
         return { ...keep, lits: this.choose(o.lits, this.argsCond(a, argNodes)) };
+      case "batch": {
+        // `batch(n)` divides the count by n: its length is a threshold on the
+        // conversation's unless n is ±1 (ISC-18).
+        const s = seqOf(o);
+        const cond = argNodes[0] ? this.choiceCond(positionTest(o, a[0]!, "step"), argNodes[0]) : undefined;
+        return { ...keep, lits: this.choose(s.lits, cond), keys: s.keys && this.choose(s.keys, cond), gate: strongest(gate, cond), fields: o.fields, rest: o.rest };
+      }
       case "list":
       case "reverse":
       case "sort":
       case "unique":
-      case "batch":
-      case "slice":
-        return { ...keep, keys: o.keys, fields: o.fields, rest: o.rest, konstList: name === "list" ? o.konstList : undefined };
+      case "slice": {
+        // The elements, in another order or fewer of them: `.items()` pairs
+        // stay pairs, except sliced into lists of them. What `sort` and
+        // `unique` compare decides where template text lands and whether it
+        // survives; a loop over them still runs once per element.
+        const s = seqOf(o);
+        const [cls, by] = name === "sort" || name === "unique" ? this.orderCond(o, argNodes, fnode) : ["none" as TestClass, undefined];
+        return { ...keep, lits: this.choose(s.lits, by), keys: s.keys && this.choose(s.keys, by), truth: name === "unique" ? stronger(o.truth, cls) : o.truth, fields: o.fields, rest: o.rest, pairs: name === "slice" ? undefined : o.pairs, konstList: name === "list" ? o.konstList : undefined };
+      }
       case "items":
       case "dictsort":
         return { ...keep, keys: o.keys, fields: o.fields, rest: o.rest, pairs: true };
@@ -1186,9 +1219,13 @@ class Interp {
       case "last":
       case "min":
       case "max": {
-        const fields = o.fields ? mapFields(o.fields, elementField) : undefined;
-        // `min(attribute=x)`: the attribute chooses the element.
-        return { ...keep, lits: this.choose(o.lits, this.argsCond(a, argNodes)), data: fields ? clsOf(fields) : o.data, truth: fields ? presenceOf(fields) : o.truth, fields, rest: o.rest };
+        const e = elemOf(o);
+        // A pair's first is its key and its last its value.
+        const end = name === "first" ? 0 : name === "last" ? -1 : undefined;
+        const fields = o.fields && !o.pairs && end !== undefined ? mapFields(o.fields, (f) => positionField(f, end, elementField(f))) : e.fields;
+        // What `min` and `max` compare chooses the element.
+        const by = end === undefined ? this.orderCond(o, argNodes, fnode)[1] : undefined;
+        return { ...keep, lits: this.choose(e.lits, strongest(this.argsCond(a, argNodes), by)), data: fields ? clsOf(fields) : e.data, truth: fields ? presenceOf(fields) : e.truth, gate: strongest(gate, by), fields, rest: e.rest };
       }
       case "length":
       case "count":
@@ -1207,10 +1244,10 @@ class Interp {
         const efs = o.fields ? mapFields(o.fields, elementField) : undefined;
         if (attr !== undefined && efs) {
           const fs = mapFields(efs, (f) => memberPath(f, attr));
-          return { ...keep, data: clsOf(fs), fields: mapFields(fs, listOf), rest: o.rest };
+          return { ...keep, lits: seqOf(o).lits, data: clsOf(fs), fields: mapFields(fs, listOf), rest: o.rest };
         }
         // An attribute name computed at runtime chooses which entries are printed.
-        return { ...keep, lits: this.choose(o.lits, this.argsCond(a, argNodes)) };
+        return { ...keep, lits: this.choose(seqOf(o).lits, this.argsCond(a, argNodes)) };
       }
       case "selectattr":
       case "rejectattr":
@@ -1304,6 +1341,53 @@ class Interp {
   private selCond(v: Val, at: Node): Cond | undefined {
     if (v.data === "nondeterministic") this.flagNondet(at, "the clock or chance chooses template text");
     return strongest(v.gate, condOf(v.data === "presence" ? "none" : v.data, this.exprSpan(at)));
+  }
+
+  // The count test a subscript, slice bound or step `kv` (written `at`) on
+  // `o` makes (ISC-18). A count reaches the key through a filter that keeps
+  // the number (`d[messages|length|string]`).
+  private positionCond(o: Val, kv: Val, at: Node, c: Ctx, role: KeyRole): Cond | undefined {
+    const inner = numberKept(at);
+    return this.choiceCond(positionTest(o, inner === at ? kv : this.eval(inner, c), role), at);
+  }
+
+  // A slice with constant bounds the template can work out: of a constant
+  // string or list, or one that is empty at any length (`x[:0]`, `x[5:2]`).
+  private sliced(o: Val, start: number | undefined, stop: number | undefined, step: number | undefined, keys: (Val | undefined)[], at: Node): Val | undefined {
+    const text = typeof o.konst === "string" ? Array.from(o.konst) : undefined;
+    const items = text ?? o.konstList;
+    if (items) {
+      const picked = slicePositions(items.length, start, stop, step)?.map((i) => items[i]!);
+      if (!picked) return undefined;
+      return text ? this.cut(o, picked.join(""), keys, at) : { ...o, konstList: picked, path: undefined };
+    }
+    return emptySlice(start, stop, step) ? this.cut(o, "", keys, at) : undefined;
+  }
+
+  // Known text cut from `o` by constant keys: no text at all when it is empty,
+  // so the literals either side of it join up (ISC-22).
+  private cut(o: Val, s: string, keys: (Val | undefined)[], at: Node): Val | undefined {
+    let gate: Cond | undefined;
+    for (const k of keys) gate = strongest(gate, k?.gate);
+    if (s === "") return { lits: [], data: "none", truth: "none", gate: strongest(o.gate, gate), konst: "", konstList: [] };
+    const konst = this.fold(s);
+    return konst === undefined ? undefined : { lits: this.choose(this.folded(o.lits, konst, at), gate), data: "none", truth: "none", gate: strongest(o.gate, gate), konst };
+  }
+
+  // What `min`, `max`, `sort` and `unique` compare: each element, or the
+  // `attribute=` path of each, read part by part (review round 2, Codex N7).
+  // Its class, and the condition it puts on what it chooses.
+  private orderCond(o: Val, argNodes: Node[], at: Node): [TestClass, Cond | undefined] {
+    const attr = kwargKonst(argNodes, "attribute");
+    const efs = o.fields ? mapFields(o.fields, o.pairs ? pairField : elementField) : undefined;
+    const cls = stronger(efs ? clsOf(attr === undefined ? efs : mapFields(efs, (f) => memberPath(f, attr))) : o.data, o.rest ?? "none");
+    return [cls, this.choiceCond(cls, at)];
+  }
+
+  // A test of class `cls` as the condition it puts on what it chooses.
+  private choiceCond(cls: TestClass | undefined, at: Node): Cond | undefined {
+    if (cls === "nondeterministic") this.flagNondet(at, "the clock or chance chooses template text");
+    return cls === undefined ? undefined : condOf(cls === "presence" ? "none" : cls, this.exprSpan(at));
   }
 
   // The strongest choice among a filter's or method's arguments.
@@ -1528,19 +1612,109 @@ function loopNames(lv: Node): string[] {
   return [];
 }
 
+/**
+ * `v` as the sequence iterating it yields (ISC-22): a dict's elements are its
+ * keys, so they become text any element prints. `.items()` pairs keep their
+ * keys apart, so a pair's key and value stay separable.
+ */
+function seqOf(v: Val): Val {
+  return v.pairs || !v.keys ? v : { ...v, lits: [...v.lits, ...v.keys], keys: undefined };
+}
+
+const pairFields = new WeakMap<Field, Field>();
+/**
+ * One `.items()` or `|dictsort` pair of the record `f`: its key at 0 and -2,
+ * its value at 1 and -1, which keeps the value's class (review round 2, Codex
+ * N3). Cached so identity stays stable across passes.
+ */
+function pairField(f: Field): Field {
+  let p = pairFields.get(f);
+  if (!p) {
+    const v = valueField(f);
+    pairFields.set(f, (p = { cls: v.cls, kind: "list", elem: v, fields: { "0": KEY_FIELD, "1": v, "-2": KEY_FIELD, "-1": v } }));
+  }
+  return p;
+}
+
+/** The field at constant position `i` of `f` when it has one there (a pair's key or value), else `orElse`. */
+function positionField(f: Field, i: number, orElse: Field): Field {
+  return f.fields && Object.hasOwn(f.fields, String(i)) ? f.fields[String(i)]! : orElse;
+}
+
 // An element, key or value of `it`. With no schema, an element's emptiness is
 // as telling as the whole value's: the parts of a string the template built
 // are no more content-revealing than the string.
 function elemOf(it: Val): Val {
-  const fields = it.fields ? mapFields(it.fields, elementField) : undefined;
+  const s = seqOf(it);
+  const fields = it.fields ? mapFields(it.fields, it.pairs ? pairField : elementField) : undefined;
   return {
-    lits: [...it.lits, ...(it.keys ?? [])],
+    // A pair prints its key as well as its value.
+    lits: [...s.lits, ...(s.keys ?? [])],
     data: fields ? clsOf(fields) : it.data,
     truth: fields ? presenceOf(fields) : it.truth,
     gate: it.gate,
     fields,
     rest: it.rest,
   };
+}
+
+/** The positions Python's `[start:stop:step]` takes from `n` items; undefined for a step of 0. */
+function slicePositions(n: number, start: number | undefined, stop: number | undefined, step = 1): number[] | undefined {
+  if (step === 0) return undefined;
+  const at = (x: number, lo: number, hi: number) => (x < 0 ? Math.max(x + n, lo) : Math.min(x, hi));
+  const out: number[] = [];
+  if (step > 0) for (let i = at(start ?? 0, 0, n), end = at(stop ?? n, 0, n); i < end; i += step) out.push(i);
+  else for (let i = at(start ?? n - 1, -1, n - 1), end = at(stop ?? -n - 1, -1, n - 1); i > end; i += step) out.push(i);
+  return out;
+}
+
+/** A forward slice that is empty whatever the length: it stops at 0, or starts at or past a stop of the same sign. */
+function emptySlice(start: number | undefined, stop: number | undefined, step = 1): boolean {
+  if (step <= 0 || stop === undefined) return false;
+  const from = start ?? 0;
+  return stop === 0 || ((from >= 0) === (stop >= 0) && from >= stop);
+}
+
+type KeyRole = "index" | "bound" | "step";
+
+// Filters that print a number as the same number.
+const NUMBER_KEEPING = new Set(["string", "int", "float", "abs", "round", "trim", "e", "escape", "safe"]);
+
+/** The expression under any filters that keep its number. */
+function numberKept(n: Node): Node {
+  let x = n;
+  for (let i = 0; i < 16 && x?.type === "FilterExpression" && NUMBER_KEEPING.has(filterName(x.filter as Node)); i++) x = x.operand as Node;
+  return x;
+}
+
+const number = (k: number | undefined): Val => ({ lits: [], data: "none", truth: "none", konst: k });
+// Only the count: what the container and key read besides is judged by selCond and their gates.
+const bare = (v: Val): Val => ({ lits: [], data: "presence", truth: "presence", fields: v.fields, rest: v.rest });
+
+/**
+ * A subscript, slice bound or step `k` on `o` as a count test (ISC-18, review
+ * round 2). On conversation data a constant k asks whether there are more
+ * than k elements, judged as `messages|length > k` is, and a count key
+ * compares one count with the other: `messages[loop.index0 + 1]` stays near.
+ * A step or `batch(k)` divides the count unless it is ±1. On a list or string
+ * the template wrote, a count key must reach the last position; on a dict or
+ * an unknown template value any key is a threshold. Undefined when neither side
+ * is a count, or the container is a pair.
+ */
+function positionTest(o: Val, k: Val, role: KeyRole): TestClass | undefined {
+  // A pair always has two elements.
+  if (o.fields && o.fields.length > 0 && o.fields.every((f) => f.kind === "list" && f.fields !== undefined)) return undefined;
+  const len = bare(lengthOf(o));
+  const key = countsOf(k) ? bare(k) : undefined;
+  if (countsOf(len)) {
+    if (key) return countTest(key, len);
+    if (typeof k.konst !== "number") return undefined;
+    return countTest(len, number(role === "step" && Math.abs(k.konst) <= 1 ? 0 : k.konst));
+  }
+  if (!key) return undefined;
+  const n = o.konstList?.length ?? (typeof o.konst === "string" ? o.konst.length : undefined);
+  if (n === undefined) return isRuntime(o) ? undefined : countTest(key, number(undefined));
+  return stronger(countTest(key, number(0))!, countTest(key, number(Math.max(role === "index" ? n - 1 : n, 0)))!);
 }
 
 function keysOf(it: Val): Val {

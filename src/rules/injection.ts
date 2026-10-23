@@ -13,9 +13,9 @@ import { parseTemplate, WHOLE_TEMPLATE } from "../parse/parse.ts";
 import { preLex } from "../parse/prelexer.ts";
 import { extract, rawItems, Scaffold } from "./injected.ts";
 import { findEncodedBlobs, findEncodedBlobsIn, findInvisibleChars, findUrls, findUrlsRaw, scanUrls } from "./textscan.ts";
-import { capPerRule, clip, dedupe, pushAll } from "./finalize.ts";
+import { capPerRule, clip, dedupe, MAX_EXCERPT, pushAll } from "./finalize.ts";
 import { forEachLiteral } from "./literals.ts";
-import { whitespaceKey } from "../whitespace.ts";
+import { isTemplateSpace, whitespaceKey } from "../whitespace.ts";
 
 // Role and channel names a template writes between special tokens. A channel
 // (gpt-oss `analysis`, Gemma `thought`) is routing, not instruction, so it is
@@ -99,17 +99,26 @@ function nameWords(inner: string): string[] {
   return s.split(/[^\p{L}\p{N}]+|[ĠĊĉ]/u).filter((w) => w && !/^\p{N}+$/u.test(w));
 }
 
-/** Every literal of a template: string literals and text between tags, as written and trimmed. */
+/** Every literal of a template: string literals and text between tags, as written and trimmed of ASCII whitespace. */
 export function templateLiterals(text: string): Set<string> {
   const out = new Set<string>();
   const pre = preLex(text);
   for (const s of pre.stringLiterals) if (s.value) out.add(s.value);
   for (const s of pre.textSegments) {
     if (s.value) out.add(s.value);
-    const t = s.value.trim();
+    const t = trimTemplateSpace(s.value);
     if (t) out.add(t);
   }
   return out;
+}
+
+// Only template whitespace: U+3000 or U+00A0 around a literal is part of its text (review round 2).
+function trimTemplateSpace(s: string): string {
+  let a = 0;
+  let b = s.length;
+  while (a < b && isTemplateSpace(s.charCodeAt(a))) a++;
+  while (b > a && isTemplateSpace(s.charCodeAt(b - 1))) b--;
+  return s.slice(a, b);
 }
 
 /** Scaffolding for one template: the model's special tokens that do not read as prose (ISC-17.3), role names, whitespace and delimiters, and the text `known` emits. */
@@ -208,8 +217,8 @@ function analyze(ctx: AnalysisContext, base: FindingBase): RuleResult {
     for (const n of ex.nondeterministic) {
       pushAll(findings, [{ ruleId: "nondeterministic_trigger", severity: "HIGH", message: n.message, ...base, span: n.span, excerpt: clip(t.text.slice(n.span.start, n.span.end)) }]);
     }
-    pushAll(findings, whole(findUrls(ex.items, base, t.text), findUrls(ex.joined.urls, base))); //                        ISC-19
-    pushAll(findings, whole(findEncodedBlobs(outcome, t.text, base), findEncodedBlobsIn(ex.joined.blobs, base))); //  ISC-20
+    pushAll(findings, whole(findUrls(ex.items, base, t.text), findUrls(ex.joined.urls, base), ex.joined.urls, t.text)); // ISC-19
+    pushAll(findings, whole(findEncodedBlobs(outcome, t.text, base, baselinedLiteral(ctx)), findEncodedBlobsIn(ex.joined.blobs, base), ex.joined.blobs, t.text)); // ISC-20
     pushAll(findings, findInvisibleChars(t.text, base, outcome)); //   ISC-21
     return { findings: capPerRule(dedupe(findings), base), complete: ex.complete };
   }
@@ -218,30 +227,49 @@ function analyze(ctx: AnalysisContext, base: FindingBase): RuleResult {
   // line map). The raw-text forms of ISC-19 to ISC-21 still run (ISC-12), and the
   // text between tags is still unbaselined text when it can be located.
   pushAll(findings, findUrlsRaw(outcome, t.text, base, baselinedLiteral(ctx)));
-  pushAll(findings, findEncodedBlobs(outcome, t.text, base));
+  pushAll(findings, findEncodedBlobs(outcome, t.text, base, baselinedLiteral(ctx)));
   pushAll(findings, findInvisibleChars(t.text, base, outcome));
   if (!outcome.oversized) pushAll(findings, itemFindings(rawItems(outcome, new Scaffold(scaffolding)), ctx, base, t.text));
   return { findings: capPerRule(dedupe(findings), base), complete: false };
 }
 
+const LITERAL_KEYS = new WeakMap<KnownGoodTemplate, ReadonlySet<string>>();
+
 // ISC-17.1 on the raw path: a literal equal to one of the registry entry's, up
 // to ASCII whitespace, is the baseline's, so a URL in it is not reported. The
 // AST path gets this from the scaffolding; with no AST there is none to match.
+// Blobs are baselined the same way on both paths (ISC-20, Decisions 20:55): the
+// blob scan reads the template's literals, not the extracted text.
 function baselinedLiteral(ctx: AnalysisContext): ((from: number, to: number) => boolean) | undefined {
   const known = ctx.known;
   if (!known) return undefined;
-  const keys = new Set<string>();
-  forEachLiteral(known.text, (_kind, start, end) => keys.add(whitespaceKey(known.text.slice(start, end))));
+  let keys = LITERAL_KEYS.get(known);
+  if (!keys) {
+    const k = new Set<string>();
+    forEachLiteral(known.text, (_kind, start, end) => k.add(whitespaceKey(known.text.slice(start, end))));
+    LITERAL_KEYS.set(known, (keys = k));
+  }
   const text = ctx.template.text;
   return (from, to) => keys.has(whitespaceKey(text.slice(from, to)));
 }
 
 // A URL or blob found across literals is reported once, whole: a finding on
 // part of it in one literal (`evil.com` of `evil.com{{ '/x' }}`) is dropped.
-function whole(parts: Finding[], joined: Finding[]): Finding[] {
+// Whole texts are compared, not excerpts clipped at MAX_EXCERPT: a joined
+// item's text is its match, and a part's is its excerpt or, once that is
+// clipped, the source it was found at (review round 2).
+function whole(parts: Finding[], joined: Finding[], items: readonly InjectedText[], text: string): Finding[] {
   if (joined.length === 0) return parts;
-  const within = (p: Finding, j: Finding): boolean =>
-    !!p.span && !!j.span && j.span.start <= p.span.start && p.span.end <= j.span.end && (j.excerpt ?? "").includes(p.excerpt ?? "\u0000");
+  const matches = new Map<string, string[]>();
+  for (const it of items) {
+    const k = `${it.span.start}:${it.span.end}`;
+    matches.set(k, [...(matches.get(k) ?? []), it.text]);
+  }
+  const within = (p: Finding, j: Finding): boolean => {
+    if (!p.span || !j.span || p.span.start < j.span.start || j.span.end < p.span.end) return false;
+    const own = p.excerpt !== undefined && p.excerpt.length < MAX_EXCERPT ? p.excerpt : text.slice(p.span.start, p.span.end);
+    return (matches.get(`${j.span.start}:${j.span.end}`) ?? []).some((m) => m.includes(own));
+  };
   return [...parts.filter((p) => !joined.some((j) => within(p, j))), ...joined];
 }
 

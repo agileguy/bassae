@@ -43,12 +43,16 @@ export function findUrls(items: readonly InjectedText[], base: FindingBase, text
   return finish("url_in_text", "HIGH", base, [hits], placer(text ?? ""));
 }
 
-/** MEDIUM encoded_blob for each base64-like, base32-like or hex-like run of 32+ characters in a template literal: text between tags and string literals inside them (ISC-20). A run wrapped across lines or split by spaces counts when it decodes to text, or when its lines are of equal width and, read as one run, hex or random. */
-export function findEncodedBlobs(outcome: ParseOutcome, text: string, base: FindingBase): Finding[] {
+/**
+ * MEDIUM encoded_blob for each base64-like, base32-like or hex-like run of 32+ characters in a template literal: text between tags and string literals inside them (ISC-20). A run wrapped across lines or split by spaces counts when it decodes to text, or when its lines are of equal width and, read as one run, hex or random.
+ * A literal `baselined` accepts is skipped, as in findUrlsRaw (Decisions 20:55).
+ */
+export function findEncodedBlobs(outcome: ParseOutcome, text: string, base: FindingBase, baselined?: (from: number, to: number) => boolean): Finding[] {
   const hits = new Hits();
   eachLiteral(outcome, text, (kind, from, to) => {
+    let skip: boolean | undefined;
     scanBlobs(text, from, to, (start, end, blob) => {
-      if (!hits.take()) return;
+      if ((skip ??= baselined?.(from, to) ?? false) || !hits.take()) return;
       const where = kind === "text" ? "template text" : "a string literal";
       hits.kept.push({ start, end, message: `${blob}-like run of ${end - start} characters in ${where}`, excerpt: text.slice(start, end), detail: { encoding: blob, length: end - start } });
     });

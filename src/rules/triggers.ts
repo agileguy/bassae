@@ -895,9 +895,9 @@ function thresholdOf(fs: Fields): TestClass {
 // Residuals: counts do not record what they count, so two counts of different
 // things within 1 of each other read as near, as two positions in one
 // conversation do: `m.content|length == loop.index` and `m.content|length -
-// loop.index == 0` (Gemini A1, A10) are presence. Parity (`% 2`, `is odd`,
+// loop.index == 0` (contracts A1, A10) are presence. Parity (`% 2`, `is odd`,
 // a two-value `loop.cycle`) is presence by Decisions 20:55.
-function countTest(x: Val, other: Val): TestClass | undefined {
+export function countTest(x: Val, other: Val): TestClass | undefined {
   const xs = countsOf(x);
   if (!xs) return undefined;
   const near = stronger(stronger(readOf(x), readOf(other)), stronger(x.rest ?? "none", other.rest ?? "none"));
