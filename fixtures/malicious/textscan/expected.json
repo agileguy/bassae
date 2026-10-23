@@ -1,0 +1,132 @@
+{
+  "fixtures": [
+    {
+      "path": "textscan/url_scheme.jinja",
+      "expect": [
+        {
+          "ruleId": "url_in_text",
+          "severity": "HIGH"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "path": "textscan/url_www.jinja",
+      "expect": [
+        {
+          "ruleId": "url_in_text",
+          "severity": "HIGH"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "path": "textscan/email.jinja",
+      "expect": [
+        {
+          "ruleId": "url_in_text",
+          "severity": "HIGH"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "path": "textscan/domain.jinja",
+      "expect": [
+        {
+          "ruleId": "url_in_text",
+          "severity": "HIGH"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "path": "textscan/base64.jinja",
+      "expect": [
+        {
+          "ruleId": "encoded_blob",
+          "severity": "MEDIUM"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "path": "textscan/hex.jinja",
+      "expect": [
+        {
+          "ruleId": "encoded_blob",
+          "severity": "MEDIUM"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "path": "textscan/zero_width.jinja",
+      "expect": [
+        {
+          "ruleId": "invisible_char",
+          "severity": "HIGH"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "path": "textscan/bidi.jinja",
+      "expect": [
+        {
+          "ruleId": "invisible_char",
+          "severity": "HIGH"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "path": "textscan/tag_chars.jinja",
+      "expect": [
+        {
+          "ruleId": "invisible_char",
+          "severity": "HIGH"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "path": "textscan/variation_selector.jinja",
+      "expect": [
+        {
+          "ruleId": "invisible_char",
+          "severity": "HIGH"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "path": "textscan/soft_hyphen.jinja",
+      "expect": [
+        {
+          "ruleId": "invisible_char",
+          "severity": "HIGH"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "path": "textscan/unparseable.jinja",
+      "expect": [
+        {
+          "ruleId": "unanalyzable",
+          "severity": "HIGH"
+        },
+        {
+          "ruleId": "url_in_text",
+          "severity": "HIGH"
+        },
+        {
+          "ruleId": "invisible_char",
+          "severity": "HIGH"
+        }
+      ],
+      "tags": []
+    }
+  ]
+}
