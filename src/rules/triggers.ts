@@ -7,8 +7,10 @@
 //                     has: definedness, none, truthiness and emptiness (a length
 //                     or loop position compared with 0 or 1), a message's role,
 //                     a `type` or a kwarg compared with its documented vocabulary
-//                     (`part.type == 'image'`, `reasoning_effort == 'high'`), the
-//                     keys of a record, and a tool's parameter schema
+//                     (`part.type == 'image'`, `reasoning_effort == 'high'`), an
+//                     id compared for equality with another id (a call paired
+//                     with its result), the keys of a record, and a tool's
+//                     parameter schema
 //   content           reads what a user, a tool or a caller wrote: message
 //                     content and reasoning, a message's name, id or
 //                     tool_call_id, a tool's or tool call's function name,
@@ -78,6 +80,8 @@ export interface Field {
   off?: number;
   /** The class of a test that compares a count with a threshold more than 1 away from it. */
   threshold?: "content" | "nondeterministic";
+  /** An identifier that pairs records: a call's `id`, its result's `tool_call_id`. */
+  ident?: true;
 }
 
 function vocab(...words: string[]): ReadonlySet<string> {
@@ -99,6 +103,10 @@ const BUILTIN_NAMES = vocab("browser", "python", "brave_search", "wolfram_alpha"
 
 const PRESENCE: Field = { cls: "presence", kind: "any" };
 const TEXT: Field = { cls: "content", kind: "string" };
+// A message's or tool call's `id` and a tool result's `tool_call_id`: content
+// against a constant, but one compared for equality with another pairs a call
+// with its result (Gemma 4), and no template value decides that.
+const ID: Field = { cls: "content", kind: "string", ident: true };
 const TYPE: Field = { cls: "content", kind: "string", vocab: TYPES };
 // The date a runtime passes (Llama 3.x `date_string`, `today`): the clock, the
 // same as a strftime_now() result.
@@ -121,7 +129,7 @@ const SCHEMA: Field = { cls: "presence", kind: "any" };
 // presence tests; its values are content.
 const ARGS: Field = { cls: "content", kind: "record", other: ANY_CONTENT };
 const FUNCTION: Field = { cls: "content", kind: "record", fields: { name: TEXT, arguments: ARGS }, other: ANY_CONTENT };
-const TOOL_CALL: Field = { cls: "content", kind: "record", fields: { type: TYPE, id: TEXT, name: TEXT, function: FUNCTION, arguments: ARGS }, other: ANY_CONTENT };
+const TOOL_CALL: Field = { cls: "content", kind: "record", fields: { type: TYPE, id: ID, name: TEXT, function: FUNCTION, arguments: ARGS }, other: ANY_CONTENT };
 const TOOL_CALLS: Field = { cls: "content", kind: "list", elem: TOOL_CALL };
 
 // A content part: `{'type': 'text', 'text': ...}`, `{'type': 'image', ...}`.
@@ -138,8 +146,8 @@ const MESSAGE: Field = {
     role: PRESENCE,
     type: TYPE,
     name: TEXT,
-    id: TEXT,
-    tool_call_id: TEXT,
+    id: ID,
+    tool_call_id: ID,
     tool_calls: TOOL_CALLS,
     content: MESSAGE_CONTENT,
     reasoning_content: TEXT,
@@ -441,7 +449,7 @@ export function classifyTest(n: Node, env: TestEnv, facts: Facts): TestClass {
         return stronger(l, r);
       }
       if (o === "in" || o === "not in") return membership(n.left as Node, n.right as Node, env, facts);
-      if (COMPARISONS.has(o)) return comparison(n.left as Node, n.right as Node, env, facts);
+      if (COMPARISONS.has(o)) return comparison(n.left as Node, n.right as Node, o, env, facts);
       return truthiness(n, env, facts);
     }
     case "TestExpression": {
@@ -470,12 +478,14 @@ function truthiness(n: Node, env: TestEnv, facts: Facts): TestClass {
 }
 
 // `a == b`, `a < b`, ...: a count against a threshold, a field with a
-// vocabulary against a constant, or else both values read whole.
-function comparison(a: Node, b: Node, env: TestEnv, facts: Facts): TestClass {
+// vocabulary against a constant, an id against an id, or else both values read
+// whole.
+function comparison(a: Node, b: Node, o: string, env: TestEnv, facts: Facts): TestClass {
   const va = operand(a, env, facts, 0);
   const vb = operand(b, env, facts, 0);
   const gates = stronger(gateOf(va), gateOf(vb));
-  const cls = countTest(va, vb) ?? countTest(vb, va) ?? vocabTest(a, vb, env, facts) ?? vocabTest(b, va, env, facts) ?? stronger(readOf(va), readOf(vb));
+  const join = (o === "==" || o === "!=") && identOnly(va) && identOnly(vb) ? "presence" : undefined;
+  const cls = countTest(va, vb) ?? countTest(vb, va) ?? vocabTest(a, vb, env, facts) ?? vocabTest(b, va, env, facts) ?? join ?? stronger(readOf(va), readOf(vb));
   return stronger(cls, gates);
 }
 
@@ -598,6 +608,13 @@ function operand(n: Node, env: TestEnv, facts: Facts, depth: number): Val {
     return { ...v, data: stronger(v.data, stronger(l.data, r.data)), truth: stronger(v.truth, stronger(l.truth, r.truth)) };
   }
   return v;
+}
+
+// Runtime data that is only ids: `tc.get('id') == follow.get('tool_call_id')`
+// pairs a call with its result. Neither side is a template constant, so the
+// equality cannot name a trigger value (Decisions 20:15).
+function identOnly(v: Val): boolean {
+  return !!v.fields && v.fields.length > 0 && v.fields.every((f) => f.ident === true);
 }
 
 /** The counts a value may be, when it is only ever a count. */

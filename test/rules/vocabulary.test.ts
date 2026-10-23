@@ -249,3 +249,23 @@ test("ISC-18: the stock image-part count stays presence", () => {
   const src = `{% for m in messages %}{% if m.content|selectattr('type', 'equalto', 'image')|list|length > 0 %}${INJ}{% endif %}{% endfor %}`;
   expect({ cls: cls(src), highs: highs(src) }).toEqual({ cls: "presence", highs: [] });
 });
+
+// ---- an id matched to an id: a call paired with its result ----
+
+// Gemma 4 names a tool result by finding the call whose id it answers. Neither
+// side is a template constant, so the equality cannot hide a trigger value.
+test("ISC-18: an equality between two id fields pairs a call with its result and stays presence", () => {
+  const gemma =
+    "{% for message in messages %}{% for k in range(loop.index0 + 1, messages|length) %}{% set follow = messages[k] %}" +
+    "{% set ns = namespace(name=follow.get('name') | default('unknown')) %}" +
+    "{% for tc in message['tool_calls'] %}{% if tc.get('id') == follow.get('tool_call_id') %}{% set ns.name = tc['function']['name'] %}{% endif %}{% endfor %}" +
+    "{{ ns.name }}{% endfor %}{% endfor %}";
+  expect(highs(gemma)).toEqual([]);
+  const direct = `{% for message in messages %}{% for follow in messages %}{% for tc in message.tool_calls %}{% if tc.get('id') == follow.get('tool_call_id') %}${INJ}{% endif %}{% endfor %}{% endfor %}{% endfor %}`;
+  expect({ cls: cls(direct), highs: highs(direct) }).toEqual({ cls: "presence", highs: [] });
+  expectPresence(["tc.id == m.tool_call_id", "m.tool_call_id == tc.id", "m['tool_call_id'] != tc['id']", "tc.get('id') == m.get('tool_call_id')", "m.id == tc.id"]);
+});
+
+test("ISC-18: an id against a constant or against any other field is still a content test", () => {
+  expectContent(["m.id == 'x'", "m.tool_call_id == 'call_1'", "tc.id == m.content", "m.name == m.tool_call_id", "m.name == 'sudo'", "tc.id < m.tool_call_id", "tc.function.name == m.tool_call_id"]);
+});
