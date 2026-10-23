@@ -1214,7 +1214,9 @@ class Interp {
   private applyFilter(o: Val, name: string, argNodes: Node[], c: Ctx, fnode: Node): Val {
     const a = argNodes.map((x) => this.eval(x, c));
     const gate = strongest(o.gate, a.reduce<Cond | undefined>((g, x) => strongest(g, x.gate), undefined));
-    const keep = { lits: o.lits, data: o.data, truth: o.truth, gate };
+    // A dict's text holds its keys, so a filter that keeps the text keeps them
+    // (review round 3, contracts M1).
+    const keep = { lits: o.keys ? [...o.lits, ...o.keys] : o.lits, data: o.data, truth: o.truth, gate };
     const known = this.konstFilter(o, name, a, argNodes, fnode);
     if (known) return known;
     switch (name) {
@@ -1233,16 +1235,16 @@ class Interp {
         return { ...keep, lits: this.folded(lits, konst, fnode), konst };
       }
       case "replace":
-        return { ...keep, ...this.replaced(o, a, argNodes, fnode) };
+        return { ...keep, ...this.replaced({ ...o, lits: keep.lits }, a, argNodes, fnode) };
       case "format":
-        return { ...keep, lits: [...o.lits, ...a.flatMap((x) => x.lits)], data: maxData(o, a), truth: maxData(o, a) };
+        return { ...keep, lits: [...keep.lits, ...a.flatMap((x) => [...x.lits, ...(x.keys ?? [])])], data: maxData(o, a), truth: maxData(o, a) };
       case "upper":
       case "lower":
       case "title":
       case "capitalize":
       case "trim": {
         const konst = typeof o.konst === "string" ? caseMap(o.konst, name) : undefined;
-        return { ...keep, lits: konst !== undefined && konst !== o.konst ? this.folded(o.lits, konst, fnode) : o.lits, konst, ...(NUMBER_KEEPING.has(name) ? countKept(o) : {}) };
+        return { ...keep, lits: konst !== undefined && konst !== o.konst ? this.folded(o.lits, konst, fnode) : keep.lits, konst, ...(NUMBER_KEEPING.has(name) ? countKept(o) : {}) };
       }
       case "string":
       case "tojson":
@@ -1263,13 +1265,15 @@ class Interp {
         return keep;
       case "truncate":
         // How much survives depends on the length argument.
-        return { ...keep, lits: this.choose(o.lits, this.argsCond(a, argNodes)) };
+        return { ...keep, lits: this.choose(keep.lits, this.argsCond(a, argNodes)) };
       case "batch": {
         // `batch(n)` divides the count by n: its length is a threshold on the
         // conversation's unless n is ±1 (ISC-18).
+        // Each row is a list of elements: a dict's keys are one lookup further down.
         const s = seqOf(o);
+        const keys = o.pairs ? s.keys : deeper(s.keys);
         const cond = argNodes[0] ? this.choiceCond(positionTest(o, a[0]!, "step"), argNodes[0]) : undefined;
-        return { ...keep, lits: this.choose(s.lits, cond), keys: s.keys && this.choose(s.keys, cond), gate: strongest(gate, cond), fields: o.fields, rest: o.rest };
+        return { ...keep, lits: this.choose(s.lits, cond), keys: keys && this.choose(keys, cond), gate: strongest(gate, cond), fields: o.fields, rest: o.rest };
       }
       case "list":
       case "reverse":
@@ -1286,7 +1290,7 @@ class Interp {
       }
       case "items":
       case "dictsort":
-        return { ...keep, keys: o.keys, fields: o.fields, rest: o.rest, pairs: true };
+        return { ...keep, lits: o.lits, keys: o.keys, fields: o.fields, rest: o.rest, pairs: true };
       case "first":
       case "last":
       case "min":
@@ -1298,7 +1302,8 @@ class Interp {
         // What `min` and `max` compare chooses the element, and what a sort
         // compared chooses the first or last (review round 3, contracts S1).
         const by = end === undefined ? this.orderCond(o, argNodes, fnode)[1] : this.choiceCond(orderOf(o.fields), fnode);
-        return { ...keep, lits: this.choose(e.lits, strongest(this.argsCond(a, argNodes), by)), data: fields ? clsOf(fields) : e.data, truth: fields ? presenceOf(fields) : e.truth, gate: strongest(gate, by), fields, rest: e.rest };
+        const pick = strongest(this.argsCond(a, argNodes), by);
+        return { ...keep, lits: this.choose(e.lits, pick), keys: e.keys && this.choose(e.keys, pick), data: fields ? clsOf(fields) : e.data, truth: fields ? presenceOf(fields) : e.truth, gate: strongest(gate, by), fields, rest: e.rest };
       }
       case "length":
       case "count":
@@ -1316,12 +1321,14 @@ class Interp {
       case "map": {
         const attr = kwargKonst(argNodes, "attribute");
         const efs = o.fields ? mapFields(o.fields, o.pairs ? pairField : elementField) : undefined;
+        const s = seqOf(o);
         if (attr !== undefined && efs) {
           const fs = mapFields(efs, (f) => memberPath(f, attr));
-          return { ...keep, lits: seqOf(o).lits, data: clsOf(fs), fields: mapFields(fs, (f) => orderedOf(listOf(f), orderOf(o.fields))), rest: o.rest };
+          return { ...keep, lits: s.lits, keys: s.keys, data: clsOf(fs), fields: mapFields(fs, (f) => orderedOf(listOf(f), orderOf(o.fields))), rest: o.rest };
         }
         // An attribute name computed at runtime chooses which entries are printed.
-        return { ...keep, lits: this.choose(seqOf(o).lits, this.argsCond(a, argNodes)) };
+        const by = this.argsCond(a, argNodes);
+        return { ...keep, lits: this.choose(s.lits, by), keys: s.keys && this.choose(s.keys, by) };
       }
       case "selectattr":
       case "rejectattr":
@@ -1356,7 +1363,8 @@ class Interp {
         const k = typeof a[0]?.konst === "string" ? a[0].konst : undefined;
         const fields = o.fields ? mapFields(o.fields, (f) => memberField(f, k)) : undefined;
         const by = this.argsCond(a, argNodes);
-        return { ...keep, lits: this.choose(o.lits, by), data: fields ? clsOf(fields) : o.data, truth: fields ? presenceOf(fields) : o.truth, gate: strongest(gate, by), fields, rest: fields ? o.rest : undefined };
+        const inner = entryKeys(o.keys);
+        return { ...keep, lits: this.choose(o.lits, by), keys: inner && this.choose(inner, by), data: fields ? clsOf(fields) : o.data, truth: fields ? presenceOf(fields) : o.truth, gate: strongest(gate, by), fields, rest: fields ? o.rest : undefined };
       }
       case "random": {
         this.flagNondet(fnode, "uses the `random` filter");
@@ -1909,11 +1917,13 @@ function loopNames(lv: Node): string[] {
 
 /**
  * `v` as the sequence iterating it yields (ISC-22): a dict's elements are its
- * keys, so they become text any element prints. `.items()` pairs keep their
- * keys apart, so a pair's key and value stay separable.
+ * own keys, so they become text any element prints. The keys of a dict it
+ * holds stay keys, its elements' to look up (review round 3, contracts M1).
+ * `.items()` pairs keep their keys apart, so a pair's key and value stay
+ * separable.
  */
 function seqOf(v: Val): Val {
-  return v.pairs || !v.keys ? v : { ...v, lits: [...v.lits, ...v.keys], keys: undefined };
+  return v.pairs || !v.keys ? v : { ...v, lits: [...v.lits, ...v.keys.filter((l) => !l.nest)], keys: heldKeys(v.keys) };
 }
 
 const pairFields = new WeakMap<Field, Field>();
@@ -1941,11 +1951,14 @@ function positionField(f: Field, i: number, orElse: Field): Field {
 // are no more content-revealing than the string. An element holds what every
 // element does of the flag (review round 3, contracts M3).
 function elemOf(it: Val): Val {
-  const s = seqOf(it);
+  const s = seqOf({ ...it, pairs: undefined });
   const fields = it.fields ? mapFields(it.fields, it.pairs ? pairField : elementField) : undefined;
   const e: Val = {
-    // A pair prints its key as well as its value.
-    lits: [...s.lits, ...(s.keys ?? [])],
+    // A pair prints its key as well as its value. An element that is a dict
+    // has the keys one lookup down as its own, as the flat dict does; a pair
+    // holds them in its value (review round 3, contracts M1).
+    lits: s.lits,
+    keys: it.pairs ? s.keys : entryKeys(s.keys),
     data: fields ? clsOf(fields) : it.data,
     truth: fields ? presenceOf(fields) : it.truth,
     gate: it.gate,

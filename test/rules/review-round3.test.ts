@@ -64,6 +64,55 @@ test("ISC-22: a lookup prints the entry's keys, not the key it looked up (review
   expect(findings(`{% set D = {'${S}': {'b': 1}} %}{{ D['${S}']|first }}`)).toEqual(["MEDIUM unbaselined_text"]);
 });
 
+// A loop variable bound to a dict element holds that dict's keys as its own,
+// as the flat dict does.
+const LX = (body: string, over = `[{'${S}': 1}]`) => `{% for x in ${over} %}${body}{% endfor %}`;
+
+const ELEMENT_KEYS: [string, string][] = [
+  ["x.keys()|join", LX("{{ x.keys()|join }}")],
+  ["a pair loop over x.items()", LX("{% for k, v in x.items() %}{{ k }}{% endfor %}")],
+  ["a pair loop over x|dictsort", LX("{% for k, v in x|dictsort %}{{ k }}{% endfor %}")],
+  ["a pair loop over x|items", LX("{% for k, v in x|items %}{{ k }}{% endfor %}")],
+  ["x|first", LX("{{ x|first }}")],
+  ["x.items()|first|first", LX("{{ x.items()|first|first }}")],
+  ["x.keys() in a loop over D.values()", LX("{{ x.keys()|join }}", `{'a': {'${S}': 1}}.values()`)],
+  ["y.keys() one loop deeper", LX("{% for y in x %}{{ y.keys()|join }}{% endfor %}", `[[{'${S}': 1}]]`)],
+  ["x.a.keys(), a dict one level down", LX("{{ x.a.keys()|join }}", `[{'a': {'${S}': 1}}]`)],
+  ["x.a|first, a dict one level down", LX("{{ x.a|first }}", `[{'a': {'${S}': 1}}]`)],
+  ["a pair's value p[1].keys()", `{% for p in {'a': {'${S}': 1}}.items() %}{{ p[1].keys()|join }}{% endfor %}`],
+  ["a pair loop's value v.keys()", `{% for k, v in {'a': {'${S}': 1}}.items() %}{{ v.keys()|join }}{% endfor %}`],
+  ["a tuple loop's a.keys()", `{% for a, b in [[{'${S}': 1}, 2]] %}{{ a.keys()|join }}{% endfor %}`],
+  ["a tuple set's a.keys()", `{% set a, b = [{'${S}': 1}, 2] %}{{ a.keys()|join }}`],
+  ["x.keys() in a loop over the list reversed", LX("{{ x.keys()|join }}", `[{'${S}': 1}]|reverse`)],
+  ["x.keys() in a loop over the list sorted", LX("{{ x.keys()|join }}", `[{'${S}': 1}]|sort(attribute='z')`)],
+  ["x.keys() in a loop over |list", LX("{{ x.keys()|join }}", `[{'${S}': 1}]|list`)],
+  ["x.keys() in a filtered loop", `{% for x in [{'${S}': 1}] if x %}{{ x.keys()|join }}{% endfor %}`],
+  ["x.keys() in a loop over a row of |batch", `{% for row in [{'${S}': 1}]|batch(1) %}{% for x in row %}{{ x.keys()|join }}{% endfor %}{% endfor %}`],
+  ["(list|first).keys()", `{{ ([{'${S}': 1}]|first).keys()|join }}`],
+];
+
+test.each(ELEMENT_KEYS)("ISC-22: %s prints a key of the dict element, as the flat dict does (review round 3, contracts M1)", (_label, src) => {
+  expect(findings(src)).toEqual(["HIGH url_in_text", "MEDIUM unbaselined_text"]);
+});
+
+// A dict's text is its keys and values: a string filter keeps both.
+const STRING_FILTERS = ["trim", "e", "safe", "indent", "upper", "truncate(9999)", "center"];
+
+test.each(STRING_FILTERS)("ISC-22: |%s on a dict or on a dict element prints its keys (review round 3, contracts M1)", (filter) => {
+  expect(findings(`{{ {'${S}': 1}|${filter} }}`)).toEqual(["HIGH url_in_text", "MEDIUM unbaselined_text"]);
+  expect(findings(LX(`{{ x|${filter} }}`))).toEqual(["HIGH url_in_text", "MEDIUM unbaselined_text"]);
+});
+
+test("ISC-22: a dict formatted into a string prints its keys (review round 3, contracts M1)", () => {
+  expect(findings(`{{ '%s'|format({'${S}': 1}) }}`)).toEqual(["HIGH url_in_text", "MEDIUM unbaselined_text"]);
+  expect(findings(LX("{{ '%s'|format(x) }}"))).toEqual(["HIGH url_in_text", "MEDIUM unbaselined_text"]);
+});
+
+test("ISC-22: a lookup on a dict element prints the entry, not the element's keys (review round 3, contracts M1)", () => {
+  expect(findings(`{% for x in [{'${S}': {'b': 1}}] %}{% for k in x['${S}'] %}{{ k }}{% endfor %}{% endfor %}`)).toEqual(["MEDIUM unbaselined_text"]);
+  expect(findings(LX(`{{ x['${S}'] }}`))).toEqual([]);
+});
+
 // ---- M2: a count as a dict value, and through numeric filters ----
 
 function highs(src: string): string[] {
