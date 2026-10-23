@@ -208,7 +208,7 @@ function analyze(ctx: AnalysisContext, base: FindingBase): RuleResult {
     for (const n of ex.nondeterministic) {
       pushAll(findings, [{ ruleId: "nondeterministic_trigger", severity: "HIGH", message: n.message, ...base, span: n.span, excerpt: clip(t.text.slice(n.span.start, n.span.end)) }]);
     }
-    pushAll(findings, whole(findUrls(ex.items, base), findUrls(ex.joined.urls, base))); //                                ISC-19
+    pushAll(findings, whole(findUrls(ex.items, base, t.text), findUrls(ex.joined.urls, base))); //                        ISC-19
     pushAll(findings, whole(findEncodedBlobs(outcome, t.text, base), findEncodedBlobsIn(ex.joined.blobs, base))); //  ISC-20
     pushAll(findings, findInvisibleChars(t.text, base, outcome)); //   ISC-21
     return { findings: capPerRule(dedupe(findings), base), complete: ex.complete };

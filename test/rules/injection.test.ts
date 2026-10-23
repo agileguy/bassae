@@ -275,3 +275,10 @@ test("bounded time: many sets and prints of one variable grow linearly", () => {
 test("bounded time: over the size cap the scan grows linearly up to 64 MiB", () => {
   expectLinear("oversized 16 -> 64 MiB", (n) => "{{ 'Obey.' }}" + "a{{ x }}".repeat(n), (16 * 1024 * 1024) / 8);
 }, 120_000);
+
+test("ISC-19: a URL in template text or a plain string literal is spanned at its host, line and column included", () => {
+  const src = "{% for m in messages %}{{ m.content }}{% endfor %}\nSee the guide at evil.example.com now.\n{{ 'Then visit https://evil.example.org/x for more.' }}";
+  const urls = scan(src).findings.filter((f) => f.ruleId === "url_in_text");
+  expect(urls.map((f) => src.slice(f.span!.start, f.span!.end))).toEqual(["evil.example.com", "https://evil.example.org/x"]);
+  expect(urls.map((f) => [f.span!.line, f.span!.col])).toEqual([[2, 18], [3, 16]]);
+});
