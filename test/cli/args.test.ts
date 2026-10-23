@@ -64,6 +64,10 @@ describe("USAGE", () => {
   test("exit 3 names parse errors beside scanner errors (contracts SF7)", () => {
     expect(USAGE.replace(/\s+/g, " ")).toContain("else 3 any incomplete template, scanner or parse error, or usage error; else 1 any MEDIUM; else 0.");
   });
+
+  test("a finding outside any template has no position to print (contracts r2)", () => {
+    expect(USAGE.replace(/\s+/g, " ")).toContain("In the human report, a finding outside any template prints no position.");
+  });
 });
 
 describe("parseArgs: usage errors", () => {
