@@ -90,7 +90,9 @@ together.
 A template that no runtime loads under any name, in a kind some runtime reads, is
 marked `shadowed`. It is still returned and scanned. `checkIntraModel` reports one
 MEDIUM `intra_model_divergence` per pair of same-name templates whose bytes differ
-(ISC-7.5), up to 32 pairs plus one summary finding.
+(ISC-7.5), up to 32 pairs plus one summary finding. A stored diff is cut at 64 Ki
+UTF-16 units; a pair whose texts total over 512 Ki units, or that would overrun the
+model's 4 Mi-unit diff budget, gets its finding with a note in place of the diff.
 
 ## Transforms
 
