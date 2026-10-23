@@ -9,7 +9,7 @@ import { sandboxAvailable } from "../../src/sandbox/index.ts";
 import { scanWith } from "../../src/scan/pipeline.ts";
 import type { Registry, Renderer } from "../../src/types.ts";
 import { makeTree, removeTrees } from "../helpers/tree.ts";
-import { buildGguf, typicalKvs, u32, type Value } from "../gguf/builder.ts";
+import { buildGguf, str, typicalKvs, u32, type Value } from "../gguf/builder.ts";
 import { CHATML, CHATML_HIGH, CHATML_MEDIUM, countingRender, hfCacheRepo, hfModel, known, options, REV_A, tokenizerConfig } from "./fixtures/pipeline.ts";
 
 afterAll(removeTrees);
@@ -189,6 +189,37 @@ describe("contracts r2: a cap never takes a template's own gap away", () => {
       expect(errors.at(-1)).toMatchObject({ message: "50 more parse_error findings suppressed", file: gguf, detail: { suppressed: 50 } });
       expect(t.gaps).toHaveLength(FINDING_CAP + 1);
       expect(t.status).toBe("incomplete");
+    }
+    expect(m.findings).toEqual([]);
+  });
+});
+
+describe("contracts r3: findings naming a GGUF and a hash are still capped on each template", () => {
+  test("FINDING_CAP + 50 keys, each with a NUL and missing from the list: FINDING_CAP of each rule and one summary per template", async () => {
+    // Each key gives a HIGH parse_error and a MEDIUM template_list_mismatch, both naming the GGUF file and the
+    // key's own hash. The file holds every template, so every template is given all of them.
+    const n = FINDING_CAP + 50;
+    const keys = Array.from({ length: n }, (_, i): [string, Value] => [`tokenizer.chat_template.t${i}`, str(`T${i}\0x`)]);
+    const gguf = join(makeTree({ "x.gguf": buildGguf([...typicalKvs(CHATML), ...keys]).bytes }), "x.gguf");
+    const report = await scan(options([dirname(gguf)]));
+    const m = report.models[0]!;
+    // default, tool_use, and each key's full value and its llama.cpp view.
+    expect(m.templates).toHaveLength(2 * n + 2);
+    for (const t of m.templates) {
+      for (const rule of ["parse_error", "template_list_mismatch"]) {
+        const got = t.findings.filter((f) => f.ruleId === rule);
+        expect(got).toHaveLength(FINDING_CAP + 1);
+        expect(got.at(-1)).toMatchObject({ message: `50 more ${rule} findings suppressed`, file: gguf, detail: { suppressed: 50 } });
+      }
+      // Gaps come from what the template holds: FINDING_CAP parse_errors and their summary.
+      expect(t.gaps).toEqual(t.findings.filter((f) => f.ruleId === "parse_error").map((f) => `parse_error: ${f.message}`));
+      expect(t.status).toBe("findings");
+    }
+    // A key's own two findings are among those its template keeps.
+    for (let i = 0; i < n; i++) {
+      const t = m.templates.find((x) => x.name === `t${i}`)!;
+      const own = t.findings.filter((f) => f.templateSha256 === t.sha256 && !f.detail?.suppressed).map((f) => f.ruleId);
+      expect(own).toEqual(expect.arrayContaining(["parse_error", "template_list_mismatch"]));
     }
     expect(m.findings).toEqual([]);
   });

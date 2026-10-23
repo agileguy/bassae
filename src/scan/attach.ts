@@ -3,9 +3,10 @@
 // each moves onto every template whose file it names, where it counts toward that template's status.
 // What names no template stays on the model.
 
-import { capPerRule, dedupe, pushAll } from "../rules/finalize.ts";
+import { WHOLE_TEMPLATE } from "../parse/parse.ts";
+import { capPerRule, dedupe, FINDING_CAP, pushAll } from "../rules/finalize.ts";
 import { isGapFinding } from "../status.ts";
-import type { Finding, TemplateSite } from "../types.ts";
+import { type Finding, type RuleId, SEVERITY_RANK, type Severity, type TemplateSite } from "../types.ts";
 
 // Excerpts clipped and every finding given a span (the whole-template one when it has none of its own), as
 // for rule findings (Decisions 19:15). dedupe keys on rule, span and message, which names one place only
@@ -42,69 +43,89 @@ export interface Attachable {
 }
 
 /**
- * Prepares a model's findings and appends each to every template it names, through its `file` (a site's path
- * or realpath) or its `templateSha256`; returns the ones that name none, for the model. A file holding two
- * templates, such as a GGUF or a tokenizer_config.json with a list, puts a finding about that file on both,
- * and the summary counts it once per template. A scanner or parse error also gives each template it lands on
- * a gap (ISC-42.1).
+ * Prepares a model's findings and gives each to every template it names, through its `file` (a site's path or
+ * realpath) or its `templateSha256`; returns the ones that name none, for the model, capped as one with the
+ * summary naming `modelId`. A file holding many templates, such as a GGUF or a tokenizer_config.json with a
+ * list, gives a finding about that file to each of them.
  *
- * The cap comes after placing, not before (contracts r2): findings bound for the same templates are capped
- * together, at most FINDING_CAP per rule, and a capped rule's summary goes where they would have gone. So
- * findings about other files can never fold a template's own scanner_error into a summary that lands
- * elsewhere, and a template keeps every gap it has. What stays on the model is capped as one, its summary
- * naming `modelId`. A hostile GGUF repeating one key thousands of times still costs one summary finding.
+ * The cap is per template, after placing (contracts r2, r3): of each rule a template keeps at most FINDING_CAP,
+ * its own findings (those naming its hash) first, and one summary on that template counts exactly the rest it
+ * was given. So a template's own scanner_error is never folded into a summary that lands elsewhere, findings
+ * naming a file and a hash at once can never stack past the cap, and a GGUF with thousands of keys costs each
+ * template at most FINDING_CAP and a summary. A scanner or parse error, and a summary of them, also gives the
+ * template that keeps it a gap (ISC-42.1).
  */
 export function attachModelFindings(findings: readonly Finding[], templates: readonly Attachable[], modelId: string): Finding[] {
-  const byFile = new Map<string, Set<Attachable>>();
-  const bySha = new Map<string, Set<Attachable>>();
-  const add = (map: Map<string, Set<Attachable>>, key: string, t: Attachable) => {
-    const set = map.get(key);
-    if (set) set.add(t);
-    else map.set(key, new Set([t]));
-  };
-  for (const t of templates) {
-    add(bySha, t.sha256, t);
-    for (const s of t.sites) {
-      add(byFile, s.path, t);
-      add(byFile, s.realPath, t);
-    }
-  }
-
-  // A finding's templates are fixed by the set its file names and the set its hash names, so findings with
-  // the same two sets share a bucket and are capped as one. The key is the sets, never the templates in
-  // them, so a file holding thousands of templates costs each finding one lookup, not thousands.
-  const ids = new Map<Set<Attachable>, number>();
-  const idOf = (set: Set<Attachable> | undefined) => {
-    if (!set) return -1;
-    let id = ids.get(set);
-    if (id === undefined) ids.set(set, (id = ids.size));
-    return id;
-  };
-  const buckets = new Map<string, { files: Set<Attachable> | undefined; shas: Set<Attachable> | undefined; findings: Finding[] }>();
+  const files = new Set(templates.flatMap(keysOf));
+  const hashes = new Set(templates.map((t) => t.sha256));
+  const byFile = new Map<string, Piles>();
+  const byHash = new Map<string, Piles>();
+  const order = new Map<Finding, number>();
+  const rest: Finding[] = [];
   for (const f of prepare(findings)) {
-    const files = byFile.get(f.file);
-    const shas = f.templateSha256 ? bySha.get(f.templateSha256) : undefined;
-    const key = `${idOf(files)}:${idOf(shas)}`;
-    const bucket = buckets.get(key);
-    if (bucket) bucket.findings.push(f);
-    else buckets.set(key, { files, shas, findings: [f] });
+    order.set(f, order.size);
+    const hash = f.templateSha256 !== undefined && hashes.has(f.templateSha256) ? f.templateSha256 : undefined;
+    if (hash !== undefined) pile(byHash, hash, f);
+    if (files.has(f.file)) pile(byFile, f.file, f, hash);
+    else if (hash === undefined) rest.push(f);
   }
+  for (const t of templates) {
+    const shared = keysOf(t)
+      .map((k) => byFile.get(k))
+      .filter((p) => p !== undefined);
+    place(t, byHash.get(t.sha256), shared, order);
+  }
+  return capPerRule(rest, { file: modelId });
+}
 
-  let rest: Finding[] = [];
-  for (const { files, shas, findings: list } of buckets.values()) {
-    const targets = new Set([...(files ?? []), ...(shas ?? [])]);
-    if (targets.size === 0) {
-      rest = capPerRule(list, { file: modelId });
-      continue;
-    }
-    const first = list[0]!;
-    const placed = capPerRule(list, { file: first.file, ...(shas && first.templateSha256 ? { templateSha256: first.templateSha256 } : {}) });
-    for (const t of targets) {
-      for (const f of placed) {
-        t.findings.push(f);
-        if (isGapFinding(f)) t.gaps.push(`${f.ruleId}: ${f.message}`);
-      }
-    }
+const keysOf = (t: Attachable) => [...new Set(t.sites.flatMap((s) => [s.path, s.realPath]))];
+
+// One rule's findings about one file, or naming one template hash. Only the first FINDING_CAP + 1 are held:
+// all a template can keep from here, and the first it gives up, where its summary points. So placing costs
+// each template at most that many per rule, never the length of a list every template in a GGUF shares.
+interface Pile {
+  head: Finding[];
+  count: number;
+  /** The highest seen, for the summary: a suppressed HIGH is not summarized as MEDIUM (finalize.ts). */
+  severity: Severity;
+  /** For a file's pile: how many of its findings name each template hash, and so reach that template twice. */
+  hashed: Map<string, number>;
+}
+type Piles = Map<RuleId, Pile>;
+
+function pile(into: Map<string, Piles>, key: string, f: Finding, hash?: string): void {
+  let piles = into.get(key);
+  if (!piles) into.set(key, (piles = new Map()));
+  let p = piles.get(f.ruleId);
+  if (!p) piles.set(f.ruleId, (p = { head: [], count: 0, severity: f.severity, hashed: new Map() }));
+  if (p.head.length <= FINDING_CAP) p.head.push(f);
+  p.count++;
+  if (SEVERITY_RANK[f.severity] > SEVERITY_RANK[p.severity]) p.severity = f.severity;
+  if (hash !== undefined) p.hashed.set(hash, (p.hashed.get(hash) ?? 0) + 1);
+}
+
+// Per rule, `t` is given its own pile and its files' piles. A finding naming one of its files and its hash is in
+// both, and counts once, as its own. The heads always hold enough to keep FINDING_CAP and point the summary at
+// the first one given up: a file's pile holds FINDING_CAP + 1, and no more of those name `t`'s hash than `t`'s
+// own pile holds. What `t` keeps goes on in the order the findings came, then the summaries.
+function place(t: Attachable, own: Piles | undefined, shared: readonly Piles[], order: ReadonlyMap<Finding, number>): void {
+  const kept: Finding[] = [];
+  const summaries: Finding[] = [];
+  for (const rule of new Set([...(own?.keys() ?? []), ...shared.flatMap((p) => [...p.keys()])])) {
+    const mine = own?.get(rule);
+    const others = shared.map((p) => p.get(rule)).filter((p) => p !== undefined);
+    const given = [...(mine?.head ?? []), ...others.flatMap((p) => p.head.filter((f) => f.templateSha256 !== t.sha256))];
+    const count = others.reduce((n, p) => n + p.count - (p.hashed.get(t.sha256) ?? 0), mine?.count ?? 0);
+    kept.push(...given.slice(0, FINDING_CAP));
+    if (count <= FINDING_CAP) continue;
+    const first = given[FINDING_CAP]!;
+    const severity = [mine, ...others].reduce<Severity>((s, p) => (p && SEVERITY_RANK[p.severity] > SEVERITY_RANK[s] ? p.severity : s), "LOW");
+    const suppressed = count - FINDING_CAP;
+    summaries.push({ ruleId: rule, severity, message: `${suppressed} more ${rule} findings suppressed`, file: first.file, templateSha256: t.sha256, span: first.span ?? { ...WHOLE_TEMPLATE }, detail: { suppressed } });
   }
-  return rest;
+  kept.sort((a, b) => order.get(a)! - order.get(b)!);
+  for (const f of [...kept, ...summaries]) {
+    t.findings.push(f);
+    if (isGapFinding(f)) t.gaps.push(`${f.ruleId}: ${f.message}`);
+  }
 }
