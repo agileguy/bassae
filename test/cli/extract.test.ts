@@ -203,6 +203,36 @@ describe("extract (ISC-29, ISC-29.1, ISC-29.2, ISC-35)", () => {
     expect(existsSync(join(target, "out"))).toBe(false);
   });
 
+  test("security S1: the directory of a template read through a file link is scanned, so --out there is refused", async () => {
+    const root = makeTree({ model: { "tokenizer_config.json": "{}" }, elsewhere: { "t.jinja": "{{ messages }}" } });
+    symlinkSync("../elsewhere/t.jinja", join(root, "model", "chat_template.jinja"));
+    const elsewhere = join(root, "elsewhere");
+    for (const out of [elsewhere, join(elsewhere, "new")]) {
+      const result = await extract(join(root, "model"), out);
+      expect(result.exitCode).toBe(3);
+      expect(result.stderr).toEqual([expect.stringContaining("under the scanned path")]);
+    }
+    expect(readdirSync(elsewhere)).toEqual(["t.jinja"]);
+  });
+
+  test("security S1: every directory the walk passed through on the way to a template counts as scanned", async () => {
+    // model/a -> ../mid, mid/b -> ../far, far/x.gguf: the GGUF is read at model/a/b/x.gguf.
+    const root = makeTree({ model: {}, mid: {}, far: {} });
+    symlinkSync("../mid", join(root, "model", "a"));
+    symlinkSync("../far", join(root, "mid", "b"));
+    const gguf = join(root, "far", "x.gguf");
+    const read = join(root, "model", "a", "b", "x.gguf");
+    const t = makeTemplate({ kind: "gguf", path: read, realPath: gguf, name: "default" }, new TextEncoder().encode("x"));
+    const load = async () => ({ models: [record(gguf, [t], { format: "gguf", paths: [read] })], findings: [] });
+    for (const dir of ["mid", "far"]) {
+      const result = await extract(join(root, "model"), join(root, dir, "out"), load);
+      expect(result.exitCode).toBe(3);
+      expect(existsSync(join(root, dir, "out"))).toBe(false);
+    }
+    // A sibling the walk never entered is still a fine place to write.
+    expect((await extract(join(root, "model"), join(root, "out"), load)).exitCode).toBe(0);
+  });
+
   test("a missing model is a usage error", async () => {
     const root = makeTree({});
     const result = await extract(join(root, "nope"), join(root, "out"), async () => ({ models: [], findings: [] }));
