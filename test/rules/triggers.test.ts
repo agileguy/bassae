@@ -116,6 +116,11 @@ test("classifyTest: a value test on content, names, ids and tool text is content
   ]);
 });
 
+test("classifyTest: an equality between two id fields is presence; an id against a constant or another field is content", () => {
+  expectAll("presence", ["tool_call.id == message.tool_call_id", "message.tool_call_id != tool_call.id", "message.id == tool_call.id"]);
+  expectAll("content", ["message.id == 'x'", "message.tool_call_id == 'call_1'", "tool_call.id == message.content", "message.name == message.tool_call_id", "tool_call.id >= message.tool_call_id"]);
+});
+
 test("classifyTest: a field with a vocabulary is presence against it and content against anything else", () => {
   expectAll("presence", ["message.type == 'text'", "message.type|lower == 'IMAGE'", "message.type.upper() == 'IMAGE'", "message.type in ['image', 'video']", "'image' in message.type", "enable_thinking == false", "enable_thinking != none", "add_generation_prompt == 1", "reasoning_effort == 'High'", "tool_choice == 'auto'", "'python' in builtin_tools"]);
   expectAll("content", ["message.type == 'zz'", "message.type in ['image', 'zz']", "enable_thinking == 'xyzzy'", "reasoning_effort == 'xyzzy'", "tool_choice == 'send_email'", "'send_email' in builtin_tools", "message.type == message.role"]);

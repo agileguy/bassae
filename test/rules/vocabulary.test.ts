@@ -196,3 +196,121 @@ test("ISC-18.1: a value test on date_string or today is a nondeterministic trigg
     expect({ t, cls: cls(src), highs: highs(src) }).toEqual({ t, cls: "presence", highs: [] });
   }
 });
+
+// ---- counts the interpreter carries: a variable, a namespace, arithmetic ----
+
+test("ISC-18: a count kept in a variable or computed by arithmetic is still a count", () => {
+  const src = (pre: string, t: string) => `{% for m in messages %}${pre}{% if ${t} %}${INJ}{% endif %}{% endfor %}`;
+  const content: [string, string][] = [
+    ["{% set n = messages|length %}", "n > 20"],
+    ["{% set n = messages|length - 40 %}", "n > 0"],
+    ["{% set c = m.content|length %}", "c > 300"],
+    ["{% set k = loop.index0 * 3 %}", "k > 7"],
+    ["{% set ns = namespace(n=messages|length) %}", "ns.n > 20"],
+    ["{% set w = m.content|wordcount %}", "w >= 12"],
+  ];
+  const presence: [string, string][] = [
+    ["{% set n = messages|length %}", "n > 0"],
+    ["{% set last = messages|length - 1 %}", "loop.index0 == last"],
+    ["{% set i = loop.index0 + 1 %}", "i == messages|length"],
+    ["{% set n = m.content|length %}", "n == 0"],
+    ["{% set ns = namespace(n=messages|length) %}", "ns.n > 1"],
+  ];
+  for (const [pre, t] of content) expect({ pre, t, cls: cls(src(pre, t)), highs: highs(src(pre, t)) }).toEqual({ pre, t, cls: "content", highs: ["content_trigger"] });
+  for (const [pre, t] of presence) expect({ pre, t, cls: cls(src(pre, t)), highs: highs(src(pre, t)) }).toEqual({ pre, t, cls: "presence", highs: [] });
+});
+
+test("ISC-18: the test that chose a count's shift is part of every test on the count", () => {
+  const src = `{% for m in messages %}{% set k = 1 if 'xyzzy' in m.content else 1 %}{% if loop.index0 + k == 1 %}${INJ}{% endif %}{% endfor %}`;
+  expect(cls(src)).toBe("content");
+});
+
+test("ISC-18: text repeated by a count is still chosen by it, not folded into the count", () => {
+  const items = extractInjectedText(ctx(`{{ '${INJ}' * (messages|length) }}`));
+  expect(items.map((i) => i.text)).toEqual([INJ]);
+});
+
+// ---- selection by a field: the same vocabulary as a comparison ----
+
+test("ISC-18: selectattr on a type in its vocabulary stays presence; another value or field is content", () => {
+  const src = (f: string) => `{% for m in messages %}{% for p in m.content|${f} %}${INJ}{% endfor %}{% endfor %}`;
+  for (const f of ["selectattr('type', 'equalto', 'image')", "rejectattr('type', 'equalto', 'text')", "selectattr('type', '==', 'image')", "selectattr('type', 'in', ['image', 'video'])", "selectattr('type', 'defined')"]) {
+    expect({ f, cls: cls(src(f)) }).toEqual({ f, cls: "presence" });
+  }
+  for (const f of ["selectattr('type', 'equalto', 'xyzzy')", "selectattr('text', 'equalto', 'xyzzy')", "selectattr('type', 'in', ['image', 'zz-trigger'])", "rejectattr('type', 'equalto', 'xyzzy')"]) {
+    expect({ f, cls: cls(src(f)), highs: highs(src(f)) }).toEqual({ f, cls: "content", highs: ["content_trigger"] });
+  }
+  expect(cls(`{% for m in messages|selectattr('role', 'equalto', 'user') %}${INJ}{% endfor %}`)).toBe("presence");
+  const sudo = `{% for m in messages|selectattr('name', 'equalto', 'sudo') %}${INJ}{% endfor %}`;
+  expect({ cls: cls(sudo), highs: highs(sudo) }).toEqual({ cls: "content", highs: ["content_trigger"] });
+});
+
+// Llama 3.2 Vision and Mistral-style templates count a message's image parts.
+test("ISC-18: the stock image-part count stays presence", () => {
+  const src = `{% for m in messages %}{% if m.content|selectattr('type', 'equalto', 'image')|list|length > 0 %}${INJ}{% endif %}{% endfor %}`;
+  expect({ cls: cls(src), highs: highs(src) }).toEqual({ cls: "presence", highs: [] });
+});
+
+// ---- an id matched to an id: a call paired with its result ----
+
+// Gemma 4 names a tool result by finding the call whose id it answers. Neither
+// side is a template constant, so the equality cannot hide a trigger value.
+test("ISC-18: an equality between two id fields pairs a call with its result and stays presence", () => {
+  const gemma =
+    "{% for message in messages %}{% for k in range(loop.index0 + 1, messages|length) %}{% set follow = messages[k] %}" +
+    "{% set ns = namespace(name=follow.get('name') | default('unknown')) %}" +
+    "{% for tc in message['tool_calls'] %}{% if tc.get('id') == follow.get('tool_call_id') %}{% set ns.name = tc['function']['name'] %}{% endif %}{% endfor %}" +
+    "{{ ns.name }}{% endfor %}{% endfor %}";
+  expect(highs(gemma)).toEqual([]);
+  const direct = `{% for message in messages %}{% for follow in messages %}{% for tc in message.tool_calls %}{% if tc.get('id') == follow.get('tool_call_id') %}${INJ}{% endif %}{% endfor %}{% endfor %}{% endfor %}`;
+  expect({ cls: cls(direct), highs: highs(direct) }).toEqual({ cls: "presence", highs: [] });
+  expectPresence(["tc.id == m.tool_call_id", "m.tool_call_id == tc.id", "m['tool_call_id'] != tc['id']", "tc.get('id') == m.get('tool_call_id')", "m.id == tc.id"]);
+});
+
+test("ISC-18: an id against a constant or against any other field is still a content test", () => {
+  expectContent(["m.id == 'x'", "m.tool_call_id == 'call_1'", "tc.id == m.content", "m.name == m.tool_call_id", "m.name == 'sudo'", "tc.id < m.tool_call_id", "tc.function.name == m.tool_call_id"]);
+  // An id that may be a constant instead: a branch, a default or `or` puts one
+  // where the join expects only ids.
+  expectContent([
+    "m.id == (tc.id if false else 'sudo')",
+    "m.id == tc.id|default('sudo')",
+    "m.id == (tc.id or 'sudo')",
+    "m.id == (tc.id if tc.type else 'sudo')",
+    "m.id == tc.id|d('sudo')",
+    "(tc.id if false else 'sudo') == m.tool_call_id",
+    "m.id == (tc.id if false else 7)",
+    "m.id == tc.get('id', 'sudo')",
+    "m.tool_call_id == tc.get('id', m.name)",
+    "m.id == (tc if false else {'id': 'sudo'}).id",
+    "m.id == [tc.id, 'sudo']|first",
+  ]);
+});
+
+test("ISC-18: an id variable that may hold a constant is still a content test", () => {
+  const src = (pre: string, t: string) => `{% for m in messages %}{% for tc in m.tool_calls %}${pre}{% if ${t} %}${INJ}{% endif %}{% endfor %}{% endfor %}`;
+  const content: [string, string][] = [
+    ["{% set i = tc.id if false else 'sudo' %}", "m.id == i"],
+    ["{% set i = 'sudo' %}{% if tc.type %}{% set i = tc.id %}{% endif %}", "m.id == i"],
+    ["{% set ns = namespace(i='sudo') %}{% if tc.type %}{% set ns.i = tc.id %}{% endif %}", "m.id == ns.i"],
+  ];
+  for (const [pre, t] of content) expect({ pre, t, cls: cls(src(pre, t)), highs: highs(src(pre, t)) }).toEqual({ pre, t, cls: "content", highs: ["content_trigger"] });
+  const pre = "{% set i = tc.id %}";
+  expect({ cls: cls(src(pre, "m.tool_call_id == i")), highs: highs(src(pre, "m.tool_call_id == i")) }).toEqual({ cls: "presence", highs: [] });
+});
+
+// The same join on a count or a typed field: the constant a branch or default
+// may give is compared too.
+test("ISC-18: a count or a type that may be a constant instead is judged as that constant too", () => {
+  expectContent([
+    "messages|length > (1 if false else 40)",
+    "p.type == (p.type if false else 'xyzzy')",
+    "messages|length > (messages|length if false else 40)",
+    "(messages|length if false else 40) < messages|length",
+    "messages|length > ((messages|length if false else 40) + 0)",
+    "messages|length > messages|length|default(40)",
+    "messages|length > (m.content if false else 'a fixed forty-character threshold text')|length",
+    "(p.type if false else m.name|string) == 'image'",
+  ]);
+  expectPresence(["p.type|default('text') == 'image'", "(p.type if false else 'xyzzy') == 'image'", "(messages|length if false else 40) > 0", "'type' in (p if false else {'type': 'image'})"]);
+  expectContent(["'sudo' in (p if false else m.name|string)"]);
+});

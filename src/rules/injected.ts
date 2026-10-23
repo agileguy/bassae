@@ -38,17 +38,21 @@ import {
   classifyTest,
   clsOf,
   condOf,
+  countArith,
+  eitherRest,
   elementField,
   factsFrom,
   FLAG_FILTERS,
   genPolarity,
   isRuntime,
   KEY_FIELD,
+  lengthOf,
   listOf,
   mapFields,
   memberField,
   NO_FACTS,
   pathOf,
+  restOf,
   rootField,
   sameFields,
   stronger,
@@ -56,9 +60,11 @@ import {
   truthOf,
   unionFields,
   valueField,
+  vocabClass,
   type Cond,
   type Facts,
   type Field,
+  type Fields,
   type Lit,
   type TestClass,
   type TestEnv,
@@ -703,7 +709,7 @@ class Interp {
             keys.push(...kv.lits);
             const vv = this.eval(val, c);
             this.holds(vv);
-            v = join(v, { ...vv, konst: undefined, konstList: undefined, ns: undefined, macro: undefined, path: undefined, fields: undefined });
+            v = join(v, { ...vv, konst: undefined, konstList: undefined, ns: undefined, macro: undefined, path: undefined, fields: undefined, rest: undefined });
           }
         }
         return { ...v, keys: [...(v.keys ?? []), ...keys], truth: "none" };
@@ -778,6 +784,7 @@ class Interp {
       truth: fields ? "presence" : o.truth,
       gate: strongest(o.gate, keyGate),
       fields,
+      rest: o.rest,
       path,
     };
     return refine(v, path, c);
@@ -825,7 +832,7 @@ class Interp {
               if (a?.type === "KeywordArgumentExpression") keys.push({ text: String((a.key as Node).value), span: this.exprSpan(a.key as Node) });
               const av = this.eval(a, c);
               this.holds(av);
-              v = join(v, { ...av, konst: undefined, fields: undefined, path: undefined });
+              v = join(v, { ...av, konst: undefined, fields: undefined, rest: undefined, path: undefined });
             }
             return { ...v, keys, truth: "none" };
           }
@@ -992,16 +999,17 @@ class Interp {
       case "get": {
         const k = a[0]?.konst;
         const fields = r.fields ? mapFields(r.fields, (f) => memberField(f, typeof k === "string" ? k : undefined)) : undefined;
-        // The key chooses an entry or the default: both depend on it.
+        // The key chooses an entry or the default: both depend on it. The
+        // value may be the default instead.
         const sel = argNodes[0] ? this.selCond(a[0]!, argNodes[0]) : undefined;
-        return { ...base, lits: this.choose([...r.lits, ...(a[1]?.lits ?? [])], sel), data: fields ? clsOf(fields) : r.data, truth: fields ? "presence" : r.truth, fields };
+        return { ...base, lits: this.choose([...r.lits, ...(a[1]?.lits ?? [])], sel), data: fields ? clsOf(fields) : r.data, truth: fields ? "presence" : r.truth, fields, rest: fields ? eitherRest(r.rest, a[1]?.data) : undefined };
       }
       case "items":
       case "keys":
       case "values":
         if (m === "keys") return { ...base, lits: r.keys ?? [], data: r.fields ? "presence" : r.data, truth: r.truth };
-        if (m === "values") return { ...base, lits: r.lits, data: r.data, truth: r.truth, fields: r.fields ? mapFields(r.fields, (f) => listOf(valueField(f))) : undefined };
-        return { ...base, lits: r.lits, keys: r.keys, data: r.data, truth: r.truth, fields: r.fields, pairs: true };
+        if (m === "values") return { ...base, lits: r.lits, data: r.data, truth: r.truth, fields: r.fields ? mapFields(r.fields, (f) => listOf(valueField(f))) : undefined, rest: r.rest };
+        return { ...base, lits: r.lits, keys: r.keys, data: r.data, truth: r.truth, fields: r.fields, rest: r.rest, pairs: true };
       case "append":
       case "extend":
       case "insert":
@@ -1083,22 +1091,24 @@ class Interp {
       case "unique":
       case "batch":
       case "slice":
-        return { ...keep, keys: o.keys, fields: o.fields, konstList: name === "list" ? o.konstList : undefined };
+        return { ...keep, keys: o.keys, fields: o.fields, rest: o.rest, konstList: name === "list" ? o.konstList : undefined };
       case "items":
       case "dictsort":
-        return { ...keep, keys: o.keys, fields: o.fields, pairs: true };
+        return { ...keep, keys: o.keys, fields: o.fields, rest: o.rest, pairs: true };
       case "first":
       case "last":
       case "min":
       case "max": {
         const fields = o.fields ? mapFields(o.fields, elementField) : undefined;
         // `min(attribute=x)`: the attribute chooses the element.
-        return { ...keep, lits: this.choose(o.lits, this.argsCond(a, argNodes)), data: fields ? clsOf(fields) : o.data, truth: fields ? "presence" : o.truth, fields };
+        return { ...keep, lits: this.choose(o.lits, this.argsCond(a, argNodes)), data: fields ? clsOf(fields) : o.data, truth: fields ? "presence" : o.truth, fields, rest: o.rest };
       }
       case "length":
       case "count":
       case "wordcount":
-        return { lits: [], data: o.truth, truth: o.truth, gate };
+        // A count of conversation data: compared with 0 or 1 it is presence,
+        // with a threshold further away it is content (ISC-18).
+        return lengthOf(o, gate);
       case "int":
       case "float":
       case "abs":
@@ -1110,7 +1120,7 @@ class Interp {
         const efs = o.fields ? mapFields(o.fields, elementField) : undefined;
         if (attr !== undefined && efs) {
           const fs = mapFields(efs, (f) => memberField(f, attr));
-          return { ...keep, data: clsOf(fs), fields: mapFields(fs, listOf) };
+          return { ...keep, data: clsOf(fs), fields: mapFields(fs, listOf), rest: o.rest };
         }
         // An attribute name computed at runtime chooses which entries are printed.
         return { ...keep, lits: this.choose(o.lits, this.argsCond(a, argNodes)) };
@@ -1121,24 +1131,24 @@ class Interp {
       case "reject": {
         // Which elements survive depends on the test applied to each one.
         const efs = o.fields ? mapFields(o.fields, elementField) : undefined;
-        let read: TestClass;
+        let fs: Fields | undefined;
         let testAt: number;
         if (name === "selectattr" || name === "rejectattr") {
           const attr = typeof a[0]?.konst === "string" ? a[0].konst : undefined;
-          const fs = efs ? mapFields(efs, (f) => memberField(f, attr)) : undefined;
-          read = fs ? clsOf(fs) : o.data;
+          fs = efs ? mapFields(efs, (f) => memberField(f, attr)) : undefined;
           testAt = 1;
         } else {
-          read = efs ? clsOf(efs) : o.data;
+          fs = efs;
           testAt = 0;
         }
+        const read: TestClass = fs ? clsOf(fs) : o.data;
         const testArg = a[testAt];
         const test = typeof testArg?.konst === "string" ? testArg.konst : "";
-        let sel: TestClass = test === "" || SHAPE_SELECT_TESTS.has(test) ? (read === "none" ? "none" : "presence") : read;
+        let sel: TestClass = test === "" || SHAPE_SELECT_TESTS.has(test) ? (read === "none" ? "none" : "presence") : ((fs && vocabSelect(fs, test, a[testAt + 1])) ?? read);
         // What the elements are compared with (`select('in', x)`) decides too.
         for (const x of a.slice(testAt + 1)) sel = stronger(sel, x.data);
         const cond = strongest(this.argsCond(a, argNodes), condOf(sel === "presence" ? "none" : sel, this.exprSpan(fnode)));
-        return { ...keep, lits: this.choose(o.lits, cond), keys: o.keys && this.choose(o.keys, cond), fields: o.fields, truth: stronger(o.truth, sel) };
+        return { ...keep, lits: this.choose(o.lits, cond), keys: o.keys && this.choose(o.keys, cond), fields: o.fields, rest: o.rest, truth: stronger(o.truth, sel) };
       }
       case "random": {
         this.flagNondet(fnode, "uses the `random` filter");
@@ -1167,6 +1177,12 @@ class Interp {
     const r = this.eval(n.right, c);
     const gate = strongest(l.gate, r.gate);
     const data = stronger(l.data, r.data);
+    // Arithmetic on a count keeps it a count, shifted or scaled. Text is never
+    // a count: `'a' + 'b'` folds and `'text' * n` is chosen below.
+    if (o !== "~" && typeof l.konst !== "string" && typeof r.konst !== "string") {
+      const counted = countArith(l, r, o);
+      if (counted) return { ...counted, lits: [...l.lits, ...r.lits], gate: strongest(gate, counted.gate) };
+    }
     if (o === "~" || o === "+") {
       // Concatenation: fold two constants into one literal, so text assembled
       // from fragments is matched (and URL-scanned) whole.
@@ -1297,6 +1313,22 @@ const BUILTINS = new Set(["namespace", "dict", "range", "strftime_now", "raise_e
 const NONDET_FNS = new Set(["strftime_now", "random"]);
 const SHAPE_SELECT_TESTS = new Set(["defined", "undefined", "none", "string", "mapping", "iterable", "sequence", "number", "integer", "float", "boolean", "true", "false"]);
 
+// `selectattr('type', 'equalto', 'image')` compares each element with a
+// constant, so it reads the field against its vocabulary as `==` does (ISC-18).
+const COMPARE_SELECT_TESTS = new Set(["equalto", "==", "eq", "sameas", "ne", "!=", "in"]);
+
+function vocabSelect(fs: Fields, test: string, value: Val | undefined): TestClass | undefined {
+  if (!value || !COMPARE_SELECT_TESTS.has(test) || isRuntime(value)) return undefined;
+  const values = test === "in" ? value.konstList : value.konst !== undefined ? [value.konst] : undefined;
+  let cls: TestClass | undefined;
+  for (const v of values ?? []) {
+    const c = vocabClass(fs, v);
+    if (c === undefined) return undefined;
+    cls = cls === undefined ? c : stronger(cls, c);
+  }
+  return cls;
+}
+
 function runtimeVal(field: Field, path: string | undefined): Val {
   return { lits: [], data: field.cls, truth: "presence", fields: [field], path };
 }
@@ -1365,17 +1397,18 @@ function elemOf(it: Val): Val {
     truth: fields ? "presence" : it.truth,
     gate: it.gate,
     fields,
+    rest: it.rest,
   };
 }
 
 function keysOf(it: Val): Val {
   const d: TestClass = it.fields ? "presence" : it.data === "none" ? "none" : "presence";
-  return { lits: it.keys ?? [], data: d, truth: d, gate: it.gate, fields: it.fields ? [KEY_FIELD] : undefined };
+  return { lits: it.keys ?? [], data: d, truth: d, gate: it.gate, fields: it.fields ? [KEY_FIELD] : undefined, rest: it.rest };
 }
 
 function valuesOf(it: Val): Val {
   const fields = it.fields ? mapFields(it.fields, valueField) : undefined;
-  return { lits: it.lits, data: fields ? clsOf(fields) : it.data, truth: fields ? "presence" : it.truth, gate: it.gate, fields };
+  return { lits: it.lits, data: fields ? clsOf(fields) : it.data, truth: fields ? "presence" : it.truth, gate: it.gate, fields, rest: it.rest };
 }
 
 function maxData(r: Val, a: Val[]): TestClass {
@@ -1457,6 +1490,8 @@ function join(a: Val, b: Val): Val {
     truth: stronger(a.truth, b.truth),
     gate: strongest(a.gate, b.gate),
     fields: unionFields(a.fields, b.fields),
+    // Either side may be something besides the other's fields.
+    rest: a.fields || b.fields ? eitherRest(restOf(a), restOf(b)) : undefined,
     path: a.path === b.path ? a.path : undefined,
     shape: a.shape === b.shape ? a.shape : undefined,
     konst: a.konst === b.konst ? a.konst : undefined,
@@ -1473,7 +1508,7 @@ function join(a: Val, b: Val): Val {
 function sameVal(a: Val, b: Val): boolean {
   if (a.lits.length !== b.lits.length || (a.keys?.length ?? 0) !== (b.keys?.length ?? 0)) return false;
   if (a.data !== b.data || a.truth !== b.truth || a.gate?.test !== b.gate?.test) return false;
-  if (!sameFields(a.fields, b.fields) || a.konst !== b.konst || a.ns !== b.ns || a.macro !== b.macro || a.pairs !== b.pairs) return false;
+  if (!sameFields(a.fields, b.fields) || a.rest !== b.rest || a.konst !== b.konst || a.ns !== b.ns || a.macro !== b.macro || a.pairs !== b.pairs) return false;
   if (String(a.fns) !== String(b.fns) || a.genFlag !== b.genFlag) return false;
   if ((a.konstList === undefined) !== (b.konstList === undefined)) return false;
   for (let i = 0; i < a.lits.length; i++) if (a.lits[i]!.cond?.test !== b.lits[i]!.cond?.test) return false;

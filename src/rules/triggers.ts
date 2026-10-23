@@ -7,8 +7,10 @@
 //                     has: definedness, none, truthiness and emptiness (a length
 //                     or loop position compared with 0 or 1), a message's role,
 //                     a `type` or a kwarg compared with its documented vocabulary
-//                     (`part.type == 'image'`, `reasoning_effort == 'high'`), the
-//                     keys of a record, and a tool's parameter schema
+//                     (`part.type == 'image'`, `reasoning_effort == 'high'`), an
+//                     id compared for equality with another id (a call paired
+//                     with its result), the keys of a record, and a tool's
+//                     parameter schema
 //   content           reads what a user, a tool or a caller wrote: message
 //                     content and reasoning, a message's name, id or
 //                     tool_call_id, a tool's or tool call's function name,
@@ -78,6 +80,8 @@ export interface Field {
   off?: number;
   /** The class of a test that compares a count with a threshold more than 1 away from it. */
   threshold?: "content" | "nondeterministic";
+  /** An identifier that pairs records: a call's `id`, its result's `tool_call_id`. */
+  ident?: true;
 }
 
 function vocab(...words: string[]): ReadonlySet<string> {
@@ -99,6 +103,10 @@ const BUILTIN_NAMES = vocab("browser", "python", "brave_search", "wolfram_alpha"
 
 const PRESENCE: Field = { cls: "presence", kind: "any" };
 const TEXT: Field = { cls: "content", kind: "string" };
+// A message's or tool call's `id` and a tool result's `tool_call_id`: content
+// against a constant, but one compared for equality with another pairs a call
+// with its result (Gemma 4), and no template value decides that.
+const ID: Field = { cls: "content", kind: "string", ident: true };
 const TYPE: Field = { cls: "content", kind: "string", vocab: TYPES };
 // The date a runtime passes (Llama 3.x `date_string`, `today`): the clock, the
 // same as a strftime_now() result.
@@ -121,7 +129,7 @@ const SCHEMA: Field = { cls: "presence", kind: "any" };
 // presence tests; its values are content.
 const ARGS: Field = { cls: "content", kind: "record", other: ANY_CONTENT };
 const FUNCTION: Field = { cls: "content", kind: "record", fields: { name: TEXT, arguments: ARGS }, other: ANY_CONTENT };
-const TOOL_CALL: Field = { cls: "content", kind: "record", fields: { type: TYPE, id: TEXT, name: TEXT, function: FUNCTION, arguments: ARGS }, other: ANY_CONTENT };
+const TOOL_CALL: Field = { cls: "content", kind: "record", fields: { type: TYPE, id: ID, name: TEXT, function: FUNCTION, arguments: ARGS }, other: ANY_CONTENT };
 const TOOL_CALLS: Field = { cls: "content", kind: "list", elem: TOOL_CALL };
 
 // A content part: `{'type': 'text', 'text': ...}`, `{'type': 'image', ...}`.
@@ -138,8 +146,8 @@ const MESSAGE: Field = {
     role: PRESENCE,
     type: TYPE,
     name: TEXT,
-    id: TEXT,
-    tool_call_id: TEXT,
+    id: ID,
+    tool_call_id: ID,
     tool_calls: TOOL_CALLS,
     content: MESSAGE_CONTENT,
     reasoning_content: TEXT,
@@ -357,6 +365,8 @@ export interface Val {
   gate?: Cond;
   /** The schema nodes the value may be, while it is a raw runtime field. */
   fields?: Fields;
+  /** With `fields`: the value may be something else instead (a constant or other value a branch, `or` or `|default` joined in), and comparing that reveals this much. Unset while it is only ever one of `fields`. */
+  rest?: TestClass;
   /** The access path (`message.content`), for `is mapping` / `is string` guards. */
   path?: string;
   /** A guard in force says the value is (not) a string. */
@@ -405,6 +415,22 @@ function gateOf(v: Val): TestClass {
   return v.gate?.test ?? "none";
 }
 
+/** What `v` may be besides its fields, for a join: all of it when it has none. */
+export function restOf(v: Val): TestClass | undefined {
+  return v.fields ? v.rest : v.data;
+}
+
+/** Either of two rests. */
+export function eitherRest(a: TestClass | undefined, b: TestClass | undefined): TestClass | undefined {
+  return a === undefined ? b : b === undefined ? a : stronger(a, b);
+}
+
+// A test the fields alone pass as `cls`, on a value that may be something
+// besides them: that other value is tested too.
+function withRest(cls: TestClass | undefined, rest: TestClass | undefined): TestClass | undefined {
+  return cls === undefined || rest === undefined ? cls : stronger(cls, rest);
+}
+
 /** True when the value depends on runtime input at all. */
 export function isRuntime(v: Val): boolean {
   return v.data !== "none" || v.truth !== "none" || v.fields !== undefined;
@@ -441,7 +467,7 @@ export function classifyTest(n: Node, env: TestEnv, facts: Facts): TestClass {
         return stronger(l, r);
       }
       if (o === "in" || o === "not in") return membership(n.left as Node, n.right as Node, env, facts);
-      if (COMPARISONS.has(o)) return comparison(n.left as Node, n.right as Node, env, facts);
+      if (COMPARISONS.has(o)) return comparison(n.left as Node, n.right as Node, o, env, facts);
       return truthiness(n, env, facts);
     }
     case "TestExpression": {
@@ -470,12 +496,14 @@ function truthiness(n: Node, env: TestEnv, facts: Facts): TestClass {
 }
 
 // `a == b`, `a < b`, ...: a count against a threshold, a field with a
-// vocabulary against a constant, or else both values read whole.
-function comparison(a: Node, b: Node, env: TestEnv, facts: Facts): TestClass {
+// vocabulary against a constant, an id against an id, or else both values read
+// whole.
+function comparison(a: Node, b: Node, o: string, env: TestEnv, facts: Facts): TestClass {
   const va = operand(a, env, facts, 0);
   const vb = operand(b, env, facts, 0);
   const gates = stronger(gateOf(va), gateOf(vb));
-  const cls = countTest(va, vb) ?? countTest(vb, va) ?? vocabTest(a, vb, env, facts) ?? vocabTest(b, va, env, facts) ?? stronger(readOf(va), readOf(vb));
+  const join = (o === "==" || o === "!=") && identOnly(va) && identOnly(vb) ? "presence" : undefined;
+  const cls = countTest(va, vb) ?? countTest(vb, va) ?? vocabTest(a, vb, env, facts) ?? vocabTest(b, va, env, facts) ?? join ?? stronger(readOf(va), readOf(vb));
   return stronger(cls, gates);
 }
 
@@ -492,7 +520,7 @@ function membership(a: Node, b: Node, env: TestEnv, facts: Facts): TestClass {
   const gates = stronger(gateOf(va), gateOf(vb));
   let cls = vocabIn(a, b, vb, env, facts);
   if (cls === undefined) {
-    if (isMapping(vb)) cls = stronger(isRuntime(vb) ? "presence" : "none", readOf(va));
+    if (isMapping(vb)) cls = stronger(isRuntime(vb) ? "presence" : "none", stronger(readOf(va), vb.rest ?? "none"));
     else if (!isRuntime(vb)) cls = readOf(va);
     else cls = stronger(readOf(vb), readOf(va));
   }
@@ -503,7 +531,8 @@ function vocabIn(a: Node, b: Node, vb: Val, env: TestEnv, facts: Facts): TestCla
   const list = constList(b, vb, env, facts);
   if (list) {
     // The field against each value of a constant list.
-    const fs = env.value(uncased(a), facts).fields;
+    const va = env.value(uncased(a), facts);
+    const fs = va.fields;
     if (!fs) return undefined;
     let cls: TestClass = "presence";
     for (const k of list) {
@@ -511,13 +540,13 @@ function vocabIn(a: Node, b: Node, vb: Val, env: TestEnv, facts: Facts): TestCla
       if (c === undefined) return undefined;
       cls = stronger(cls, c);
     }
-    return cls;
+    return withRest(cls, va.rest);
   }
   // A constant in a list of vocabulary values, or in one such value.
   const k = constOf(env.value(a, facts));
   if (k === undefined || !vb.fields || vb.fields.length === 0) return undefined;
   const fs = vb.fields.every((f) => f.kind === "list") ? mapFields(vb.fields, elementField) : vb.fields;
-  return vocabClass(fs, k);
+  return withRest(vocabClass(fs, k), vb.rest);
 }
 
 // `x` compared with the constant `other`, when `x` has a vocabulary. Case and
@@ -525,8 +554,8 @@ function vocabIn(a: Node, b: Node, vb: Val, env: TestEnv, facts: Facts): TestCla
 function vocabTest(x: Node, other: Val, env: TestEnv, facts: Facts): TestClass | undefined {
   const k = constOf(other);
   if (k === undefined) return undefined;
-  const fs = env.value(uncased(x), facts).fields;
-  return fs ? vocabClass(fs, k) : undefined;
+  const v = env.value(uncased(x), facts);
+  return v.fields ? withRest(vocabClass(v.fields, k), v.rest) : undefined;
 }
 
 const CASE_FILTERS = new Set(["lower", "upper", "trim", "string", "capitalize", "title"]);
@@ -600,7 +629,16 @@ function operand(n: Node, env: TestEnv, facts: Facts, depth: number): Val {
   return v;
 }
 
-/** The counts a value may be, when it is only ever a count. */
+// Runtime data that is only ever ids: `tc.get('id') == follow.get('tool_call_id')`
+// pairs a call with its result. Neither side is a template constant, so the
+// equality cannot name a trigger value (Decisions 20:15). An id that may be
+// something else instead (`tc.id or 'sudo'`, `tc.id|default('sudo')`) may be
+// that constant, so it is no join.
+function identOnly(v: Val): boolean {
+  return v.rest === undefined && !!v.fields && v.fields.length > 0 && v.fields.every((f) => f.ident === true);
+}
+
+/** The counts a value may be, when every field it may be is a count (`rest` says what else it may be). */
 function countsOf(v: Val): Fields | undefined {
   return v.fields && v.fields.length > 0 && v.fields.every((f) => f.kind === "count") ? v.fields : undefined;
 }
@@ -615,14 +653,16 @@ function thresholdOf(fs: Fields): TestClass {
 // whether there is anything, or one thing, or whether this is the first or last
 // position: as telling as the value's emptiness. Further away it is a threshold
 // a long enough conversation crosses (ISC-18, Decisions 19:15). A template value
-// whose constant is not known (`40 if tools else 41`) may be any threshold.
+// whose constant is not known (`40 if tools else 41`) may be any threshold, and
+// so may a count that may be such a value instead (`n if c else 40`) when it
+// is compared with a count.
 function countTest(x: Val, other: Val): TestClass | undefined {
   const xs = countsOf(x);
   if (!xs) return undefined;
-  const near = stronger(readOf(x), readOf(other));
+  const near = stronger(stronger(readOf(x), readOf(other)), stronger(x.rest ?? "none", other.rest ?? "none"));
   const ys = countsOf(other);
   let far: boolean;
-  if (ys) far = xs.some((a) => ys.some((b) => !(Math.abs(a.off! - b.off!) <= 1)));
+  if (ys) far = x.rest !== undefined || other.rest !== undefined || xs.some((a) => ys.some((b) => !(Math.abs(a.off! - b.off!) <= 1)));
   else if (isRuntime(other)) return undefined;
   else if (typeof other.konst === "number") far = xs.some((a) => !(Math.abs((other.konst as number) - a.off!) <= 1));
   else far = other.konst === undefined;
@@ -638,7 +678,7 @@ export function lengthOf(o: Val, gate?: Cond): Val {
   const v: Val = { lits: [], data: o.truth, truth: o.truth, gate: gate ?? o.gate };
   if (countsOf(o)) return v; // a number has no length
   const d = o.fields ? clsOf(o.fields) : o.data;
-  return d === "content" || d === "nondeterministic" ? { ...v, fields: [countField(0, d)] } : v;
+  return d === "content" || d === "nondeterministic" ? { ...v, fields: [countField(0, d)], rest: o.rest } : v;
 }
 
 /**
@@ -654,7 +694,9 @@ export function countArith(l: Val, r: Val, operator: string): Val | undefined {
   if ((!lc && !rc) || !ARITHMETIC.has(operator)) return undefined;
   const gate = strongest(l.gate, r.gate);
   const data = stronger(l.data, r.data);
-  const shifted = (fs: Fields, d: number): Val => ({ lits: [], data, truth: data, gate, fields: fs.map((f) => countField(f.off! + d, f.threshold ?? "content")) });
+  // A count operand that may be a constant instead makes a result that may be one.
+  const rest = eitherRest(lc ? l.rest : undefined, rc ? r.rest : undefined);
+  const shifted = (fs: Fields, d: number): Val => ({ lits: [], data, truth: data, gate, fields: fs.map((f) => countField(f.off! + d, f.threshold ?? "content")), rest });
   const scaled = (fs: Fields): Val => {
     const t = stronger(data, thresholdOf(fs));
     return { lits: [], data: t, truth: t, gate };
@@ -666,7 +708,7 @@ export function countArith(l: Val, r: Val, operator: string): Val | undefined {
       const f = countField(operator === "+" ? a.off! + b.off! : a.off! - b.off!, stronger(a.threshold ?? "content", b.threshold ?? "content") as "content" | "nondeterministic");
       if (!out.includes(f)) out.push(f);
     }
-    return { lits: [], data, truth: data, gate, fields: out };
+    return { lits: [], data, truth: data, gate, fields: out, rest };
   }
   const fs = (lc ?? rc)!;
   const k = constOf(lc ? r : l);
