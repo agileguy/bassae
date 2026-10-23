@@ -64,8 +64,11 @@ export interface ToolMatcher {
   render(tool: unknown): string | undefined;
   /** Other texts a pinned variant of the cited template prints for a tool `render` covers; the entry cites each. */
   variants?(tool: unknown): string[];
-  /** Every tool definition rendered this way in `output`, bounded as `render` bounds it. */
-  sites(output: string): ToolSite[];
+  /**
+   * Every tool definition rendered this way in `output`, bounded as `render` bounds it, the first `limit` of them
+   * when there are more. One pass over the output: its length and its sites are the template's to choose.
+   */
+  sites(output: string, limit?: number): ToolSite[];
 }
 
 type Obj = Record<string, unknown>;
@@ -245,10 +248,10 @@ function toJson(v: unknown): string {
   return JSON.stringify(v);
 }
 
-/** Every `open ... close` span, bounded inside the delimiters, named by `name(inner)`. */
-function delimited(output: string, open: string, close: string, name: (inner: string) => string): ToolSite[] {
+/** Every `open ... close` span, the first `limit` of them, bounded inside the delimiters, named by `name(inner)`. */
+function delimited(output: string, open: string, close: string, name: (inner: string) => string, limit = Infinity): ToolSite[] {
   const sites: ToolSite[] = [];
-  for (let at = output.indexOf(open); at >= 0; at = output.indexOf(open, at + 1)) {
+  for (let at = output.indexOf(open); at >= 0 && sites.length < limit; at = output.indexOf(open, at + 1)) {
     const start = at + open.length;
     const end = output.indexOf(close, start);
     if (end < 0) break;
@@ -260,8 +263,9 @@ function delimited(output: string, open: string, close: string, name: (inner: st
 
 // gpt-oss lines 10-105, macro render_typescript_type. The port prints what the template prints, losses included
 // (each listed in the allowlist entry): integer as number, null as `any`, an array of scalar items as the bare
-// element type (`string[]`), whatever else the items hold unprinted, and an element type longer than 50 characters
-// as `any[]`. A node's description and default are printed only at the top level, by the tool loop below.
+// element type (`string[]`), whatever else the items hold unprinted, an element type longer than 50 characters
+// as `any[]`, and an empty required list as none. A node's description and default are printed only at the top
+// level, by the tool loop below.
 // `nullable` is printed only on a string without an enum and on an array; anywhere else it would vanish, so the
 // tool is not explained.
 const SCALAR_ARRAYS: Record<string, string> = { string: "string[]", number: "number[]", integer: "number[]", boolean: "boolean[]" };
@@ -341,16 +345,24 @@ const gptOssTools: ToolMatcher = {
     }
     return `${out}}) => any;\n\n`;
   },
-  sites(output) {
+  sites(output, limit = Infinity) {
+    const CLOSER = "=> any;\n\n";
     const sites: ToolSite[] = [];
     for (const block of delimited(output, "namespace functions {\n\n", "} // namespace functions", () => "")) {
       const body = output.slice(block.start, block.end);
       // Entries follow one another: each runs from the end of the one before (a description may span lines)
-      // through the `=> any;` that ends its type.
+      // through the `=> any;` that ends its type. Types before one closer share it, so the closer is searched for
+      // again only once a type lies past it, and never again once none is left: one pass over the body.
       let start = 0;
+      let close = -1;
+      let unclosed = false;
       for (const m of body.matchAll(/^type (\S+) = /gm)) {
-        const close = body.indexOf("=> any;\n\n", m.index!);
-        const end = close < 0 ? body.length : close + "=> any;\n\n".length;
+        if (sites.length >= limit) return sites;
+        if (!unclosed && close < m.index!) {
+          close = body.indexOf(CLOSER, m.index!);
+          unclosed = close < 0;
+        }
+        const end = unclosed ? body.length : close + CLOSER.length;
         sites.push({ name: m[1]!, start: block.start + start, end: block.start + end });
         start = end;
       }
@@ -411,8 +423,8 @@ function gemmaParameters(properties: Record<string, Schema>, g: Gemma): string |
 
 /**
  * One property: its description, then its enum (a string) or items (an array), then `nullable:true` (gemma-4),
- * then its properties and required list (an object), then its upper-cased type. A property's own default is not
- * printed: a loss the allowlist entry lists.
+ * then its properties and non-empty required list (an object), then its upper-cased type. A property's own default
+ * is not printed, and an empty required list prints as none does: losses the allowlist entry lists.
  */
 function gemmaProperty(key: string, s: Schema, g: Gemma): string | undefined {
   const { q } = g;
@@ -441,7 +453,11 @@ function gemmaProperty(key: string, s: Schema, g: Gemma): string | undefined {
   return `${key}:{${parts.join(",")}}`;
 }
 
-/** An array's items, key by key in dictsort order, none values skipped: properties and required as on an object, type upper-cased, anything else through format_argument. */
+/**
+ * An array's items, key by key in dictsort order, none values skipped: properties and required as on an object, type
+ * upper-cased, anything else through format_argument. The only none a schema node holds is a default, so an item's
+ * none default prints as no default does: a loss the allowlist entry lists.
+ */
 function gemmaItems(items: Schema, g: Gemma): string | undefined {
   const { q } = g;
   const parts: string[] = [];
@@ -514,7 +530,7 @@ const gemma4Tools: ToolMatcher = {
     const d = gemma4Declaration(tool);
     return d && d.variant !== d.cited ? [d.variant] : [];
   },
-  sites: (output) => delimited(output, "<|tool>", "<tool|>", declarationName),
+  sites: (output, limit) => delimited(output, "<|tool>", "<tool|>", declarationName, limit),
 };
 
 // functiongemma lines 1-124 and 143-148: the same declaration between <start_function_declaration> and
@@ -526,7 +542,7 @@ const functionGemmaTools: ToolMatcher = {
     const head = fn && gemmaDeclaration(fn, { q: "<escape>", alwaysDescribe: true, printsNullable: false });
     return head === undefined ? undefined : `${head}}`;
   },
-  sites: (output) => delimited(output, "<start_function_declaration>", "<end_function_declaration>", declarationName),
+  sites: (output, limit) => delimited(output, "<start_function_declaration>", "<end_function_declaration>", declarationName, limit),
 };
 
 /** The renderer's |string on a JSON value other than a mapping; it raises on none. */
@@ -611,11 +627,12 @@ const qwenXmlTools: ToolMatcher = {
     }
     return `${out}\n</function>`;
   },
-  sites(output) {
+  sites(output, limit = Infinity) {
     const sites: ToolSite[] = [];
     for (const block of delimited(output, "<tools>", "</tools>", () => "")) {
+      if (sites.length >= limit) break;
       const body = output.slice(block.start, block.end);
-      for (const fn of delimited(body, "<function>\n<name>", "\n</function>", (inner) => inner.slice(0, inner.indexOf("</name>")))) {
+      for (const fn of delimited(body, "<function>\n<name>", "\n</function>", (inner) => inner.slice(0, inner.indexOf("</name>")), limit - sites.length)) {
         const start = block.start + fn.start - "<function>\n<name>".length;
         sites.push({ name: fn.name, start, end: block.start + fn.end + "\n</function>".length });
       }

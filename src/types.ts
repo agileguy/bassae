@@ -381,6 +381,8 @@ export interface DiffRenderResult extends RuleResult {
     /** Not rendered for any other reason: a cap breach, a parse failure, the sandbox, or skipped. */
     failed: number;
   };
+  /** Why differential rendering is incomplete where the probe counts alone do not say, one line each: a spent output budget, a sandbox that failed while reading its input. */
+  gaps?: string[];
 }
 
 // ---- report (ISC-26, ISC-27, ISC-42) ----
