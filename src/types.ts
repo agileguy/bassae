@@ -381,7 +381,7 @@ export interface DiffRenderResult extends RuleResult {
     /** Not rendered for any other reason: a cap breach, a parse failure, the sandbox, or skipped. */
     failed: number;
   };
-  /** Why differential rendering is incomplete where the probe counts alone do not say, one line each: a spent output budget, a sandbox that failed while reading its input. */
+  /** Why differential rendering is incomplete where the probe counts alone do not say, one line each, such as a spent output budget. A sandbox failure is counted in `probes.failed` instead. */
   gaps?: string[];
 }
 
@@ -463,8 +463,8 @@ export interface ScanReport {
   /** Findings that belong to no model: paths the walk could not read, budgets run out, an unavailable renderer. */
   findings: Finding[];
   /**
-   * `statuses` counts each template once, and each model with no template once, as `no_template`, or
-   * `incomplete` when its extraction did not complete. `findings` counts every finding in the report by
+   * `statuses` counts each template once, and each model with no template once, under its own model status
+   * (`no_template` when it has nothing to report). `findings` counts every finding in the report by
    * severity, a model finding copied onto several templates once per copy.
    */
   summary: {

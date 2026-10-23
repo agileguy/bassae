@@ -55,7 +55,7 @@
     "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" }, "description": "Findings that belong to no model: unreadable paths, spent budgets, an unavailable renderer." },
     "summary": {
       "type": "object",
-      "description": "statuses counts each template once, and each model with no template once, as no_template, or incomplete when its extraction did not complete. findings counts every finding in the report by severity, a model finding copied onto several templates once per copy.",
+      "description": "statuses counts each template once, and each model with no template once, under its own model status (no_template when it has nothing to report). findings counts every finding in the report by severity, a model finding copied onto several templates once per copy.",
       "properties": {
         "models": { "$ref": "#/$defs/count" },
         "templates": { "$ref": "#/$defs/count" },
