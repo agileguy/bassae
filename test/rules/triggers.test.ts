@@ -15,6 +15,7 @@ import {
   lengthOf,
   mapFields,
   memberField,
+  memberPath,
   NO_FACTS,
   rootField,
   stronger,
@@ -192,4 +193,14 @@ test("lengthOf, countArith and vocabClass: counts carry their shift and threshol
   expect(vocabClass([type], "IMAGE")).toBe("presence");
   expect(vocabClass([type], "zz")).toBe("content");
   expect(vocabClass([memberField(elementField(rootField("messages")), "name")], "x")).toBeUndefined();
+});
+
+test("memberPath: a dotted attribute is read part by part, a part of digits indexing a list (review round 2, Codex N7)", () => {
+  const tool = elementField(rootField("tools"));
+  expect(memberField(tool, "function.name").cls).toBe("presence");
+  expect(memberPath(tool, "function.name").cls).toBe("content");
+  expect(memberPath(tool, "function.name")).toBe(memberField(memberField(tool, "function"), "name"));
+  const message = elementField(rootField("messages"));
+  expect(memberPath(message, "tool_calls.0.function.name")).toBe(memberField(memberField(elementField(memberField(message, "tool_calls")), "function"), "name"));
+  expect(memberPath(message, undefined)).toBe(memberField(message, undefined));
 });

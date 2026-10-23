@@ -254,6 +254,18 @@ export function memberField(f: Field, key: string | undefined): Field {
   return (f.fields && Object.hasOwn(f.fields, key) ? f.fields[key] : undefined) ?? f.other ?? f;
 }
 
+/**
+ * The schema node an `attribute=` argument reads from one element, split the way jinja2's make_attrgetter splits it:
+ * on dots, a part of digits indexing a list. Looked up whole, `function.name` missed and fell to the tool record's
+ * `other`, which is presence (review round 2, Codex N7, Claude N2).
+ */
+export function memberPath(f: Field, attr: string | undefined): Field {
+  if (attr === undefined) return memberField(f, undefined);
+  let g = f;
+  for (const part of attr.split(".")) g = memberField(g, /^\d+$/.test(part) ? undefined : part);
+  return g;
+}
+
 /** A set of schema nodes, by identity: a variable assigned from two different fields is either one. Sets only grow under join, and the nodes are finite, so the fixpoint converges. */
 export type Fields = readonly Field[];
 
