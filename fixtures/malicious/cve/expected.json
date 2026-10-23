@@ -1,0 +1,52 @@
+{
+  "fixtures": [
+    {
+      "path": "cve/cve-2024-34359-llama-cpp-python.jinja",
+      "expect": [
+        {
+          "ruleId": "dunder_access",
+          "severity": "HIGH"
+        }
+      ],
+      "tags": [
+        "CVE-2024-34359"
+      ]
+    },
+    {
+      "path": "cve/cve-2024-56326-jinja-str-format.jinja",
+      "expect": [
+        {
+          "ruleId": "dunder_access",
+          "severity": "HIGH"
+        }
+      ],
+      "tags": [
+        "CVE-2024-56326"
+      ]
+    },
+    {
+      "path": "cve/cve-2025-27516-jinja-attr-filter.jinja",
+      "expect": [
+        {
+          "ruleId": "dynamic_attribute",
+          "severity": "HIGH"
+        }
+      ],
+      "tags": [
+        "CVE-2025-27516"
+      ]
+    },
+    {
+      "path": "cve/cve-2026-5760-sglang-rerank.jinja",
+      "expect": [
+        {
+          "ruleId": "dunder_access",
+          "severity": "HIGH"
+        }
+      ],
+      "tags": [
+        "CVE-2026-5760"
+      ]
+    }
+  ]
+}
