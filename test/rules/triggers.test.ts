@@ -12,6 +12,7 @@ import {
   countArith,
   countField,
   elementField,
+  keyField,
   lengthOf,
   mapFields,
   memberField,
@@ -225,4 +226,11 @@ test("memberPath: a dotted attribute is read part by part, a part of digits inde
   const message = elementField(rootField("messages"));
   expect(memberPath(message, "tool_calls.0.function.name")).toBe(memberField(memberField(elementField(memberField(message, "tool_calls")), "function"), "name"));
   expect(memberPath(message, undefined)).toBe(memberField(message, undefined));
+});
+
+test("keyField: an undocumented record's keys are content, a documented one's presence (review round 2, ruling d)", () => {
+  expect(keyField(rootField("xyzzy")).cls).toBe("content");
+  expect(keyField(memberField(elementField(rootField("messages")), "xyzzy")).cls).toBe("content");
+  expect(keyField(elementField(rootField("messages"))).cls).toBe("presence");
+  expect(keyField(memberField(memberField(elementField(memberField(elementField(rootField("messages")), "tool_calls")), "function"), "arguments")).cls).toBe("presence");
 });

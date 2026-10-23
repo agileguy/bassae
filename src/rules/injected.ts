@@ -50,8 +50,8 @@ import {
   FLAG_FILTERS,
   genPolarity,
   isRuntime,
-  KEY_FIELD,
   keyed,
+  keyField,
   lengthOf,
   listOf,
   mapFields,
@@ -1103,7 +1103,7 @@ class Interp {
       case "items":
       case "keys":
       case "values":
-        if (m === "keys") return { ...base, lits: r.keys ?? [], data: r.fields ? "presence" : r.data, truth: r.truth };
+        if (m === "keys") return { ...base, lits: r.keys ?? [], data: r.fields ? clsOf(mapFields(r.fields, keyField)) : r.data, truth: r.truth };
         if (m === "values") return { ...base, lits: r.lits, data: r.data, truth: r.truth, fields: r.fields ? mapFields(r.fields, (f) => listOf(valueField(f))) : undefined, rest: r.rest };
         return { ...base, lits: r.lits, keys: r.keys, data: r.data, truth: r.truth, fields: r.fields, rest: r.rest, pairs: true };
       case "append":
@@ -1631,7 +1631,7 @@ function pairField(f: Field): Field {
   let p = pairFields.get(f);
   if (!p) {
     const v = valueField(f);
-    pairFields.set(f, (p = { cls: v.cls, kind: "list", elem: v, fields: { "0": KEY_FIELD, "1": v, "-2": KEY_FIELD, "-1": v } }));
+    pairFields.set(f, (p = { cls: v.cls, kind: "list", elem: v, fields: { "0": keyField(f), "1": v, "-2": keyField(f), "-1": v } }));
   }
   return p;
 }
@@ -1718,8 +1718,9 @@ function positionTest(o: Val, k: Val, role: KeyRole): TestClass | undefined {
 }
 
 function keysOf(it: Val): Val {
-  const d: TestClass = it.fields ? "presence" : it.data === "none" ? "none" : "presence";
-  return { lits: it.keys ?? [], data: d, truth: d, gate: it.gate, fields: it.fields ? [KEY_FIELD] : undefined, rest: it.rest };
+  const fields = it.fields ? mapFields(it.fields, keyField) : undefined;
+  const d: TestClass = fields ? clsOf(fields) : it.data === "none" ? "none" : "presence";
+  return { lits: it.keys ?? [], data: d, truth: d, gate: it.gate, fields, rest: it.rest };
 }
 
 function valuesOf(it: Val): Val {

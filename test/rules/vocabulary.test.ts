@@ -524,3 +524,47 @@ test("ISC-18: a value reached by iterating a record or by a computed key is not 
   // Inside an undocumented value everything stays undocumented.
   expect(highs(`{% for k, v in xyzzy|dictsort %}${REVEAL}{% endfor %}`)).toEqual(["content_trigger"]);
 });
+
+// A key read from an undocumented record is the caller's text as much as its
+// value is; a documented record's keys are its field names.
+test("ISC-18: a key read from an undocumented record is content (review round 2, ruling d)", () => {
+  expectHigh([
+    "(xyzzy|dictsort|first)[0] == 'k'",
+    "(xyzzy|dictsort|first)|first == 'k'",
+    "(xyzzy|dictsort|last)[-2] == 'k'",
+    "(xyzzy.items()|list|first)[0] == 'k'",
+    "xyzzy.keys()|first == 'k'",
+    "'k' in xyzzy.keys()",
+    "xyzzy.keys()|list == ['k']",
+  ]);
+  expectHigh(["(m.xyzzy|dictsort|first)[0] == 'k'", "m.xyzzy.keys()|first == 'k'"], true);
+  // In a loop over the record the loop is content already, and the key's
+  // own class is pinned in triggers.test.ts.
+  for (const loop of ["for k, v in xyzzy|dictsort", "for k, v in xyzzy.items()"]) {
+    expect(highs(`{% ${loop} %}{% if k == 'k' %}${REVEAL}{% endif %}{% endfor %}`)).toEqual(["content_trigger"]);
+  }
+});
+
+test("ISC-18: a key read from a documented record stays presence (review round 2, ruling d)", () => {
+  expectNoHigh(
+    [
+      "(m|dictsort|first)[0] == 'content'",
+      "(m|dictsort|first)|first == 'content'",
+      "(m.items()|list|first)[0] == 'role'",
+      "m.keys()|first == 'content'",
+      "'tool_calls' in m.keys()",
+      "(p|dictsort|last)[-2] == 'type'",
+    ],
+    true,
+  );
+  const inCalls = (body: string) => `{% for m in messages %}{% for tc in m.tool_calls %}${body}{% endfor %}{% endfor %}`;
+  expect(highs(inCalls(`{% for k, v in tc.function.arguments|dictsort %}{% if k == 'to' %}${REVEAL}{% endif %}{% endfor %}`))).toEqual([]);
+  expect(highs(`{% for m in messages %}{% for k, v in m.items() %}{% if k == 'role' %}${REVEAL}{% endif %}{% endfor %}{% endfor %}`)).toEqual([]);
+});
+
+// Ordering a field with a vocabulary picks out values beyond it: no role sorts
+// after 'user' in the vocabulary, so `> 'user'` waits for one no client sends.
+test("ISC-18: ordering a role, type or kwarg against a constant or by it is content (review round 2, ruling c)", () => {
+  expectHigh(["m.role > 'user'", "m.role >= 'xyzzy'", "m.role < 'assistant'", "p.type > 'video_url'", "'user' < m.role"], true);
+  expectHigh(["reasoning_effort > 'low'", "(messages|max(attribute='role')).role == 'user'"]);
+});

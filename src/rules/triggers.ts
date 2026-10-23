@@ -10,19 +10,20 @@
 //                     (`m.role == 'user'`, `part.type == 'image'`,
 //                     `reasoning_effort == 'high'`), an id compared for equality
 //                     with another id (a call paired with its result) and a role
-//                     with another role, the keys of a record, and a tool's
-//                     parameter schema
+//                     with another role, the keys of a documented record, and
+//                     a tool's parameter schema
 //   content           reads what a user, a tool or a caller wrote: message
 //                     content and reasoning, a message's name, id or
 //                     tool_call_id, a tool's or tool call's function name,
 //                     description or arguments, documents, a role, `type` or
-//                     kwarg compared with a value outside its vocabulary or
-//                     transformed first (`m.role.startswith('x')`), a length or
-//                     loop threshold further than 1 from 0, anything serialized
-//                     from these, and any test at all, even `is defined`, on a
-//                     kwarg no runtime or stock template documents or on a
-//                     message, tool-call or content-part field outside the
-//                     schema
+//                     kwarg compared with a value outside its vocabulary,
+//                     ordered (`m.role > 'user'`) or transformed first
+//                     (`m.role.startswith('x')`), the keys of an undocumented
+//                     record, a length or loop threshold further than 1 from
+//                     0, anything serialized from these, and any test at all,
+//                     even `is defined`, on a kwarg no runtime or stock
+//                     template documents or on a message, tool-call or
+//                     content-part field outside the schema
 //   nondeterministic  reads the clock (strftime_now(), date_string, today) or a
 //                     random choice
 //
@@ -472,6 +473,11 @@ function mapWord(s: string, m: string): string {
 
 export const KEY_FIELD: Field = PRESENCE;
 
+/** The schema node for a key of `f`: a documented record's keys are its field names, an undocumented one's are the caller's text (review round 2, ruling d). */
+export function keyField(f: Field): Field {
+  return f.undocumented ? UNDOCUMENTED : KEY_FIELD;
+}
+
 // ---- abstract values ----
 
 /** A template literal that can reach the output: its text, where it is, and the strongest test it depends on. */
@@ -670,14 +676,18 @@ function truthiness(n: Node, env: TestEnv, facts: Facts): TestClass {
 }
 
 // `a == b`, `a < b`, ...: a count against a threshold, a field with a
-// vocabulary against a constant, an id against an id or a role against a role,
-// or else both values read whole.
+// vocabulary for equality with a constant, an id against an id or a role
+// against a role, or else both values read whole.
 function comparison(a: Node, b: Node, o: string, env: TestEnv, facts: Facts): TestClass {
   const va = operand(a, env, facts, 0);
   const vb = operand(b, env, facts, 0);
   const gates = stronger(gateOf(va), gateOf(vb));
-  const join = (o === "==" || o === "!=") && ((identOnly(va) && identOnly(vb)) || sameVocab(va, vb)) ? "presence" : undefined;
-  const cls = countTest(va, vb) ?? countTest(vb, va) ?? vocabTest(a, vb, env, facts) ?? vocabTest(b, va, env, facts) ?? join ?? stronger(readOf(va), readOf(vb));
+  const eq = o === "==" || o === "!=";
+  const join = eq && ((identOnly(va) && identOnly(vb)) || sameVocab(va, vb)) ? "presence" : undefined;
+  // Ordering a field with a vocabulary picks out values beyond it: no role
+  // sorts after 'user' (review round 2, ruling c).
+  const vocab = eq ? (vocabTest(a, vb, env, facts) ?? vocabTest(b, va, env, facts)) : undefined;
+  const cls = countTest(va, vb) ?? countTest(vb, va) ?? vocab ?? join ?? stronger(readOf(va), readOf(vb));
   return stronger(cls, gates);
 }
 

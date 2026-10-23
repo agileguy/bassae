@@ -41,11 +41,12 @@ test.each(KEYS)("ISC-18: a pair's key is a field name, so %s == 'content' is no 
   expect(triggers(src)).toEqual([]);
 });
 
-// Truthiness of a pair's part follows the part, as a subscript's does: a key
-// of an undocumented record is a field name, its value what the caller sent.
+// Truthiness of a pair's part follows the part, as a subscript's does. An
+// undocumented record's key is the caller's text as much as its value is, so
+// both parts are content (review round 2, ruling d).
 const PARTS: [string, string[]][] = [
-  ["(xyzzy|dictsort|first)[0]", []],
-  ["(xyzzy|dictsort|first)|first", []],
+  ["(xyzzy|dictsort|first)[0]", ["HIGH content_trigger"]],
+  ["(xyzzy|dictsort|first)|first", ["HIGH content_trigger"]],
   ["(xyzzy|dictsort|first)[1]", ["HIGH content_trigger"]],
   ["(xyzzy|dictsort|first)|last", ["HIGH content_trigger"]],
 ];
