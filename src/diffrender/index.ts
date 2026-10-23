@@ -30,7 +30,7 @@ import type {
 import { CAP_FAILURES, DEFAULT_RENDER_LIMITS } from "../types.ts";
 import { checkContent } from "./integrity.ts";
 import { buildProbes, readsTools, REFERENCE_DATE } from "./probes.ts";
-import { templateText, unexplained as unexplainedUnits, units, words } from "./residue.ts";
+import { addExplained, templateText, unexplained as unexplainedUnits, words } from "./residue.ts";
 import { checkTools } from "./tools.ts";
 
 const PROFILES: readonly EnvProfile[] = ["hf-default", "jinja2-globals"];
@@ -279,8 +279,10 @@ async function run(input: DiffRenderInput, renderer: Renderer, transforms: reado
 
   const gaps: string[] = [];
   if (spent) {
+    // Counted against the same total as the probe counts, which holds the probes cut before rendering too.
     const short = outcomes.filter((o) => PROFILES.some((p) => !o[p])).length;
-    gaps.push(`the ${OUTPUT_BUDGET / 2 ** 20} MiB output budget was spent, so ${short} of ${probes.length} probes were not rendered under both profiles`);
+    const others = cut > 0 ? `, and ${cut} more were cut before rendering` : "";
+    gaps.push(`the ${OUTPUT_BUDGET / 2 ** 20} MiB output budget was spent, so ${short} of ${total} probes were not rendered under both profiles${others}`);
   }
 
   const complete = failed === 0 && !spent && !(explainCount > 0 && explainRefused === explainCount) && internal === undefined;
@@ -335,11 +337,13 @@ function renderDivergence(input: DiffRenderInput, probes: readonly Probe[], outc
   const explained = new Set<string>();
   for (const [i, o] of outcomes.entries()) {
     if (probes[i]!.role !== "explain") continue;
+    // An output the other profile printed too has the same units, so it is read once.
+    const seen = new Set<string>();
     for (const profile of PROFILES) {
       const r = o[profile];
-      if (!r?.ok) continue;
-      const text = templateText(r.output, probes[i]!.inputs);
-      for (const dateProbe of [false, true]) for (const u of units(text, dateProbe)) explained.add(u);
+      if (!r?.ok || seen.has(r.output)) continue;
+      seen.add(r.output);
+      addExplained(explained, templateText(r.output, probes[i]!.inputs));
     }
   }
 
