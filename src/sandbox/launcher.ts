@@ -6,7 +6,7 @@ import { existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { constants } from "node:os";
 import { dirname, join } from "node:path";
 import { CAP_FAILURES, type RenderFailure, type RenderLimits, type RenderRequest, type RenderResult } from "../types.ts";
-import { clip, decodeChild, encode, MEMORY_EXIT_CODE, TIMEOUT_EXIT_CODE } from "./protocol.ts";
+import { clip, decodeChild, encode, MEMORY_EXIT_CODE, SPENT_EXIT_CODE, TIMEOUT_EXIT_CODE } from "./protocol.ts";
 
 export type SandboxKind = "sandbox-exec" | "bwrap";
 
@@ -329,9 +329,9 @@ async function keepHead(stream: ReadableStream<Uint8Array>): Promise<string> {
 }
 
 /**
- * Runs one sandboxed worker over the requests until they are all answered, one of them breaks a cap, or the
- * worker dies. On a breach the worker is killed and the in-flight request fails, and the caller renders nothing
- * more for the template; after any other death the caller starts a fresh worker for the rest.
+ * Runs one sandboxed worker over the requests until they are all answered, one of them breaks a cap, the worker
+ * ends itself between renders, or it dies. On a breach the worker is killed and the in-flight request fails, and
+ * the caller renders nothing more for the template; after any other end the caller starts a fresh worker for the rest.
  * A breach before the template has parsed fails every request at once, since no fresh worker would parse it faster.
  * A breach before the worker has read its batch is a failure to start, not a cap breach: no request had begun.
  */
@@ -486,6 +486,8 @@ export async function runWorker(
       if (proc.signalCode === null && code === MEMORY_EXIT_CODE) {
         return fail("memory", `worker resident memory exceeded the ${mib(limits.maxRssBytes)} cap, by its own reading`);
       }
+      // The worker ended itself between renders, to shed what they left behind; a fresh one renders the rest.
+      if (proc.signalCode === null && code === SPENT_EXIT_CODE && parsed && results.length > 0) return settle();
       fail("render_error", `worker exited (${proc.signalCode ?? `code ${code}`})${detail ? `: ${detail}` : ""}`);
     });
 

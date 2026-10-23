@@ -3,6 +3,7 @@
 // The worker reads them a line at a time and writes one ready line once it has loaded and read them all,
 // one parsed line once the template has parsed or failed to, then one result line per request, in order.
 // The parsed line and each result say how long that step took by the worker's own clock.
+// A worker may end after any result but the last, and the renderer starts a fresh one for the rest.
 
 import type { RenderFailure, RenderRequest, RenderResult } from "../types.ts";
 
@@ -22,6 +23,8 @@ export interface InitMessage {
 export const MEMORY_EXIT_CODE = 120;
 /** The worker's exit code when its own clock found the parse or a render past timeoutMs. */
 export const TIMEOUT_EXIT_CODE = 121;
+/** The worker's exit code when it holds too much of what its renders left behind to give the next one a fair cap. */
+export const SPENT_EXIT_CODE = 122;
 
 export interface RequestMessage {
   t: "req";

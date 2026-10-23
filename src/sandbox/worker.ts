@@ -9,7 +9,7 @@ import { dlopen, FFIType, ptr, type FFIFunction } from "bun:ffi";
 import type { RenderFailure, RenderRequest, RenderResult } from "../types.ts";
 import { installPolyfills } from "./polyfills.ts";
 import { profileGlobals } from "./profiles.ts";
-import { clip, encode, MEMORY_EXIT_CODE, TIMEOUT_EXIT_CODE, type ChildMessage, type InitMessage, type RequestMessage } from "./protocol.ts";
+import { clip, encode, MEMORY_EXIT_CODE, SPENT_EXIT_CODE, TIMEOUT_EXIT_CODE, type ChildMessage, type InitMessage, type RequestMessage } from "./protocol.ts";
 
 // macOS has no parent-death signal, so a parent killed with SIGKILL would leave a hung render running
 // for good. RLIMIT_CPU is the backstop: re-armed before the parse and before each render, it lets the
@@ -201,8 +201,17 @@ const [template, parseMs] = timed((): Template | undefined => {
 });
 await send({ t: "parsed", ms: parseMs });
 
-for (const request of requests) {
+// The memory cap is on each render, but what earlier renders leave behind stays resident and counts against the next.
+// A full collection does not stop that: it frees the garbage but not the pages it sat in, and the next render still
+// grows past them. A render that peaked at 215 MiB alone peaked near 250 MiB as the sixth of six with a full collection
+// before each, and near 400 MiB with none. So once the worker holds more than a quarter of the cap beyond what it held
+// before its first render, it ends after the render in hand, and the renderer starts a fresh one for the rest: no
+// render is charged with more than that quarter of what others left. The registry's templates cross it in 9 of their
+// 63 workers, for about 2% more CPU on a clean scan; at an eighth it was 31 workers, and about a sixth more CPU.
+const fresh = process.memoryUsage.rss();
+for (const [i, request] of requests.entries()) {
   limitCpu(init.cpuMs);
   const [result, ms] = timed((): RenderResult => (template ? render(template, request, init.maxOutputBytes) : { id: request.id, ok: false, ...parseFailure }));
   await send({ t: "res", result, ms });
+  if (i + 1 < requests.length && process.memoryUsage.rss() - fresh > init.maxRssBytes / 4) process.exit(SPENT_EXIT_CODE);
 }

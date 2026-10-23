@@ -1,9 +1,9 @@
 // Test-only stand-in for the render worker that misbehaves on purpose, so the tests can check
 // that the parent enforces the caps itself instead of trusting the worker.
-// Usage: bun rogue-worker.ts <stall|wrong-id|claim-timeout|huge|exit|ffi-exit|noisy|skip-ready|fat-error|wide-error|fat-parsed|xcpu|lagging|late|slow-claim>
+// Usage: bun rogue-worker.ts <stall|wrong-id|claim-timeout|huge|exit|ffi-exit|noisy|skip-ready|fat-error|wide-error|fat-parsed|xcpu|lagging|late|slow-claim|spent|spent-early>
 
 import { dlopen, FFIType } from "bun:ffi";
-import { encode, type RequestMessage } from "../../src/sandbox/protocol.ts";
+import { encode, SPENT_EXIT_CODE, type RequestMessage } from "../../src/sandbox/protocol.ts";
 
 const mode = process.argv[2];
 const say = (line: string) => Bun.write(Bun.stdout, line);
@@ -83,5 +83,14 @@ switch (mode) {
   case "slow-claim":
     // Answers at once, but by its own clock every render took far longer than any cap.
     for (const id of ids) await answers(id, "slow", 10_000_000);
+    break;
+  case "spent":
+    // Answers its first request, saying how many it was sent, then ends itself as a worker holding too much does.
+    await answers(ids[0]!, `spent ${ids.length}`);
+    process.exit(SPENT_EXIT_CODE);
+    break;
+  case "spent-early":
+    // Ends itself as if spent, though it has answered nothing.
+    process.exit(SPENT_EXIT_CODE);
     break;
 }

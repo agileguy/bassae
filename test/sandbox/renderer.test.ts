@@ -477,6 +477,23 @@ describe.skipIf(!live)("the memory cap fails closed (ISC-43)", () => {
   );
 
   test(
+    "a render is not charged with what earlier renders of the batch left behind",
+    async () => {
+      // One render of this peaks near 215 MiB, under the 256 MiB cap. Six back to back in one process peaked near
+      // 400 MiB, and near 250 MiB with a full collection before each, since the allocator keeps the pages earlier
+      // renders' garbage sat in (review round 2, SHOULD FIX 2). Each must be ok, as it is alone.
+      const template =
+        "{%- if tools -%}<|tools|>{{ tools | tojson }}{% for i in range(200000) %}[{% endfor %}{% for i in range(200000) %}]{% endfor %}<|end|>{%- endif -%}" +
+        "{%- for m in messages -%}<|{{ m.role }}|>{{ m.content }}<|end|>{%- endfor -%}";
+      const context = { tools: [{ type: "function", function: { name: "f" } }], messages: [{ role: "user", content: "hi" }] };
+      const requests = Array.from({ length: 6 }, (_, i) => req(`r${i}`, context, { profile: "jinja2-globals" }));
+      const results = await renderer.renderBatch(template, requests);
+      expect(results.map((r) => (r.ok ? "ok" : `${r.failure}: ${r.message}`))).toEqual(Array(6).fill("ok"));
+    },
+    SLOW,
+  );
+
+  test(
     "a batch is split by size, so no worker has to hold more than 16 MiB of requests",
     async () => {
       // 49 MiB of requests, which one worker cannot hold under a 128 MiB cap; 16 MiB at a time, it can. A worker
@@ -560,6 +577,14 @@ describe.skipIf(!live)("the parent does not trust the worker", () => {
 
   test("a worker that exits mid-batch fails the in-flight request", async () => {
     expect(await rogue("exit").renderBatch("", two)).toEqual([failed("a", "render_error"), failed("b", "render_error")]);
+  });
+
+  test("a worker that ends itself between renders hands the rest to a fresh one, which is sent only the rest", async () => {
+    expect(await rogue("spent").renderBatch("", [req("a"), req("b"), req("c")])).toEqual([ok("a", "spent 3"), ok("b", "spent 2"), ok("c", "spent 1")]);
+  });
+
+  test("a worker that ends itself before answering anything fails the in-flight request", async () => {
+    expect(await rogue("spent-early").renderBatch("", two)).toEqual([failed("a", "render_error"), failed("b", "render_error")]);
   });
 
   test("a worker's exit message keeps its stderr but not the macOS xcode-select line its FFI load provokes", async () => {
