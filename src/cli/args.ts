@@ -48,7 +48,8 @@ Options:
 
 A finding's position is line:col in the template, or "whole template" when it
 is about the template as a whole; in JSON that span is start 0, end 0, line 1,
-col 1. Control, bidi and invisible characters print escaped.
+col 1. In the human report, a finding outside any template prints no position.
+Control, bidi and invisible characters print escaped.
 
 Exit codes: 2 any HIGH finding; else 3 any incomplete template, scanner or
 parse error, or usage error; else 1 any MEDIUM; else 0.`;
