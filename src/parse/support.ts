@@ -514,8 +514,14 @@ function classifyValue(node: unknown, env: BindingEnv, depth = 0): Binding {
       return BINDING_OPAQUE;
     }
     case "ObjectLiteral": {
+      // Keys as well as values, as children() walks them: iterating a dict
+      // yields its keys, so a gadget key is reachable through the dict.
       const map = n.value as Map<unknown, unknown>;
-      if (map instanceof Map) for (const v of map.values()) if (classifyValue(v, env, depth + 1).t === "gadget") return BINDING_GADGET;
+      if (map instanceof Map) {
+        for (const [k, v] of map) {
+          if (classifyValue(k, env, depth + 1).t === "gadget" || classifyValue(v, env, depth + 1).t === "gadget") return BINDING_GADGET;
+        }
+      }
       return BINDING_OPAQUE;
     }
     default:
