@@ -824,7 +824,7 @@ const MAX_SYMBOL_SHARE = 1 / 8;
 // run's common share is about 0.4 below that rate, and an identifier's well
 // above it. A run with both cases, symbols from one base64 alphabet and at most
 // one in 4, and a common share at most 0.15 above its rate, is random. Together
-// the two tests miss about 5 in 1,000,000 random runs of 40 characters.
+// the two tests miss about 8 in 1,000,000 random runs of 40 characters.
 const MAX_COMMON_OVER_SWITCH = 0.15;
 const MAX_RANDOM_SYMBOL_SHARE = 1 / 4;
 
