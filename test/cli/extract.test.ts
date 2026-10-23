@@ -2,9 +2,11 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { existsSync, lstatSync, readdirSync, readFileSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { extract, extractFileName, outRefusal, sanitizeName, writeTemplates } from "../../src/cli/extract.ts";
+import { loadModels } from "../../src/scan/index.ts";
 import { makeTemplate } from "../../src/template.ts";
 import type { ExtractedTemplate, ModelRecord } from "../../src/types.ts";
-import { makeTree, removeTrees } from "../helpers/tree.ts";
+import { buildGguf, typicalKvs } from "../gguf/builder.ts";
+import { link, makeTree, removeTrees } from "../helpers/tree.ts";
 
 afterAll(removeTrees);
 
@@ -171,7 +173,7 @@ describe("extract (ISC-29, ISC-29.1, ISC-29.2, ISC-35)", () => {
     const ts = [tpl("default", "{{ a }}"), tpl("tool_use", "{{ b }}")];
     const result = await extract(model, out, async (roots, templates) => {
       seen.push([roots, templates]);
-      return { models: [record(model, ts)], findings: [] };
+      return { models: [record(model, ts)], findings: [], walked: [] };
     });
     expect(seen).toEqual([[[model], []]]);
     expect(result.exitCode).toBe(0);
@@ -186,7 +188,7 @@ describe("extract (ISC-29, ISC-29.1, ISC-29.2, ISC-35)", () => {
     let loaded = false;
     const result = await extract(model, join(model, "out"), async () => {
       loaded = true;
-      return { models: [record(model, [tpl("default", "x")])], findings: [] };
+      return { models: [record(model, [tpl("default", "x")])], findings: [], walked: [] };
     });
     expect(result.exitCode).toBe(3);
     expect(result.stderr).toHaveLength(1);
@@ -197,7 +199,7 @@ describe("extract (ISC-29, ISC-29.1, ISC-29.2, ISC-35)", () => {
   test("an --out under a directory the walk reached through a link is refused before writing", async () => {
     const root = makeTree({ store: { m: {} }, linked: {} });
     const target = join(root, "linked");
-    const result = await extract(join(root, "store"), join(target, "out"), async () => ({ models: [record(target, [tpl("default", "x")])], findings: [] }));
+    const result = await extract(join(root, "store"), join(target, "out"), async () => ({ models: [record(target, [tpl("default", "x")])], findings: [], walked: [] }));
     expect(result.exitCode).toBe(3);
     expect(result.stderr[0]).toContain("under the scanned path");
     expect(existsSync(join(target, "out"))).toBe(false);
@@ -217,25 +219,40 @@ describe("extract (ISC-29, ISC-29.1, ISC-29.2, ISC-35)", () => {
 
   test("security S1: every directory the walk passed through on the way to a template counts as scanned", async () => {
     // model/a -> ../mid, mid/b -> ../far, far/x.gguf: the GGUF is read at model/a/b/x.gguf.
-    const root = makeTree({ model: {}, mid: {}, far: {} });
-    symlinkSync("../mid", join(root, "model", "a"));
-    symlinkSync("../far", join(root, "mid", "b"));
-    const gguf = join(root, "far", "x.gguf");
-    const read = join(root, "model", "a", "b", "x.gguf");
-    const t = makeTemplate({ kind: "gguf", path: read, realPath: gguf, name: "default" }, new TextEncoder().encode("x"));
-    const load = async () => ({ models: [record(gguf, [t], { format: "gguf", paths: [read] })], findings: [] });
+    const root = makeTree({ model: { a: link("../mid") }, mid: { b: link("../far") }, far: { "x.gguf": buildGguf(typicalKvs()).bytes } });
+    const model = join(root, "model");
+    const { models } = await loadModels([model], []);
+    expect(models.map((m) => [m.id, m.paths])).toEqual([[join(root, "far", "x.gguf"), [join(model, "a", "b", "x.gguf")]]]);
     for (const dir of ["mid", "far"]) {
-      const result = await extract(join(root, "model"), join(root, dir, "out"), load);
+      const result = await extract(model, join(root, dir, "out"));
       expect(result.exitCode).toBe(3);
       expect(existsSync(join(root, dir, "out"))).toBe(false);
     }
     // A sibling the walk never entered is still a fine place to write.
-    expect((await extract(join(root, "model"), join(root, "out"), load)).exitCode).toBe(0);
+    expect((await extract(model, join(root, "out"))).exitCode).toBe(0);
+  });
+
+  test("security S1: a linked directory the walk listed counts as scanned, though it holds no model", async () => {
+    // model/notes -> ../side and side/more -> ../far: the walk lists both, and neither holds a model or a template.
+    const root = makeTree({
+      model: { "tokenizer_config.json": "{}", "chat_template.jinja": "{{ messages }}", notes: link("../side") },
+      side: { "README.md": "notes", more: link("../far") },
+      far: {},
+    });
+    const model = join(root, "model");
+    expect((await loadModels([model], [])).walked).toEqual([model, join(root, "side"), join(root, "far")]);
+    for (const dir of ["side", "far"]) {
+      const result = await extract(model, join(root, dir, "out"));
+      expect(result.exitCode).toBe(3);
+      expect(result.stderr).toEqual([expect.stringContaining("under the scanned path")]);
+      expect(existsSync(join(root, dir, "out"))).toBe(false);
+    }
+    expect((await extract(model, join(root, "out"))).exitCode).toBe(0);
   });
 
   test("a missing model is a usage error", async () => {
     const root = makeTree({});
-    const result = await extract(join(root, "nope"), join(root, "out"), async () => ({ models: [], findings: [] }));
+    const result = await extract(join(root, "nope"), join(root, "out"), async () => ({ models: [], findings: [], walked: [] }));
     expect(result.exitCode).toBe(3);
     expect(result.stderr).toHaveLength(1);
     expect(existsSync(join(root, "out"))).toBe(false);
@@ -243,14 +260,14 @@ describe("extract (ISC-29, ISC-29.1, ISC-29.2, ISC-35)", () => {
 
   test("a path holding no model exits 3", async () => {
     const root = makeTree({ empty: {} });
-    const result = await extract(join(root, "empty"), join(root, "out"), async () => ({ models: [], findings: [] }));
+    const result = await extract(join(root, "empty"), join(root, "out"), async () => ({ models: [], findings: [], walked: [] }));
     expect(result.exitCode).toBe(3);
     expect(result.stderr[0]).toContain("no model");
   });
 
   test("a model with no template writes nothing and says so", async () => {
     const root = makeTree({ m: {} });
-    const result = await extract(join(root, "m"), join(root, "out"), async () => ({ models: [record(join(root, "m"), [])], findings: [] }));
+    const result = await extract(join(root, "m"), join(root, "out"), async () => ({ models: [record(join(root, "m"), [])], findings: [], walked: [] }));
     expect(result.exitCode).toBe(0);
     expect(result.stderr[0]).toContain("no chat template");
   });
@@ -261,6 +278,7 @@ describe("extract (ISC-29, ISC-29.1, ISC-29.2, ISC-35)", () => {
     const result = await extract(gguf, join(root, "out"), async () => ({
       models: [record(gguf, [tpl("default", "x")], { extractionComplete: false, findings: [{ ruleId: "parse_error", severity: "HIGH", message: "truncated KV section", file: gguf }] })],
       findings: [],
+      walked: [],
     }));
     expect(result.exitCode).toBe(3);
     expect(readdirSync(join(root, "out"))).toHaveLength(1);
@@ -273,6 +291,7 @@ describe("extract (ISC-29, ISC-29.1, ISC-29.2, ISC-35)", () => {
     const result = await extract(m, join(root, "out\x1b]52;"), async () => ({
       models: [record(m, [tpl("x\x1b[2J", "x")], { findings: [{ ruleId: "scanner_error", severity: "MEDIUM", message: "bad \x1b]52;c;x\x07", file: m }] })],
       findings: [],
+      walked: [],
     }));
     for (const line of [...result.stdout, ...result.stderr]) expect(line).not.toMatch(/[\x00-\x1f\x7f-\x9f]/);
   });

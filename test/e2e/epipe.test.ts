@@ -25,7 +25,7 @@ function io(stdout: Io["stdout"], extra: Partial<Io> = {}): Io {
     env: {},
     home: "/home/u",
     scan: async (): Promise<ScanReport> => HIGH,
-    loadModels: async () => ({ models: [], findings: [] }),
+    loadModels: async () => ({ models: [], findings: [], walked: [] }),
     exists: () => true,
     isDirectory: () => false,
     version: async () => "9.9.9",

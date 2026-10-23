@@ -8,9 +8,9 @@
 
 import { constants } from "node:fs";
 import { mkdir, open, realpath, stat, unlink } from "node:fs/promises";
-import { dirname, join, resolve, sep } from "node:path";
-import { loadModels } from "../scan/index.ts";
-import type { ExtractedTemplate, Finding, ModelRecord } from "../types.ts";
+import { dirname, join, resolve } from "node:path";
+import { type Loaded, loadModels } from "../scan/index.ts";
+import type { ExtractedTemplate, Finding } from "../types.ts";
 import { escapeText } from "./escape.ts";
 
 // Sanitized names are cut to this many characters; the SHA-256 prefix already keeps files apart.
@@ -131,16 +131,7 @@ export async function writeTemplates(dir: string, templates: readonly ExtractedT
   return result;
 }
 
-// The directories a template was read from (security S1): the one its file really sits in, and each directory the
-// walk passed through below `root` to reach it. A directory link on the way counts by what it points at, since
-// outRefusal compares what stat sees.
-function readFrom(t: ExtractedTemplate, root: string): string[] {
-  const dirs = [dirname(t.source.realPath)];
-  for (let p = dirname(t.source.path); p.startsWith(root + sep); p = dirname(p)) dirs.push(p);
-  return dirs;
-}
-
-export type Loader = (roots: string[], templates: string[]) => Promise<{ models: ModelRecord[]; findings: Finding[] }>;
+export type Loader = (roots: string[], templates: string[]) => Promise<Loaded>;
 
 export interface ExtractResult {
   exitCode: 0 | 3;
@@ -168,9 +159,10 @@ export async function extract(model: string, out: string, load: Loader = loadMod
       return done(3);
     }
 
-    const { models, findings } = await load([modelPath], []);
-    // The walk may have followed links out of the model path; everywhere it read counts as scanned.
-    const scanned = [modelPath, ...models.flatMap((m) => [m.id, ...m.paths, ...m.templates.flatMap((t) => readFrom(t, modelPath))])];
+    const { models, findings, walked } = await load([modelPath], []);
+    // The walk may have followed links out of the model path; everywhere it read counts as scanned (security S1):
+    // every directory it listed, and the directory each template's file really sits in, which a file link leaves unlisted.
+    const scanned = [modelPath, ...walked, ...models.flatMap((m) => [m.id, ...m.paths, ...m.templates.map((t) => dirname(t.source.realPath))])];
     refusal = await outRefusal(out, scanned);
     if (refusal) {
       stderr.push(refusal);

@@ -190,7 +190,7 @@ function capture(result: ScanReport | Error = report([]), extra: Partial<Io> = {
     },
     loadModels: async (roots) => {
       c.loads.push(roots);
-      return { models: [], findings: [] };
+      return { models: [], findings: [], walked: [] };
     },
     exists: () => true,
     isDirectory: (p) => p === "/home/u/.omlx",
