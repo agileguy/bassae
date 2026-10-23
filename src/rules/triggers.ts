@@ -257,7 +257,7 @@ export function memberField(f: Field, key: string | undefined): Field {
 /**
  * The schema node an `attribute=` argument reads from one element, split the way jinja2's make_attrgetter splits it:
  * on dots, a part of digits indexing a list. Looked up whole, `function.name` missed and fell to the tool record's
- * `other`, which is presence (review round 2, Codex N7, Claude N2).
+ * `other`, which is presence (review round 2, runtime N7, security N2).
  */
 export function memberPath(f: Field, attr: string | undefined): Field {
   if (attr === undefined) return memberField(f, undefined);
