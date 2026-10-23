@@ -79,10 +79,14 @@ const MAX_PASSES = 8;
 const MAX_MACRO_DEPTH = 16;
 const MAX_RECURSION = 2;
 // Literals one value may carry, and literals the whole output may carry.
-const MAX_LITS = 2048;
+const MAX_LITS = 256;
 const MAX_OUTPUT_LITS = 50_000;
 // A folded constant longer than this is not folded (its parts still count).
 const MAX_KONST = 64 * 1024;
+// Characters of folded constants in one pass over the template. A chain of
+// `set s = s ~ 'x'` folds ever longer strings; past this, the pieces stay as
+// written, which the matcher reads as more residue, never less.
+const KONST_BUDGET = 4 * 1024 * 1024;
 // Tokens the text aligner looks ahead before it gives a literal a fallback span.
 const ALIGN_LOOKAHEAD = 256;
 // Trie steps the scaffolding matcher may take over the whole template.
@@ -104,6 +108,12 @@ export function extract(outcome: ParseOutcome, text: string, scaffolding: Readon
   const interp = new Interp(outcome, outcome.lines);
   const lits = interp.run();
   const items = toItems(lits, matcher);
+  if (!interp.complete) {
+    // Out of budget, the walk may have stopped before some text: every text run
+    // between tags it did not reach is still reported, as on the no-AST path.
+    const seen = new Set(items.map((i) => i.span.start));
+    for (const r of rawItems(outcome, matcher)) if (!seen.has(r.span.start)) items.push(r);
+  }
   return { items, nondeterministic: [...interp.nondet.values()], complete: interp.complete && matcher.complete };
 }
 
@@ -195,6 +205,7 @@ class Interp {
   private changed = false;
   private outputLits = 0;
   private vias = 0;
+  private konstChars = 0;
   complete = true;
   readonly nondet = new Map<string, Trigger>();
 
@@ -211,6 +222,7 @@ class Interp {
     let converged = false;
     for (let pass = 0; pass < MAX_PASSES && this.complete; pass++) {
       this.changed = false;
+      this.konstChars = 0;
       this.exec(body, { facts: NO_FACTS, st: new State(), stack: [] }, { lits: [], data: "none", truth: "none" });
       if (!this.changed) {
         converged = true;
@@ -221,6 +233,7 @@ class Interp {
     this.called.clear();
     const out: Sink = { lits: [], data: "none", truth: "none" };
     this.outputLits = 0;
+    this.konstChars = 0;
     this.exec(body, { facts: NO_FACTS, st: new State(), stack: [] }, out);
     // A macro no one calls emits nothing, but `random` or a clock test inside it
     // is still a use (ISC-18.1). Walk each one once with unknown arguments.
@@ -237,7 +250,15 @@ class Interp {
   }
 
   private tick(): boolean {
-    if (++this.work <= WORK_BUDGET) return true;
+    return this.spend(1);
+  }
+
+  // Charge work by the literals an operation copies, so a value that gathers a
+  // new literal on every statement (`set s = s ~ '...'` repeated) costs what it
+  // copies and runs out of budget instead of time.
+  private spend(n: number): boolean {
+    this.work += n;
+    if (this.work <= WORK_BUDGET) return true;
     this.complete = false;
     return false;
   }
@@ -323,7 +344,7 @@ class Interp {
     const oa: Sink = { lits: [], data: "none", truth: "none" };
     this.exec(s.body, body, ob);
     this.exec(s.alternate, alt, oa);
-    joinLayers(c.st, sb, sa);
+    this.spend(joinLayers(c.st, sb, sa) + ob.lits.length + oa.lits.length);
     // A literal both branches print, with no test between the branch and the
     // print, is there whichever way the test goes: it does not depend on it.
     const inB = new Set(ob.lits.map(printKey));
@@ -423,6 +444,7 @@ class Interp {
   }
 
   private emit(v: Val, c: Ctx, sink: Sink): void {
+    if (!this.spend(v.lits.length)) return;
     for (const l of v.lits) this.pushLit(l, c, sink);
     if (v.keys) for (const l of v.keys) this.pushLit(l, c, sink);
     sink.data = stronger(sink.data, v.data);
@@ -480,6 +502,7 @@ class Interp {
   // A mutating method weakly updates its receiver (it may not have run), and
   // the change outlives the scope it was made in.
   private assign(key: string, v: Val, c: Ctx, before?: Val, mutate = false): void {
+    this.spend(v.lits.length + (before?.lits.length ?? 0));
     const held = before && c.cond && before.lits.length > 0 ? new Set([...before.lits, ...(before.keys ?? [])]) : undefined;
     let w = c.cond ? this.under(v, c.cond, held, c.subject) : v;
     if (w.nsInit) {
@@ -492,6 +515,9 @@ class Interp {
       this.mutated.add(key);
       if (before) w = join(before, w);
     }
+    // One entry per literal: `set s = s ~ 'x'` in a loop would otherwise grow
+    // the list by a copy of every literal on each pass.
+    w = { ...w, lits: uniqueLits(w.lits) };
     if (w.lits.length > MAX_LITS) {
       w = { ...w, lits: w.lits.slice(0, MAX_LITS) };
       this.complete = false;
@@ -852,7 +878,7 @@ class Interp {
         return { ...base, lits: [...r.lits, ...a.flatMap((x) => [...x.lits, ...(x.keys ?? [])])], data: maxData(r, a), truth: maxData(r, a) };
       case "join": {
         const list = a[0] ?? EMPTY;
-        const konst = typeof r.konst === "string" && list.konstList ? list.konstList.join(r.konst) : undefined;
+        const konst = this.fold(typeof r.konst === "string" && list.konstList ? list.konstList.join(r.konst) : undefined);
         const lits = [...list.lits, ...(list.keys ?? []), ...r.lits];
         return { ...base, lits: this.folded(lits, konst, receiver), data: list.data, truth: list.truth, konst };
       }
@@ -906,7 +932,7 @@ class Interp {
       }
       case "join": {
         const sep = a[0];
-        const konst = o.konstList && (sep === undefined || typeof sep.konst === "string") ? o.konstList.join(sep ? (sep.konst as string) : "") : undefined;
+        const konst = this.fold(o.konstList && (sep === undefined || typeof sep.konst === "string") ? o.konstList.join(sep ? (sep.konst as string) : "") : undefined);
         const lits = [...o.lits, ...(o.keys ?? []), ...(sep?.lits ?? [])];
         return { ...keep, lits: this.folded(lits, konst, fnode), konst };
       }
@@ -1027,7 +1053,7 @@ class Interp {
       let konst: string | undefined;
       if (o === "~" && l.konst !== undefined && r.konst !== undefined) konst = konstText(l.konst) + konstText(r.konst);
       else if (o === "+" && typeof l.konst === "string" && typeof r.konst === "string") konst = l.konst + r.konst;
-      if (konst !== undefined && konst.length > MAX_KONST) konst = undefined;
+      konst = this.fold(konst);
       const lits = [...l.lits, ...r.lits];
       return { lits: this.folded(lits, konst, n), keys: concatKeys(l, r), data, truth: stronger(l.truth, r.truth), gate, konst };
     }
@@ -1037,6 +1063,13 @@ class Interp {
   // Replace the literals a constant was folded from with one literal for the
   // folded text, spanned over the expression and under the strongest of their
   // conditions.
+  // A folded constant, or none when it is too long or the budget is spent.
+  private fold(konst: string | undefined): string | undefined {
+    if (konst === undefined || konst.length > MAX_KONST || this.konstChars + konst.length > KONST_BUDGET) return undefined;
+    this.konstChars += konst.length;
+    return konst;
+  }
+
   private folded(lits: Lit[], konst: string | undefined, at: Node): Lit[] {
     if (konst === undefined || lits.length === 0) return lits;
     let cond: Cond | undefined;
@@ -1135,13 +1168,16 @@ const KNOWN_METHODS = new Set([
   "get", "items", "keys", "values", "update", "setdefault", "popitem", "fromkeys", "add",
 ]);
 
-function joinLayers(into: State, a: State, b: State): void {
+function joinLayers(into: State, a: State, b: State): number {
+  let copied = 0;
   for (const k of new Set([...a.own.keys(), ...b.own.keys()])) {
     const va = a.get(k);
     const vb = b.get(k);
     const v = va && vb && va !== vb ? join(va, vb) : (va ?? vb);
     if (v) into.own.set(k, v);
+    copied += v?.lits.length ?? 0;
   }
+  return copied;
 }
 
 function printKey(l: Lit): string {
@@ -1224,6 +1260,10 @@ function litKey(l: Lit): string {
 
 // Union of literal lists, keeping one entry per literal with the strongest
 // condition seen for it.
+function uniqueLits(ls: Lit[]): Lit[] {
+  return ls.length < 2 ? ls : unionLits(ls.slice(0, 1), ls.slice(1));
+}
+
 function unionLits(a: Lit[], b: Lit[]): Lit[] {
   if (b.length === 0) return a;
   if (a.length === 0) return b;
