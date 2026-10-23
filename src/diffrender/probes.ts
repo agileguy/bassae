@@ -2,9 +2,11 @@
 //
 // `explain` probes are ordinary use: each conversation shape with and without a system message, tools present and
 // absent, add_generation_prompt both ways, at the reference date. A trigger candidate the injection rules class as
-// presence is a documented vocabulary value, so it is ordinary use too. `vary` probes each change one thing a
-// trigger could wait for: the date, the number of messages, the length of a content, or a trigger candidate's
-// value placed where the template reads it.
+// presence is a documented vocabulary value, so it is ordinary use too. Sent as a vary probe instead, such a value
+// opens stock text no other probe prints (image and audio parts, thinking blocks, built-in tools) in 9 of the 21
+// pinned templates, so a payload gated on one is left to the static rules (Decisions 02:58). `vary` probes each
+// change one thing a trigger could wait for: the date, the number of messages, the length of a content, or a
+// trigger candidate's value placed where the template reads it.
 //
 // Every content is a distinct, benign, multi-word ASCII sentence and none holds another, so a verbatim search for
 // one is unambiguous (ISC-22.3). Probe.inputs lists every string a probe passes, which is what removing input from
