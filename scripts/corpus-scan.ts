@@ -116,6 +116,11 @@ for (const [sha, { template: t, models: carriers }] of [...bySha].sort((a, b) =>
   console.log(
     `${n(c1.high)} ${n(c1.medium)} ${ce.complete ? "yes " : "NO  "} ${n(c2.high)} ${n(c2.medium)} ${inj.complete ? "yes " : "NO  "} ${sha.slice(0, 12)}  ${t.source.name.padEnd(10)}  ${where}${carriers.length > 1 ? ` (+${carriers.length - 1} more models)` : ""}`,
   );
+  // With no declared special tokens the scaffolding is only role names and
+  // delimiters, so every control token the template writes reads as text.
+  for (const model of carriers) {
+    if (model.specialTokens.length === 0) console.log(`        note: no special tokens declared by ${model.id.replace(homedir(), "~")} (tokenizer files missing?)`);
+  }
   if (verbose) {
     for (const f of [...ce.findings, ...inj.findings]) {
       const at = f.span ? `${f.span.line}:${f.span.col}` : "-";

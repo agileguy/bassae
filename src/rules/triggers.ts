@@ -223,6 +223,8 @@ export interface Lit {
   genElse?: number;
   /** Provenance: a new number whenever a test is applied to the literal. Two prints of one literal with the same provenance have no test between them. */
   via?: number;
+  /** It reached a variable under a content test that reads a value already holding it (`set r = c.split('</think>')[0]` under `'</think>' in c`): the test moved the text, it did not put it there. */
+  routed?: boolean;
 }
 
 /** What the extraction knows about one runtime value. */

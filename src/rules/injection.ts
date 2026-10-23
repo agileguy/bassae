@@ -38,17 +38,17 @@ const ROLE_SET = new Set(ROLE_NAMES);
 /**
  * True when a special token reads as prose and so is not scaffolding (ISC-17.3).
  * Scaffolding tokens are whitespace or punctuation (`▁▁`, `<|"|>`), role names,
- * or a name wrapped in delimiter characters with no space inside (`<|im_start|>`,
- * `[INST]`, `<｜begin▁of▁sentence｜>`). Anything else, a bare word or a wrapped
- * phrase, is something a template could hide an instruction in by declaring it
- * a control token.
+ * or a name marked by delimiter characters, at one end or both, with no space
+ * inside (`<|im_start|>`, `[INST]`, `<｜begin▁of▁sentence｜>`, GLM's
+ * `/nothink`). Anything else, a bare word or a marked phrase, is something a
+ * template could hide an instruction in by declaring it a control token.
  */
 export function readsAsProse(token: string): boolean {
   if (!/[\p{L}\p{N}]/u.test(token)) return false;
   if (ROLE_SET.has(token.toLowerCase())) return false;
-  const m = /^[^\p{L}\p{N}\s]+([\s\S]*?)[^\p{L}\p{N}\s]+$/u.exec(token);
-  if (!m) return true; // a bare word or phrase
-  const inner = m[1]!;
+  const m = /^([^\p{L}\p{N}\s]*)([\s\S]*?)([^\p{L}\p{N}\s]*)$/u.exec(token)!;
+  if (!m[1] && !m[3]) return true; // a bare word or phrase
+  const inner = m[2]!;
   if (/[\p{L}\p{N}][\s]+[\p{L}\p{N}]/u.test(inner)) return true;
   return inner.length > MAX_TOKEN_NAME;
 }

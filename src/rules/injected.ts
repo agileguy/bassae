@@ -159,6 +159,8 @@ interface Ctx {
   emitCond?: Cond;
   /** Inside a loop body within the innermost `if` branch: text printed here is under a test that branch does not see. */
   fresh?: boolean;
+  /** Literals held, at the test, in the values the enclosing content tests read. */
+  subject?: ReadonlySet<Lit>;
   facts: Facts;
   st: State;
   scope?: Scope;
@@ -297,10 +299,11 @@ class Interp {
     const test = s.test as Node;
     const tc = this.testCond(test, c);
     const cond = strongest(c.cond, tc);
+    const subject = this.subjectOf(test, tc, c);
     const sb = new State(c.st);
     const sa = new State(c.st);
-    const body: Ctx = { ...c, cond, fresh: false, st: sb, facts: factsFrom(test, true, c.facts) };
-    const alt: Ctx = { ...c, cond, fresh: false, st: sa, facts: factsFrom(test, false, c.facts) };
+    const body: Ctx = { ...c, cond, subject, fresh: false, st: sb, facts: factsFrom(test, true, c.facts) };
+    const alt: Ctx = { ...c, cond, subject, fresh: false, st: sa, facts: factsFrom(test, false, c.facts) };
     const polarity = genPolarity(test);
     if (polarity) {
       let id = this.genIds.get(s);
@@ -435,7 +438,7 @@ class Interp {
     }
     const cond = strongest(l.cond, c.emitCond);
     if (cond) sink.truth = stronger(sink.truth, cond.test);
-    sink.lits.push({ text: l.text, span: l.span, cond, via: c.fresh ? ++this.vias : l.via, gen: l.gen ?? c.gen, genElse: l.genElse ?? c.genElse });
+    sink.lits.push({ text: l.text, span: l.span, cond, via: c.fresh ? ++this.vias : l.via, routed: l.routed, gen: l.gen ?? c.gen, genElse: l.genElse ?? c.genElse });
   }
 
   // ---- variables ----
@@ -475,7 +478,7 @@ class Interp {
   // the change outlives the scope it was made in.
   private assign(key: string, v: Val, c: Ctx, before?: Val, mutate = false): void {
     const held = before && c.cond && before.lits.length > 0 ? new Set([...before.lits, ...(before.keys ?? [])]) : undefined;
-    let w = c.cond ? this.under(v, c.cond, held) : v;
+    let w = c.cond ? this.under(v, c.cond, held, c.subject) : v;
     if (w.nsInit) {
       const init = w.nsInit;
       const id = c.scope?.macro ? `${c.scope.macro}::${key}` : key;
@@ -504,10 +507,47 @@ class Interp {
   // `v` under one more test: on its gate, and on every literal not in `held`.
   // Each literal it touches gets a new provenance even when the test is a
   // constant, so a literal printed on both sides of an `if` is only taken as
-  // printed either way when no test stands between the two prints.
-  private under(v: Val, cond: Cond | undefined, held?: ReadonlySet<Lit>): Val {
-    const mark = (l: Lit): Lit => (held?.has(l) ? l : { ...l, cond: strongest(l.cond, cond), via: ++this.vias });
+  // printed either way when no test stands between the two prints. A literal in
+  // `subject` was already in what the test read, so it is marked as routed; a
+  // content test that is not routing it clears the mark.
+  private under(v: Val, cond: Cond | undefined, held?: ReadonlySet<Lit>, subject?: ReadonlySet<Lit>): Val {
+    const mark = (l: Lit): Lit => {
+      if (held?.has(l)) return l;
+      const routed = subject?.has(l) ? true : cond?.test === "content" ? undefined : l.routed;
+      return { ...l, cond: strongest(l.cond, cond), via: ++this.vias, routed };
+    };
     return { ...v, lits: v.lits.map(mark), keys: v.keys?.map(mark), gate: strongest(v.gate, cond) };
+  }
+
+  // The literals a content test reads: those held by every variable its test
+  // names, plus the enclosing tests' (a branch can route text either read).
+  private subjectOf(test: Node, tc: Cond | undefined, c: Ctx): ReadonlySet<Lit> | undefined {
+    if (tc?.test !== "content") return c.subject;
+    const out = new Set<Lit>(c.subject);
+    const seen = new Set<string>();
+    let budget = 256;
+    const walk = (n: unknown): void => {
+      if (!n || typeof n !== "object" || --budget < 0) return;
+      if (Array.isArray(n)) {
+        for (const x of n) walk(x);
+        return;
+      }
+      const node = n as Node;
+      if (node.type === "Identifier") {
+        const name = String(node.value);
+        if (seen.has(name)) return;
+        seen.add(name);
+        const v = c.st.get(name);
+        if (v) for (const l of [...v.lits, ...(v.keys ?? [])]) out.add(l);
+        return;
+      }
+      for (const [k, x] of Object.entries(node)) {
+        if (k === "property" && node.type === "MemberExpression" && !node.computed) continue;
+        walk(x);
+      }
+    };
+    walk(test);
+    return out;
   }
 
   // ---- expressions ----
@@ -547,12 +587,13 @@ class Interp {
         const cond = this.testCond(test, c);
         const t = this.eval(node.trueExpr, { ...c, facts: factsFrom(test, true, c.facts) });
         const f = this.eval(node.falseExpr, { ...c, facts: factsFrom(test, false, c.facts) });
-        return this.under(join(t, f), cond);
+        return this.under(join(t, f), cond, undefined, this.subjectOf(test, cond, c));
       }
       case "SelectExpression": {
         // `x if c` with no else.
         const test = node.test as Node;
-        return this.under(this.eval(node.lhs, { ...c, facts: factsFrom(test, true, c.facts) }), this.testCond(test, c));
+        const cond = this.testCond(test, c);
+        return this.under(this.eval(node.lhs, { ...c, facts: factsFrom(test, true, c.facts) }), cond, undefined, this.subjectOf(test, cond, c));
       }
       case "ArrayLiteral":
       case "TupleLiteral": {
@@ -1475,14 +1516,23 @@ function pushFrag(text: string, s: number, e: number, out: [number, number][]): 
  */
 export function toItems(lits: Lit[], matcher: Scaffold): InjectedText[] {
   const items = new Map<string, InjectedText>();
+  // Items some unrouted path reaches. A routed path only moves text that
+  // reaches the output another way, so once a direct path is known the
+  // routed ones do not count toward the item's condition.
+  const direct = new Set<string>();
   const seen = new Set<number>();
   let after = false;
   const add = (l: Lit, frags: [number, number][], afterGen: boolean): void => {
     if (frags.length === 0) return;
     const text = l.text.slice(frags[0]![0], frags[frags.length - 1]![1]);
     const key = `${l.span.start}:${l.span.end}:${afterGen}:${text}`;
-    const prev = items.get(key);
-    const cond = strongest(prev?.condition as Cond | undefined, l.cond);
+    const prev = items.get(key)?.condition as Cond | undefined;
+    const routed = l.routed === true;
+    let cond: Cond | undefined;
+    if (!items.has(key) || (!routed && !direct.has(key))) cond = l.cond;
+    else if (routed && direct.has(key)) cond = prev;
+    else cond = strongest(prev, l.cond);
+    if (!routed) direct.add(key);
     items.set(key, { text, span: l.span, condition: cond ? { span: cond.span, test: cond.test } : undefined, afterGenerationPrompt: afterGen });
   };
   for (const l of lits) {
