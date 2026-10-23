@@ -11,8 +11,9 @@
 //    number inside one) was added, changed or removed. A changed number is a
 //    changed threshold, which no fixed probe set can show harmless (Decisions 19:15);
 // 3. else the rewrite changes control flow only. It is LOW only when it adds no
-//    test on content or on the clock or chance (conditions.ts, Decisions 20:55): a
-//    fixed probe set never sends the one message such a test waits for. Then the
+//    test on content or on the clock or chance (Decisions 20:55), as the trigger
+//    rules' own interpreter classes each test: a fixed probe set never sends the
+//    one message such a test waits for. Then the
 //    sandboxed renderer must give identical output for both texts on every probe
 //    that renders, and every conversation shape must render at least once. A probe
 //    both texts refuse with the same render_error message counts as identical but
@@ -24,11 +25,12 @@
 // so does a `none` baseline.
 
 import { diffLines, type LineDiff, unifiedDiff } from "../diff.ts";
-import { type AddedTest, addedTests } from "./conditions.ts";
-import { WHOLE_TEMPLATE } from "../parse/parse.ts";
+import { parseTemplate, WHOLE_TEMPLATE } from "../parse/parse.ts";
 import { preLex } from "../parse/prelexer.ts";
 import { LineMap } from "../parse/support.ts";
 import { clip } from "../rules/finalize.ts";
+import { type ClassedTest, classedTests } from "../rules/injected.ts";
+import { stronger, type TestClass } from "../rules/triggers.ts";
 import { isTemplateSpace, sameIgnoringWhitespace, whitespaceKey } from "../whitespace.ts";
 import type { Baseline, ExtractedTemplate, Finding, RenderRequest, Renderer, RuleResult, Severity, Span } from "../types.ts";
 import { SEVERITY_RANK } from "../types.ts";
@@ -37,6 +39,8 @@ import { SEVERITY_RANK } from "../types.ts";
 const MAX_LITERAL_UNITS = 4 * 1024 * 1024;
 // Rule hits kept in a finding's detail.
 const MAX_RULES_LISTED = 50;
+// Characters of an added test kept as its excerpt.
+const MAX_EXCERPT = 200;
 
 type Trusted = Exclude<Baseline, { kind: "none" }>;
 
@@ -194,6 +198,96 @@ function literalsChanged(a: string, b: string): boolean {
   const lb = literals(b);
   if (!la || !lb) return true;
   return la.length !== lb.length || la.some((s, i) => s !== lb[i]);
+}
+
+/** A test on content, or on the clock or chance, that a rewrite added or made. */
+interface AddedTest {
+  cls: "content" | "nondeterministic";
+  span: Span;
+  excerpt: string;
+}
+
+/**
+ * The content and nondeterministic tests in `text` that `base` does not have at the same place: every such test in
+ * the lines `diff` marks changed, and every other one whose class is stronger than the same test's in `base`.
+ * Undefined when either text cannot be parsed or its walk is incomplete.
+ */
+function addedTests(base: string, text: string, diff: LineDiff): AddedTest[] | undefined {
+  const before = testsOf(base);
+  const after = testsOf(text);
+  if (!before || !after) return undefined;
+  const was = new Map<string, TestClass>();
+  for (const t of before.tests) {
+    const key = keyOf(t.span.start, t.span.end, t.node.type);
+    was.set(key, stronger(was.get(key) ?? "none", t.cls));
+  }
+  const changed = diff.blocks.filter((b) => b.bRange.end > b.bRange.start).map((b) => b.bRange);
+  const found: (ClassedTest & { cls: AddedTest["cls"] })[] = [];
+  for (const t of after.tests) {
+    if (t.cls !== "content" && t.cls !== "nondeterministic") continue;
+    const { start, end } = t.span;
+    if (!changed.some((r) => start < r.end && r.start < end)) {
+      // An unchanged line: the same test, at the same place in the base, already read this much.
+      const at = toBase(start, diff);
+      const prior = at === undefined ? undefined : was.get(keyOf(at, at + (end - start), t.node.type));
+      if (prior !== undefined && stronger(prior, t.cls) === prior) continue;
+    }
+    found.push({ ...t, cls: t.cls });
+  }
+  // A test that holds a smaller one at least as strong says no more than it
+  // does: a loop over `messages|selectattr(k, u)` is named by its filter.
+  const inner = (o: ClassedTest, i: ClassedTest) => i !== o && o.span.start <= i.span.start && i.span.end <= o.span.end && (i.span.end - i.span.start) < (o.span.end - o.span.start) && stronger(o.cls, i.cls) === i.cls;
+  return found.filter((o) => !found.some((i) => inner(o, i))).map((t) => ({ cls: t.cls, span: t.span, excerpt: excerpt(text, t.span.start, t.span.end) }));
+}
+
+// Where an offset in the new text was in the base, through the unchanged lines; undefined inside a changed block.
+function toBase(p: number, diff: LineDiff): number | undefined {
+  let delta = 0;
+  for (const b of diff.blocks) {
+    if (p < b.bRange.start) break;
+    if (p < b.bRange.end) return undefined;
+    delta = b.aRange.end - b.bRange.end;
+  }
+  return p + delta;
+}
+
+const keyOf = (start: number, end: number, type: string) => `${start}:${end}:${type}`;
+
+// The test's own text, widened to the parentheses its first and last names
+// sit in and to the empty argument list of a call it ends with.
+function excerpt(text: string, start: number, end: number): string {
+  let depth = 0;
+  let low = 0;
+  for (let i = start; i < end; i++) {
+    const c = text[i];
+    if (c === "(") depth++;
+    else if (c === ")") low = Math.min(low, --depth);
+  }
+  let s = start;
+  for (let need = -low; need > 0 && s > 0; s--) {
+    const c = text[s - 1]!;
+    if (c === "(") need--;
+    else if (c.trim() !== "") break;
+  }
+  let e = end;
+  for (let open = depth - low; open > 0 && e < text.length; e++) {
+    const c = text[e]!;
+    if (c === ")") open--;
+    else if (c.trim() !== "") break;
+  }
+  while (text.startsWith("()", e)) e += 2;
+  const t = text.slice(s, e);
+  return t.length > MAX_EXCERPT ? `${t.slice(0, MAX_EXCERPT)}…` : t;
+}
+
+// Every test the trigger rules' interpreter judged in `text`, with its class
+// (ISC-18): the same walk the findings come from, so a construct it models is
+// classed as the rules class it, and an incomplete walk classes nothing.
+function testsOf(text: string): { tests: ClassedTest[] } | undefined {
+  const outcome = parseTemplate(text);
+  if (!outcome.program || !outcome.lines || outcome.tooLarge) return undefined;
+  const tests = classedTests(outcome);
+  return tests && { tests };
 }
 
 /** What the renderer showed. `rendered` probes gave identical output; `skipped` ones were refused identically by both texts. */

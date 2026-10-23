@@ -29,7 +29,7 @@
 // stack walkers for the span helpers. Hitting any bound sets `complete` false
 // rather than throwing (ISC-42.1), and the text between tags is still reported.
 
-import type { InjectedText, Span } from "../types.ts";
+import type { InjectedText, Span, TriggerCandidate, TriggerOp } from "../types.ts";
 import { scanBlobs, scanUrls } from "./textscan.ts";
 import { WHOLE_TEMPLATE, type ParseOutcome } from "../parse/parse.ts";
 import { children, type LineMap, type Node } from "../parse/support.ts";
@@ -52,6 +52,7 @@ import {
   flagNumbers,
   genPolarity,
   isRuntime,
+  isSlice,
   keyed,
   keyField,
   lengthOf,
@@ -65,6 +66,7 @@ import {
   orderOf,
   pathOf,
   presenceOf,
+  readOf,
   rangeOf,
   recordOf,
   restOf,
@@ -99,8 +101,18 @@ export interface Extraction {
   /** URLs and blobs only the printed text as a whole holds: across literals printed one after another, or in a folded literal (ISC-19, ISC-20). */
   joined: { urls: InjectedText[]; blobs: InjectedText[] };
   nondeterministic: Trigger[];
-  /** False when a budget stopped the walk before every emission was seen. */
+  /** Every literal compared with runtime input, from the same walk (ISC-22.1). */
+  triggers: TriggerCandidate[];
+  /** False when a budget stopped the walk before every emission was seen, or there were more trigger candidates than MAX_TRIGGERS. */
   complete: boolean;
+}
+
+/** A test the walk classed (ISC-25): an `if` or loop test or one part of it, an inline if, a comparison, an `is` test, a select filter, a loop's iterable, or a key, bound or count that chooses text. */
+export interface ClassedTest {
+  node: Node;
+  span: Span;
+  /** The strongest class any call site or path gave it. */
+  cls: TestClass;
 }
 
 // Node visits across every fixpoint pass, every inlined macro and the final
@@ -132,6 +144,18 @@ const MATCH_BUDGET = 20_000_000;
 const MAX_PIECE = 4096;
 // Total characters of scaffolding put into the trie.
 const MAX_TRIE_CHARS = 4 * 1024 * 1024;
+// Trigger candidates listed for one template. Past this the list is cut and
+// the walk is incomplete, never silently short (ISC-22.1).
+const MAX_TRIGGERS = 1024;
+// Ordering a literal from the other side: `40 < n` is `n > 40`.
+const FLIPPED: Readonly<Record<string, TriggerOp>> = { "<": ">", ">": "<", "<=": ">=", ">=": "<=", "==": "==", "!=": "!=" };
+// The select filters' comparison tests, as the operator each one is (ISC-22.1).
+const SELECT_OPS: Readonly<Record<string, TriggerOp>> = {
+  equalto: "==", "==": "==", eq: "==", sameas: "==", ne: "!=", "!=": "!=", in: "==",
+  lt: "<", lessthan: "<", "<": "<", le: "<=", "<=": "<=", gt: ">", greaterthan: ">", ">": ">", ge: ">=", ">=": ">=",
+};
+// Methods that look for their argument in the receiver's text: the literal is inside the input.
+const SEARCH_OPS: Readonly<Record<string, TriggerOp>> = { startswith: "startswith", endswith: "endswith", find: "in", rfind: "in", index: "in", rindex: "in", count: "in" };
 
 const EMPTY: Val = { lits: [], data: "none", truth: "none" };
 const WORDISH = /[\p{L}\p{N}]/u;
@@ -141,7 +165,7 @@ const NON_SPACE = /\S/u;
 export function extract(outcome: ParseOutcome, text: string, scaffolding: ReadonlySet<string>): Extraction {
   const matcher = new Scaffold(scaffolding);
   if (!outcome.program || !outcome.pre || !outcome.lines) {
-    return { items: rawItems(outcome, matcher), joined: { urls: [], blobs: [] }, nondeterministic: [], complete: false };
+    return { items: rawItems(outcome, matcher), joined: { urls: [], blobs: [] }, nondeterministic: [], triggers: [], complete: false };
   }
   const interp = new Interp(outcome, outcome.lines);
   const lits = interp.run();
@@ -153,7 +177,21 @@ export function extract(outcome: ParseOutcome, text: string, scaffolding: Readon
     const seen = new Set(items.map((i) => i.span.start));
     for (const r of rawItems(outcome, matcher)) if (!seen.has(r.span.start)) items.push(r);
   }
-  return { items, joined, nondeterministic: [...interp.nondet.values()], complete: interp.complete && matcher.complete && joined.complete };
+  // A list cut at the cap is never passed off as whole (ISC-22.1).
+  const triggers = [...interp.triggers.values()];
+  return { items, joined, nondeterministic: [...interp.nondet.values()], triggers, complete: interp.complete && !interp.triggersCut && matcher.complete && joined.complete };
+}
+
+/**
+ * Every test in a parsed template, classed by the extraction's own walk (ISC-25). Undefined with no AST, or when a
+ * budget or cap stopped the walk: a test it did not reach, or reached with a value cut short, may be stronger than it
+ * reads.
+ */
+export function classedTests(outcome: ParseOutcome): ClassedTest[] | undefined {
+  if (!outcome.program || !outcome.pre || !outcome.lines) return undefined;
+  const interp = new Interp(outcome, outcome.lines);
+  interp.run();
+  return interp.complete ? interp.classedTests() : undefined;
 }
 
 /** With no AST (parse error or shape cap), every text run between tags is a candidate: it is emitted whenever it is reached. */
@@ -218,6 +256,8 @@ interface Ctx {
   gen?: number;
   genElse?: number;
   stack: readonly string[];
+  /** The input the innermost loop's element is read from: what `loop.previtem` and `loop.nextitem` read (ISC-22.1). */
+  loopItem?: string;
 }
 
 /** What a block prints: its literals, what the printed text reveals, and what its emptiness reveals. */
@@ -232,6 +272,7 @@ class Interp {
   private readonly called = new Set<string>();
   private readonly textSpans: Map<Node, Span>;
   private readonly exprSpans = new Map<Node, Span>();
+  private readonly testSpans = new Map<Node, Span>();
   private readonly genIds = new Map<Node, number>();
   // What each `for` body left in its variables, joined over every pass: the
   // values its next iteration starts from.
@@ -256,6 +297,13 @@ class Interp {
   private konstChars = 0;
   complete = true;
   readonly nondet = new Map<string, Trigger>();
+  // The final pass records each test it classes, with the strongest class any
+  // call site gives it (ISC-25), and each literal compared with runtime input
+  // (ISC-22.1). The passes before it run on values not yet settled.
+  private recording = false;
+  private readonly tests = new Map<Node, TestClass>();
+  readonly triggers = new Map<string, TriggerCandidate>();
+  triggersCut = false;
 
   constructor(
     private readonly outcome: ParseOutcome,
@@ -282,6 +330,7 @@ class Interp {
     const out: Sink = { lits: [], data: "none", truth: "none" };
     this.outputLits = 0;
     this.konstChars = 0;
+    this.recording = true;
     this.exec(body, { facts: NO_FACTS, st: new State(), stack: [] }, out);
     // A macro no one calls emits nothing, but `random` or a clock test inside it
     // is still a use (ISC-18.1). Walk each one once with unknown arguments.
@@ -295,6 +344,13 @@ class Interp {
       this.exec((m.body as Node[]) ?? [], { facts: NO_FACTS, st, scope: { macro: name }, stack: [name] }, { lits: [], data: "none", truth: "none" });
     }
     return out.lits;
+  }
+
+  /** The tests the final pass classed, in source order, an enclosing one before those inside it. */
+  classedTests(): ClassedTest[] {
+    const out: ClassedTest[] = [];
+    for (const [node, cls] of this.tests) out.push({ node, span: this.testSpan(node), cls });
+    return out.sort((a, b) => a.span.start - b.span.start || b.span.end - a.span.end);
   }
 
   private tick(): boolean {
@@ -483,6 +539,9 @@ class Interp {
     // iterable's emptiness, and on what chose the iterable. The `else` block
     // runs when it is empty, without the loop variables.
     let loop = strongest(condOf(it.truth, this.exprSpan(iterNode)), it.gate);
+    // A loop over computed text (`m.content.split('x')[1:]`) runs only when the
+    // text holds what it looks for: its iterable is a test too (ISC-25).
+    this.classed(iterNode, loop?.test ?? "none");
     if (filter) loop = strongest(loop, this.testCond(filter, { ...c, st: layer }));
     const inner = { cond: strongest(c.cond, loop), emitCond: strongest(c.emitCond, loop), fresh: true };
     const [each, none] = arms(c.path);
@@ -492,7 +551,7 @@ class Interp {
     // generation-prompt branch, and its `else` the arm exclusive with it.
     const flagged = (filter && this.genOf(filter, { ...c, st: layer }) === "body") || this.flagRange(iterNode, c);
     const gen = flagged ? this.genId(s) : undefined;
-    this.exec(s.body, { ...c, ...inner, st: layer, path: each, gen: gen ?? c.gen }, sink);
+    this.exec(s.body, { ...c, ...inner, st: layer, path: each, gen: gen ?? c.gen, loopItem: elemSrc(it) }, sink);
     const next = new Map(back ?? []);
     let grew = false;
     for (const [k, v] of layer.own) {
@@ -778,7 +837,7 @@ class Interp {
           else allKonst = false;
           held.push(heldOf(e));
           // A list of its elements' fields: `[messages|length]` is a list of one count, not a count (review round 3, contracts S3).
-          v = join(v, { ...e, keys: deeper(e.keys), fields: e.fields && mapFields(e.fields, listOf), konst: undefined, konstList: undefined, ns: undefined, macro: undefined, path: undefined });
+          v = join(v, { ...e, keys: deeper(e.keys), fields: e.fields && mapFields(e.fields, listOf), konst: undefined, konstList: undefined, ns: undefined, macro: undefined, path: undefined, src: undefined });
         });
         return this.capped({ ...v, truth: "none", konst: undefined, konstList: allKonst ? konsts : undefined, genAt: gathered(held) });
       }
@@ -799,7 +858,7 @@ class Interp {
             this.holds(vv);
             if (typeof kv.konst === "string") keyHeld(held, kv.konst, heldOf(vv));
             // A value keeps its fields as a member: a count is still a count (review round 3, contracts M2).
-            v = join(v, { ...vv, keys: deeper(vv.keys), fields: vv.fields && mapFields(vv.fields, recordOf), konst: undefined, konstList: undefined, ns: undefined, macro: undefined, path: undefined });
+            v = join(v, { ...vv, keys: deeper(vv.keys), fields: vv.fields && mapFields(vv.fields, recordOf), konst: undefined, konstList: undefined, ns: undefined, macro: undefined, path: undefined, src: undefined });
           }
         }
         return this.capped({ ...v, keys: [...(v.keys ?? []), ...keys], truth: "none", genAt: held.size ? [...held] : undefined, konstKeys });
@@ -840,7 +899,7 @@ class Interp {
     // The clock and chance are values too: `set f = strftime_now` then `f()`.
     if (NONDET_FNS.has(name)) return { ...EMPTY, fns: [name] };
     if (BUILTINS.has(name)) return EMPTY;
-    const v = refine(runtimeVal(rootField(name), name), name, c);
+    const v = refine({ ...runtimeVal(rootField(name), name), src: name }, name, c);
     return name === "add_generation_prompt" ? { ...v, genFlag: true } : v;
   }
 
@@ -877,10 +936,11 @@ class Interp {
       counted = this.positionCond(o, kv, prop, c, "index");
       // A position in a sorted list is chosen by what the sort compared (review round 3, contracts S1).
       if (typeof kv.konst !== "string") counted = strongest(counted, this.choiceCond(orderOf(o.fields), prop));
-      keyGate = this.selCond(kv, prop);
       // A role looking up a dict of constant keys is compared with each key (review round 2, ruling c).
       const kd = keyed(kv, o);
-      if (kd !== kv) keyGate = this.selCond(kd, prop);
+      keyGate = this.selCond(kd, prop);
+      // Any runtime key looking one up is a trigger candidate for each key (ISC-22.1).
+      if (o.konstKeys) for (const k of o.konstKeys) this.candidate(k, "==", kv, readOf(kd), n);
     }
     keyGate = strongest(keyGate, counted);
     if (o.ns !== undefined && typeof key === "string") {
@@ -903,6 +963,7 @@ class Interp {
       fields,
       rest: o.rest,
       path,
+      src: o.src === "loop" && (key === "previtem" || key === "nextitem") ? c.loopItem : o.src === undefined ? undefined : typeof key === "string" ? `${o.src}.${key}` : `${o.src}[]`,
     };
     return refine(withHeld(v, entryHeld(o.genAt, key)), path, c);
   }
@@ -959,7 +1020,7 @@ class Interp {
               this.holds(av);
               if (kw) keyHeld(held, String((a.key as Node).value), heldOf(av));
               else for (const [k, h] of av.genAt ?? []) if (typeof k === "string") keyHeld(held, k, h);
-              v = join(v, { ...av, keys: kw ? deeper(av.keys) : av.keys, fields: kw && av.fields ? mapFields(av.fields, recordOf) : av.fields, konst: undefined, path: undefined });
+              v = join(v, { ...av, keys: kw ? deeper(av.keys) : av.keys, fields: kw && av.fields ? mapFields(av.fields, recordOf) : av.fields, konst: undefined, path: undefined, src: undefined });
             }
             return this.capped({ ...v, keys: [...(v.keys ?? []), ...keys], truth: "none", genAt: held.size ? [...held] : undefined });
           }
@@ -989,7 +1050,7 @@ class Interp {
       const prop = callee.property as Node;
       const method = !callee.computed && prop?.type === "Identifier" ? String(prop.value) : prop?.type === "StringLiteral" ? String(prop.value) : "";
       if (method === "cycle" && r.fields?.includes(rootField("loop"))) return this.loopCycle(r, args, c, n);
-      const out = this.method(r, method, args, c, callee.object as Node);
+      const out = this.method(r, method, args, c, callee.object as Node, n);
       if (KNOWN_METHODS.has(method)) return this.capped({ ...out, ...methodGen(r, method, args) });
       // `d.k()` with no such string, list or dict method: an entry holding a
       // macro or the clock.
@@ -1118,11 +1179,17 @@ class Interp {
     return { lits: sink.lits, data: sink.data, truth: sink.truth };
   }
 
-  private method(r: Val, m: string, argNodes: Node[], c: Ctx, receiver: Node): Val {
+  private method(r: Val, m: string, argNodes: Node[], c: Ctx, receiver: Node, call: Node): Val {
     const a = argNodes.map((x) => this.eval(x, c));
     const base = { gate: strongest(r.gate, a.reduce<Cond | undefined>((g, x) => strongest(g, x.gate), undefined)) };
     const known = this.konstMethod(r, m, a, argNodes, receiver);
     if (known) return known;
+    // `m.content.startswith('x')` and `m.content.find('x')` look for the literal in the
+    // input, as `'x' in m.content` does; a tuple gives one candidate per element.
+    if (Object.hasOwn(SEARCH_OPS, m) && argNodes[0]) {
+      const cls = (m === "count" && a.length === 1 ? countedIn(r, a[0]) : undefined) ?? readOf(r);
+      for (const k of this.literalsIn(argNodes[0], a[0]!, c)) this.candidate(k, SEARCH_OPS[m]!, r, cls, call);
+    }
     switch (m) {
       case "upper":
       case "lower":
@@ -1133,7 +1200,7 @@ class Interp {
       case "rstrip":
       case "swapcase":
         // Case and whitespace changes keep the text and its emptiness.
-        return { ...base, lits: r.lits, data: r.data, truth: r.truth, konst: typeof r.konst === "string" ? caseMap(r.konst, m) : undefined };
+        return { ...base, lits: r.lits, data: r.data, truth: r.truth, konst: typeof r.konst === "string" ? caseMap(r.konst, m) : undefined, src: r.src };
       case "replace":
         return { ...base, ...this.replaced(r, a, argNodes, receiver) };
       case "format":
@@ -1149,6 +1216,7 @@ class Interp {
       case "splitlines":
       case "partition":
       case "rpartition":
+        // The pieces are computed from the input, not read from it (ISC-22.1).
         return { ...base, lits: r.lits, data: r.data, truth: r.data };
       case "get": {
         const k = a[0]?.konst;
@@ -1160,10 +1228,15 @@ class Interp {
         // dict adds nothing to.
         let sel = argNodes[0] ? this.selCond(keyed(a[0]!, r), argNodes[0]) : undefined;
         const pick = argNodes[0] ? countPick(a[0]!, (r.keys ?? []).map((l) => l.text)) : undefined;
-        if (pick) sel = strongest(sel, condOf(pick === "presence" ? "none" : pick, this.exprSpan(argNodes[0]!)));
+        if (pick) {
+          sel = strongest(sel, condOf(pick === "presence" ? "none" : pick, this.exprSpan(argNodes[0]!)));
+          this.classed(argNodes[0]!, pick);
+        }
+        // A runtime key looking up a dict of constant keys is compared with each key.
+        if (argNodes[0] && r.konstKeys) for (const key of r.konstKeys) this.candidate(key, "==", a[0]!, readOf(keyed(a[0]!, r)), call);
         const dflt = a[1] && !a[1].fields ? restOf(a[1]) : a[1]?.data;
         const inner = [...(entryKeys(r.keys) ?? []), ...(a[1]?.keys ?? [])];
-        return { ...base, gate: strongest(base.gate, sel), lits: this.choose([...r.lits, ...(a[1]?.lits ?? [])], sel), keys: inner.length ? this.choose(inner, sel) : undefined, data: fields ? clsOf(fields) : r.data, truth: fields ? presenceOf(fields) : r.truth, fields, rest: fields ? eitherRest(r.rest, dflt) : undefined };
+        return { ...base, gate: strongest(base.gate, sel), lits: this.choose([...r.lits, ...(a[1]?.lits ?? [])], sel), keys: inner.length ? this.choose(inner, sel) : undefined, data: fields ? clsOf(fields) : r.data, truth: fields ? presenceOf(fields) : r.truth, fields, rest: fields ? eitherRest(r.rest, dflt) : undefined, src: typeof k === "string" && r.src !== undefined ? `${r.src}.${k}` : undefined };
       }
       case "items":
       case "keys":
@@ -1180,7 +1253,7 @@ class Interp {
         for (const x of a) this.holds(x);
         const arg = a[a.length - 1] ?? EMPTY;
         // An appended dict is an entry, whose keys a lookup prints.
-        const v = { ...arg, keys: m === "extend" || m === "update" ? arg.keys : deeper(arg.keys), konst: undefined, konstList: undefined, ns: undefined, macro: undefined, path: undefined };
+        const v = { ...arg, keys: m === "extend" || m === "update" ? arg.keys : deeper(arg.keys), konst: undefined, konstList: undefined, ns: undefined, macro: undefined, path: undefined, src: undefined };
         const k = receiver?.type === "Identifier" ? String(receiver.value) : receiver?.type === "MemberExpression" ? this.slot(receiver, c) : undefined;
         if (k !== undefined) this.assign(k, v, c, c.st.get(k), true);
         return EMPTY;
@@ -1244,18 +1317,18 @@ class Interp {
       case "capitalize":
       case "trim": {
         const konst = typeof o.konst === "string" ? caseMap(o.konst, name) : undefined;
-        return { ...keep, lits: konst !== undefined && konst !== o.konst ? this.folded(o.lits, konst, fnode) : keep.lits, konst, ...(NUMBER_KEEPING.has(name) ? countKept(o) : {}) };
+        return { ...keep, lits: konst !== undefined && konst !== o.konst ? this.folded(o.lits, konst, fnode) : keep.lits, konst, src: o.src, ...(NUMBER_KEEPING.has(name) ? countKept(o) : {}) };
       }
       case "string":
       case "tojson":
       case "pprint":
         // The text holds every field, so a test on it reads the strongest one.
         // A count's digits are the count (`messages|length|string == '41'`).
-        return { ...keep, lits: [...o.lits, ...(o.keys ?? [])], data: o.fields ? stronger(o.data, clsOf(o.fields)) : o.data, konst: name === "string" && typeof o.konst === "string" ? o.konst : undefined, ...countKept(o) };
+        return { ...keep, lits: [...o.lits, ...(o.keys ?? [])], data: o.fields ? stronger(o.data, clsOf(o.fields)) : o.data, konst: name === "string" && typeof o.konst === "string" ? o.konst : undefined, src: name === "string" ? o.src : undefined, ...countKept(o) };
       case "safe":
       case "e":
       case "escape":
-        return { ...keep, ...countKept(o) };
+        return { ...keep, src: o.src, ...countKept(o) };
       case "forceescape":
       case "indent":
       case "center":
@@ -1286,7 +1359,7 @@ class Interp {
         // survives; a loop over them still runs once per element.
         const s = seqOf(o);
         const [cls, by] = name === "sort" || name === "unique" ? this.orderCond(o, argNodes, fnode) : ["none" as TestClass, undefined];
-        return { ...keep, lits: this.choose(s.lits, by), keys: s.keys && this.choose(s.keys, by), truth: name === "unique" ? stronger(o.truth, cls) : o.truth, fields: by && o.fields ? mapFields(o.fields, (f) => orderedOf(f, cls)) : o.fields, rest: o.rest, pairs: name === "slice" ? undefined : o.pairs, konstList: name === "list" ? o.konstList : undefined };
+        return { ...keep, lits: this.choose(s.lits, by), keys: s.keys && this.choose(s.keys, by), truth: name === "unique" ? stronger(o.truth, cls) : o.truth, fields: by && o.fields ? mapFields(o.fields, (f) => orderedOf(f, cls)) : o.fields, rest: o.rest, pairs: name === "slice" ? undefined : o.pairs, konstList: name === "list" ? o.konstList : undefined, src: name === "slice" ? undefined : o.src };
       }
       case "items":
       case "dictsort":
@@ -1303,7 +1376,7 @@ class Interp {
         // compared chooses the first or last (review round 3, contracts S1).
         const by = end === undefined ? this.orderCond(o, argNodes, fnode)[1] : this.choiceCond(orderOf(o.fields), fnode);
         const pick = strongest(this.argsCond(a, argNodes), by);
-        return { ...keep, lits: this.choose(e.lits, pick), keys: e.keys && this.choose(e.keys, pick), data: fields ? clsOf(fields) : e.data, truth: fields ? presenceOf(fields) : e.truth, gate: strongest(gate, by), fields, rest: e.rest };
+        return { ...keep, lits: this.choose(e.lits, pick), keys: e.keys && this.choose(e.keys, pick), data: fields ? clsOf(fields) : e.data, truth: fields ? presenceOf(fields) : e.truth, gate: strongest(gate, by), fields, rest: e.rest, src: elemSrc(o) };
       }
       case "length":
       case "count":
@@ -1339,8 +1412,9 @@ class Interp {
         const efs = o.fields ? mapFields(o.fields, o.pairs ? pairField : elementField) : undefined;
         let fs: Fields | undefined;
         let testAt: number;
+        let attr: string | undefined;
         if (name === "selectattr" || name === "rejectattr") {
-          const attr = typeof a[0]?.konst === "string" ? a[0].konst : undefined;
+          attr = typeof a[0]?.konst === "string" ? a[0].konst : undefined;
           fs = efs ? mapFields(efs, (f) => memberPath(f, attr)) : undefined;
           testAt = 1;
         } else {
@@ -1353,8 +1427,19 @@ class Interp {
         let sel: TestClass = test === "" || SHAPE_SELECT_TESTS.has(test) ? (read === "none" ? "none" : fs ? presenceOf(fs) : "presence") : ((fs && (vocabSelect(fs, test, a[testAt + 1]) ?? countSelect(fs, test, a[testAt + 1], o))) ?? read);
         // What the elements are compared with (`select('in', x)`) decides too.
         for (const x of a.slice(testAt + 1)) sel = stronger(sel, x.data);
+        this.classed(fnode, sel);
+        // `selectattr('role', 'equalto', 'user')` compares each element's role with the literal.
+        const each = SELECT_OPS[test];
+        const value = a[testAt + 1];
+        if (each && value && argNodes[testAt + 1]) {
+          const src = elemSrc(o);
+          const named = name === "selectattr" || name === "rejectattr";
+          const input: Val = { ...o, src: !named ? src : src !== undefined && attr !== undefined ? `${src}.${attr}` : undefined };
+          const values = test === "in" ? this.literalsIn(argNodes[testAt + 1]!, value, c) : [constOf(value)];
+          for (const k of values) this.candidate(k, each, input, sel === "none" ? "presence" : sel, fnode);
+        }
         const cond = strongest(this.argsCond(a, argNodes), condOf(sel === "presence" ? "none" : sel, this.exprSpan(fnode)));
-        return { ...keep, lits: this.choose(o.lits, cond), keys: o.keys && this.choose(o.keys, cond), fields: o.fields, rest: o.rest, truth: stronger(o.truth, sel), pairs: o.pairs };
+        return { ...keep, lits: this.choose(o.lits, cond), keys: o.keys && this.choose(o.keys, cond), fields: o.fields, rest: o.rest, truth: stronger(o.truth, sel), pairs: o.pairs, src: o.src };
       }
       case "attr": {
         // `x|attr(k)` reads the member `k` as `x.k` does, so a member the
@@ -1364,7 +1449,7 @@ class Interp {
         const fields = o.fields ? mapFields(o.fields, (f) => memberField(f, k)) : undefined;
         const by = this.argsCond(a, argNodes);
         const inner = entryKeys(o.keys);
-        return { ...keep, lits: this.choose(o.lits, by), keys: inner && this.choose(inner, by), data: fields ? clsOf(fields) : o.data, truth: fields ? presenceOf(fields) : o.truth, gate: strongest(gate, by), fields, rest: fields ? o.rest : undefined };
+        return { ...keep, lits: this.choose(o.lits, by), keys: inner && this.choose(inner, by), data: fields ? clsOf(fields) : o.data, truth: fields ? presenceOf(fields) : o.truth, gate: strongest(gate, by), fields, rest: fields ? o.rest : undefined, src: k !== undefined && o.src !== undefined ? `${o.src}.${k}` : undefined };
       }
       case "random": {
         this.flagNondet(fnode, "uses the `random` filter");
@@ -1445,7 +1530,9 @@ class Interp {
   // matters. A choice by the clock is a nondeterministic trigger (ISC-18.1).
   private selCond(v: Val, at: Node): Cond | undefined {
     if (v.data === "nondeterministic") this.flagNondet(at, "the clock or chance chooses template text");
-    return strongest(v.gate, condOf(v.data === "presence" ? "none" : v.data, this.exprSpan(at)));
+    const cond = strongest(v.gate, condOf(v.data === "presence" ? "none" : v.data, this.exprSpan(at)));
+    this.classed(at, cond?.test ?? "none");
+    return cond;
   }
 
   // The count test a subscript, slice bound or step `kv` (written `at`) on
@@ -1593,7 +1680,9 @@ class Interp {
   // A test of class `cls` as the condition it puts on what it chooses.
   private choiceCond(cls: TestClass | undefined, at: Node): Cond | undefined {
     if (cls === "nondeterministic") this.flagNondet(at, "the clock or chance chooses template text");
-    return cls === undefined ? undefined : condOf(cls === "presence" ? "none" : cls, this.exprSpan(at));
+    if (cls === undefined) return undefined;
+    this.classed(at, cls);
+    return condOf(cls === "presence" ? "none" : cls, this.exprSpan(at));
   }
 
   // The strongest choice among a filter's or method's arguments.
@@ -1724,7 +1813,72 @@ class Interp {
   // ---- tests ----
 
   private testEnv(c: Ctx): TestEnv {
-    return { value: (x, f) => this.eval(x, f === c.facts ? c : { ...c, facts: f }) };
+    return {
+      value: (x, f) => this.eval(x, f === c.facts ? c : { ...c, facts: f }),
+      tested: this.recording ? (x, cls, operands, own) => this.tested(x, cls, operands, own ?? cls, c) : undefined,
+    };
+  }
+
+  // A test classifyTest classed whole. A comparison or membership test that
+  // names a literal on one side and runtime input on the other is a trigger
+  // candidate, phrased as the input against the literal (ISC-22.1).
+  // A candidate takes the comparison's own class: a part's `type` against a
+  // documented kind is presence even where a content test chose the part, as
+  // that test is listed apart (ISC-22.1). Divergence keeps the gated class.
+  private tested(n: Node, gated: TestClass, operands: readonly [Val, Val] | undefined, cls: TestClass, c: Ctx): void {
+    this.classed(n, gated);
+    if (!operands || n.type !== "BinaryExpression") return;
+    const o = String((n.operator as { value?: unknown })?.value ?? "");
+    const [a, b] = operands;
+    if (o === "in" || o === "not in") {
+      // `'x' in m.content` puts the literal inside the input; `m.role in
+      // ['a', 'b']` tests the input against each literal in turn.
+      if (constOf(a) !== undefined) this.candidate(constOf(a), o, b, cls, n);
+      else for (const k of this.literalsIn(n.right as Node, b, c)) this.candidate(k, o === "in" ? "==" : "!=", a, cls, n);
+      return;
+    }
+    // `40 < n` is `n > 40`: the candidate reads input first.
+    const flipped = FLIPPED[o];
+    if (!flipped) return;
+    const eq = o === "==" || o === "!=";
+    if (constOf(b) !== undefined) this.candidate(constOf(b), eq && isSlice(n.left as Node) ? "slice" : (o as TriggerOp), a, cls, n);
+    else if (constOf(a) !== undefined) this.candidate(constOf(a), eq && isSlice(n.right as Node) ? "slice" : flipped, b, cls, n);
+  }
+
+  // The literals a test compares its input with, one by one: a list or tuple
+  // literal's constant elements, or a template value's constant strings, dict
+  // keys or text (`m.content in 'abc'` passes for the literal itself).
+  private literalsIn(n: Node, v: Val, c: Ctx): unknown[] {
+    if (n?.type === "ArrayLiteral" || n?.type === "TupleLiteral") return ((n.value as Node[]) ?? []).map((el) => constOf(this.eval(el, c)));
+    if (v.konstKeys) return v.konstKeys;
+    if (isRuntime(v)) return [];
+    return v.konstList ?? [v.konst];
+  }
+
+  private classed(n: Node, cls: TestClass): void {
+    if (!this.recording) return;
+    const was = this.tests.get(n);
+    if (was === undefined || stronger(was, cls) !== was) this.tests.set(n, cls);
+  }
+
+  // One trigger candidate: `input op value` at `at`. A literal that is no string
+  // or number (a boolean, none) names no value a probe could send. One entry per
+  // place, operator, literal and input, with the strongest class seen.
+  private candidate(value: unknown, op: TriggerOp, input: Val, cls: TestClass, at: Node): void {
+    if (!this.recording || cls === "none" || !isRuntime(input)) return;
+    if (typeof value !== "string" && !(typeof value === "number" && Number.isFinite(value))) return;
+    const span = this.testSpan(at);
+    const key = `${span.start}:${span.end}:${op}:${typeof value}:${value}:${input.src ?? ""}`;
+    const was = this.triggers.get(key);
+    if (was) {
+      if (stronger(was.test, cls) !== was.test) was.test = cls;
+      return;
+    }
+    if (this.triggers.size >= MAX_TRIGGERS) {
+      this.triggersCut = true;
+      return;
+    }
+    this.triggers.set(key, { value, op, ...(input.src !== undefined ? { input: input.src } : {}), test: cls, span });
   }
 
   private testClass(n: Node, c: Ctx): TestClass {
@@ -1772,6 +1926,33 @@ class Interp {
     this.exprSpans.set(n, span);
     return span;
   }
+
+  // A test's whole text (ISC-22.1). exprSpan reaches names and strings only, so
+  // this widens it to the brackets its ends sit in (`m.content.find('x')`) and
+  // to a number the comparison begins or ends with (`messages|length > 40`).
+  private testSpan(n: Node): Span {
+    let span = this.testSpans.get(n);
+    if (!span) this.testSpans.set(n, (span = this.widened(n)));
+    return span;
+  }
+
+  private widened(n: Node): Span {
+    const s = this.exprSpan(n);
+    const toks = this.outcome.pre?.tokens;
+    if (!toks || s.end <= s.start) return s;
+    let lo = tokenFrom(toks, s.start);
+    let hi = tokenFrom(toks, s.end) - 1;
+    if (toks[lo]?.start !== s.start || toks[hi]?.end !== s.end) return s;
+    let depth = 0;
+    for (let k = lo; k <= hi; k++) depth += parenStep(toks[k]!);
+    for (; depth > 0 && hi + 1 < toks.length && toks[hi + 1]!.inTag; depth += parenStep(toks[++hi]!));
+    for (; depth < 0 && lo > 0 && toks[lo - 1]!.inTag; depth += parenStep(toks[--lo]!));
+    if (n.type === "BinaryExpression") {
+      if (this.exprSpan(n.right as Node).end === 0) hi = numberReach(toks, hi, 1);
+      if (this.exprSpan(n.left as Node).end === 0) lo = numberReach(toks, lo, -1);
+    }
+    return this.outcome.lines!.span(toks[lo]!.start, toks[hi]!.end);
+  }
 }
 
 // ---- values ----
@@ -1810,10 +1991,59 @@ function runtimeVal(field: Field, path: string | undefined): Val {
   return { lits: [], data: field.cls, truth: presenceOf([field]), fields: [field], path };
 }
 
+/** The index of the first token that starts at or after `offset`. */
+function tokenFrom(toks: readonly PreToken[], offset: number): number {
+  let lo = 0;
+  let hi = toks.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (toks[mid]!.start < offset) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+// +1 for a bracket that opens, -1 for one that closes.
+function parenStep(t: PreToken): number {
+  if (t.type !== "punct") return 0;
+  return t.value === "(" || t.value === "[" || t.value === "{" ? 1 : t.value === ")" || t.value === "]" || t.value === "}" ? -1 : 0;
+}
+
+// From token `at`, the farthest token in direction `dir` that ends an operand
+// made of numbers, operators and parentheses alone: `> (40)` after a name.
+function numberReach(toks: readonly PreToken[], at: number, dir: 1 | -1): number {
+  let best = at;
+  let depth = 0;
+  for (let k = at + dir; k >= 0 && k < toks.length; k += dir) {
+    const t = toks[k]!;
+    if (t.type === "number") {
+      if (depth === 0) best = k;
+      continue;
+    }
+    if (t.type !== "punct") break;
+    const step = parenStep(t) * dir;
+    if (step < 0 && depth === 0) break;
+    if (depth === 0 && (t.value === "," || t.value === ":")) break;
+    depth += step;
+    if (step < 0 && depth === 0) best = k;
+  }
+  return best;
+}
+
+/** The template constant a value is, when it depends on no runtime input. */
+function constOf(v: Val): Val["konst"] | undefined {
+  return isRuntime(v) ? undefined : v.konst;
+}
+
+/** The input an element of `v` is read from (`messages[]`), when `v` names one. */
+function elemSrc(v: Val): string | undefined {
+  return v.src === undefined || v.pairs ? undefined : `${v.src}[]`;
+}
+
 // `v` as one element of a list or dict the template builds: its text and
 // classes, none of its identity as a constant, namespace or macro.
 function element(v: Val): Val {
-  return { ...v, konst: undefined, konstList: undefined, ns: undefined, nsInit: undefined, path: undefined };
+  return { ...v, konst: undefined, konstList: undefined, ns: undefined, nsInit: undefined, path: undefined, src: undefined };
 }
 
 // How deep a nested dict's keys are tracked; deeper ones stay at this depth,
@@ -1964,6 +2194,7 @@ function elemOf(it: Val): Val {
     gate: it.gate,
     fields,
     rest: it.rest,
+    src: elemSrc(it),
   };
   return withHeld(e, heldAt(it.genAt, null));
 }
@@ -2131,6 +2362,8 @@ function join(a: Val, b: Val): Val {
     rest: a.fields || b.fields ? eitherRest(restOf(a), restOf(b)) : undefined,
     restNums: a.fields || b.fields ? eitherNums(a, b) : undefined,
     path: a.path === b.path ? a.path : undefined,
+    // A default or a constant arm leaves the input it was read from (ISC-22.1).
+    src: a.src === b.src ? a.src : !isRuntime(b) ? a.src : !isRuntime(a) ? b.src : undefined,
     shape: a.shape === b.shape ? a.shape : undefined,
     konst: a.konst === b.konst ? a.konst : undefined,
     konstList: a.konstList && b.konstList && a.konstList.join("\u0000") === b.konstList.join("\u0000") ? a.konstList : undefined,
