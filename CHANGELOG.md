@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.1.3 (2026-10-23)
+
+Phase 3: differential rendering, integrity checks and the `bassae` command (#3).
+
+### Added
+- The `bassae` command (`src/cli.ts`, `src/cli/`):
+  - scans the given paths, or the default model locations that exist: the Hugging Face hub cache, `~/.lmstudio/models`, `~/.ollama/models` and `~/.omlx`;
+  - `--json` prints a report that validates against `schema/report.schema.json`;
+  - `--template <file>` scans a bare template, and `--extract <model> --out <dir>` writes each template's exact bytes;
+  - `--online --upstream <repo>@<revision>` compares with a pinned upstream template. Nothing else touches the network;
+  - human output escapes control, bidi and invisible characters, and the scan never writes under a scanned path;
+  - exit codes: 2 for any HIGH; else 3 for any incomplete template, scanner or parse error, or usage error; else 1 for any MEDIUM; else 0. A failure to print, an uncaught error or a failure to load is 3, never a milder code. A reader that goes away early (EPIPE) keeps the report's code.
+- Differential rendering (`src/diffrender/`):
+  - trigger candidates come from the same interpreter walk the findings use, each with its input path, class and span;
+  - 32 explain probes cover the conversation shapes, and vary probes each change one thing: the date, a 50-message chat, very long content, or one trigger candidate;
+  - every probe renders under `hf-default` and `jinja2-globals`, capped at 160 probes per template;
+  - `render_divergence` is residue word pairs that only a vary probe prints, `env_profile_divergence` is the two profiles disagreeing, and `render_dos` is a breach of a time, memory or output cap.
+- Integrity checks (`src/diffrender/integrity.ts`, `tools.ts`, `transforms.ts`):
+  - every content must appear verbatim, in order, inside a turn of its own role or a less privileged one, and any further copy that no allowlisted transform explains is HIGH;
+  - tools must render JSON-equal, or through one of 9 allowlisted ports that print the cited stock template byte for byte. Each port's losses are listed in `registry/transforms.json`.
+- The scan pipeline (`src/scan/`, `src/status.ts`): discovery, model loading, provenance, per-template analysis in a pool of sandboxed renderers, and model findings attached to their templates, capped at 100 per rule per template plus a summary. Each template gets one status: `known-good`, `known-good-variant`, `clean-unverified`, `findings`, `incomplete` or `no_template`.
+- The render worker polyfills the jinja2 builtins stock templates use (`src/sandbox/polyfills.ts`), and ends itself once earlier renders have grown its memory by a quarter of the cap, so each render is charged only for its own memory.
+
+### Known limits
+- Vary probes change one factor at a time, so only the static rules catch a trigger gated on a combination of inputs.
+- A payload gated on a documented value (presence-gated) is MEDIUM `unbaselined_text`, not HIGH. Sending those values as vary probes gave false HIGH on stock templates.
+- The probe vocabulary is fixed and public, so a template could tell a probe from real use. Seeding it from the template's hash is planned for Phase 4.
+- A refusal is never a gap, so a template that refuses exactly the probes is caught only by the static content-test rules.
+- Residue pairs break at every removed input. A payload that puts role names or other one-word inputs between the words it reorders is not seen as reordered.
+- Negation in a slice `!=` comparison is lost, so the probe sends the matching value. Booleans are never trigger candidates.
+- For gemma and qwen, text between tool declarations is not credited to either tool. The static rules still see it.
+- A content that is a bare role word can match later markup in the content check.
+- A conditionally hostile template can breach two caps, but `render_dos` stops at the first.
+- The render timeout is wall-clock (2 s), so a heavily swapping host can turn a fast render into a false HIGH `render_dos`.
+- Worker recycling is not reported. A template that forces a fresh worker for every probe can scan up to 31x slower.
+- A GGUF with about 6000 keys holding a NUL can push the report past the 2 GB string limit. The command then exits 3 with an internal error rather than 2 with a report.
+- On macOS the deny-network e2e test can't nest `sandbox-exec`, so that scan reports `incomplete` there. Linux CI runs it.
+
 ## 0.1.2 (2026-10-23)
 
 Phase 2: the known-good registry, the injection rules and provenance (#2).

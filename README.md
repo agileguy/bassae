@@ -4,22 +4,41 @@ Finds MLX and GGUF models on disk, extracts every chat template they carry, and 
 
 Named after the Temple of Apollo Epikourios at Bassae: Apollo the helper.
 
+## Usage
+
+```bash
+bun install
+bun src/cli.ts                        # scan the default model locations that exist
+bun src/cli.ts ~/models/some-model    # scan given paths
+bun src/cli.ts --json ~/models        # the report as JSON (schema/report.schema.json)
+bun src/cli.ts --template file.jinja  # scan a bare template
+bun src/cli.ts --extract ~/models/m --out ./templates   # write each template's exact bytes
+```
+
+With no path, it scans the Hugging Face hub cache (`$HF_HUB_CACHE`, else `$HF_HOME/hub`, else `~/.cache/huggingface/hub`), `~/.lmstudio/models`, `~/.ollama/models` (`$OLLAMA_MODELS`) and `~/.omlx`. It never writes under a scanned path, and it never touches the network unless you pass `--online`. `--online --upstream <repo>@<40-hex revision>` also compares with that upstream template. `--help` lists every option.
+
+Each template gets one status:
+
+| Status | Meaning |
+|---|---|
+| `known-good` | byte for byte a stock template in the registry |
+| `known-good-variant` | a stock template up to whitespace |
+| `clean-unverified` | not in the registry, and nothing fired |
+| `findings` | at least one finding |
+| `incomplete` | something could not be checked: a parse or scanner error, or a spent budget |
+| `no_template` | the model carries no chat template |
+
+Exit codes: 2 for any HIGH finding; else 3 for any incomplete template, scanner or parse error, or usage error; else 1 for any MEDIUM; else 0. A crash or a failure to print exits 3, never a milder code.
+
+Rendering runs in a sandbox: `sandbox-exec` on macOS, `bwrap` on Linux. Without one, nothing renders and every template is at best `incomplete`, so the scan never reports clean.
+
 ## Status
 
-Under construction. Not ready to use: there is no command-line tool yet.
+Phases 1 to 3 of 4 are done.
 
-Phases 1 and 2 of 4 are done. Phase 1 is the library underneath the scanner:
-
-- **GGUF reader** (`src/gguf/`). It reads only the header and metadata, checks every length and count, and extracts each chat template, comparing key names byte for byte.
-- **Discovery and HF/MLX reader** (`src/discover.ts`, `src/hf/`). It finds GGUF files by their magic bytes and model folders by where their templates live, and reads every documented template source.
-- **Code-execution rules** (`src/parse/`, `src/rules/`). They cover dunder access, format traversal, dunders built from pieces, dynamic attributes, gadget chains and exec surfaces. A template the parser can't read, or that is too big or deep to parse safely, is HIGH and still gets a raw-text scan.
-- **Sandboxed renderer** (`src/sandbox/`). Each template renders in its own child process, under `sandbox-exec` on macOS or `bwrap` on Linux, with no network, no writes, and time and memory caps. If no sandbox is available, it fails closed.
-
-Phase 2 decides what a template should look like and what it is trying to say:
-
-- **Known-good registry** (`registry/`, `src/registry/`). Stock templates from upstream repos, each citing repo, revision and path. An exact match is `known-good`; a whitespace-only difference is `known-good-variant`.
-- **Injection rules** (`src/rules/`). They list every piece of text a template adds to the conversation. Text the stock template doesn't have is MEDIUM. Text in a prefilled assistant turn, text gated on what the user wrote, URLs and invisible characters are HIGH.
-- **Provenance** (`src/provenance/`). It diffs sources within one model folder, a GGUF against its HF sibling, and a template against its registry entry, and it checks HF-cache files against their git blob hashes.
+- **Phase 1: the library.** A GGUF header and metadata reader, discovery and the HF/MLX reader, the code-execution rules, and the sandboxed renderer.
+- **Phase 2: what a template should look like.** The known-good registry of stock templates, the injection rules, and provenance: diffs within a model folder, against a GGUF's HF sibling, and against the registry, plus HF-cache blob hashes.
+- **Phase 3: what a template actually does.** Differential rendering with explain and vary probes under two runtime profiles, integrity checks that every message and tool comes through unchanged in its own turn, the scan pipeline and the `bassae` command.
 
 Known limits are listed in [CHANGELOG.md](CHANGELOG.md).
 
