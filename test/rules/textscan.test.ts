@@ -234,6 +234,25 @@ describe("ISC-21 invisible characters", () => {
     expect(at(findInvisibleChars("Caf\u00e9 \u2014 na\u00efve \u{1F600}\ufe0f ok", base))).toEqual(["1:15 \ufe0f"]);
   });
 
+  test("every format character (\\p{Cf}) and U+2800 BRAILLE PATTERN BLANK is flagged", () => {
+    const cf: number[] = [];
+    for (let cp = 0; cp <= 0x10ffff; cp++) {
+      if ((cp < 0xd800 || cp > 0xdfff) && /\p{Cf}/u.test(String.fromCodePoint(cp))) cf.push(cp);
+    }
+    expect(cf.length).toBeGreaterThan(160);
+    expect(cf.filter((cp) => !isInvisible(cp)).map((cp) => describeCp(cp))).toEqual([]);
+    expect(isInvisible(0x2800)).toBe(true);
+    // All of them in a row are one run, astral ones counted once.
+    const [f] = findInvisibleChars(`a${String.fromCodePoint(...cf, 0x2800)}b`, base);
+    expect(f!.detail!.count).toBe(cf.length + 1);
+    for (const [cp, name] of [[0x0600, "ARABIC NUMBER SIGN"], [0x06dd, "ARABIC END OF AYAH"], [0x070f, "SYRIAC ABBREVIATION MARK"], [0x08e2, "ARABIC DISPUTED END OF AYAH"], [0x110bd, "KAITHI NUMBER SIGN"], [0x110cd, "KAITHI NUMBER SIGN ABOVE"], [0x13430, "EGYPTIAN HIEROGLYPH VERTICAL JOINER"], [0x1343f, "EGYPTIAN HIEROGLYPH END WALLED ENCLOSURE"], [0x2800, "BRAILLE PATTERN BLANK"]] as const) {
+      expect(findInvisibleChars(`x${String.fromCodePoint(cp)}y`, base).map((f) => f.message)).toEqual([`run of 1 invisible character: ${describeCp(cp)}`]);
+      expect(describeCp(cp).endsWith(name)).toBe(true);
+    }
+    // A name escape reaches them too.
+    expect(invisible("{{ 'a\\N{BRAILLE PATTERN BLANK}b' }}").map((f) => f.message)).toEqual(["string escapes render a run of 1 invisible character: U+2800 BRAILLE PATTERN BLANK"]);
+  });
+
   test("a run is one finding naming its distinct code points", () => {
     const fs = findInvisibleChars("a\u200b\u200c\u200b\u200db c\u202ed", base);
     expect(fs.map((f) => [f.message, f.span!.start, f.span!.end, f.detail])).toEqual([

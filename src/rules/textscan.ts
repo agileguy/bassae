@@ -539,7 +539,18 @@ export function scanBlobs(s: string, from: number, to: number, emit: BlobSink): 
 const NAMES: ReadonlyMap<number, string> = new Map([
   [0x00ad, "SOFT HYPHEN"],
   [0x034f, "COMBINING GRAPHEME JOINER"],
+  [0x0600, "ARABIC NUMBER SIGN"],
+  [0x0601, "ARABIC SIGN SANAH"],
+  [0x0602, "ARABIC FOOTNOTE MARKER"],
+  [0x0603, "ARABIC SIGN SAFHA"],
+  [0x0604, "ARABIC SIGN SAMVAT"],
+  [0x0605, "ARABIC NUMBER MARK ABOVE"],
   [0x061c, "ARABIC LETTER MARK"],
+  [0x06dd, "ARABIC END OF AYAH"],
+  [0x070f, "SYRIAC ABBREVIATION MARK"],
+  [0x0890, "ARABIC POUND MARK ABOVE"],
+  [0x0891, "ARABIC PIASTRE MARK ABOVE"],
+  [0x08e2, "ARABIC DISPUTED END OF AYAH"],
   [0x115f, "HANGUL CHOSEONG FILLER"],
   [0x1160, "HANGUL JUNGSEONG FILLER"],
   [0x17b4, "KHMER VOWEL INHERENT AQ"],
@@ -574,12 +585,31 @@ const NAMES: ReadonlyMap<number, string> = new Map([
   [0x206d, "ACTIVATE ARABIC FORM SHAPING"],
   [0x206e, "NATIONAL DIGIT SHAPES"],
   [0x206f, "NOMINAL DIGIT SHAPES"],
+  [0x2800, "BRAILLE PATTERN BLANK"],
   [0x3164, "HANGUL FILLER"],
   [0xfeff, "ZERO WIDTH NO-BREAK SPACE"],
   [0xffa0, "HALFWIDTH HANGUL FILLER"],
   [0xfff9, "INTERLINEAR ANNOTATION ANCHOR"],
   [0xfffa, "INTERLINEAR ANNOTATION SEPARATOR"],
   [0xfffb, "INTERLINEAR ANNOTATION TERMINATOR"],
+  [0x110bd, "KAITHI NUMBER SIGN"],
+  [0x110cd, "KAITHI NUMBER SIGN ABOVE"],
+  [0x13430, "EGYPTIAN HIEROGLYPH VERTICAL JOINER"],
+  [0x13431, "EGYPTIAN HIEROGLYPH HORIZONTAL JOINER"],
+  [0x13432, "EGYPTIAN HIEROGLYPH INSERT AT TOP START"],
+  [0x13433, "EGYPTIAN HIEROGLYPH INSERT AT BOTTOM START"],
+  [0x13434, "EGYPTIAN HIEROGLYPH INSERT AT TOP END"],
+  [0x13435, "EGYPTIAN HIEROGLYPH INSERT AT BOTTOM END"],
+  [0x13436, "EGYPTIAN HIEROGLYPH OVERLAY MIDDLE"],
+  [0x13437, "EGYPTIAN HIEROGLYPH BEGIN SEGMENT"],
+  [0x13438, "EGYPTIAN HIEROGLYPH END SEGMENT"],
+  [0x13439, "EGYPTIAN HIEROGLYPH INSERT AT MIDDLE"],
+  [0x1343a, "EGYPTIAN HIEROGLYPH INSERT AT TOP"],
+  [0x1343b, "EGYPTIAN HIEROGLYPH INSERT AT BOTTOM"],
+  [0x1343c, "EGYPTIAN HIEROGLYPH BEGIN ENCLOSURE"],
+  [0x1343d, "EGYPTIAN HIEROGLYPH END ENCLOSURE"],
+  [0x1343e, "EGYPTIAN HIEROGLYPH BEGIN WALLED ENCLOSURE"],
+  [0x1343f, "EGYPTIAN HIEROGLYPH END WALLED ENCLOSURE"],
   [0x1bca0, "SHORTHAND FORMAT LETTER OVERLAP"],
   [0x1bca1, "SHORTHAND FORMAT CONTINUING OVERLAP"],
   [0x1bca2, "SHORTHAND FORMAT DOWN STEP"],
@@ -596,18 +626,22 @@ const NAMES: ReadonlyMap<number, string> = new Map([
  * U+2064. The rest of Unicode's Default_Ignorable_Code_Point set is just as
  * invisible, so it is here too: bidi marks, Hangul fillers, Mongolian and
  * Khmer format characters, the deprecated U+206A to U+206F controls and the
- * unassigned ignorables. So are the interlinear annotation characters, which
- * hide the text between them, and C0 and C1 controls other than tab, line
- * feed and carriage return, which hide text in a terminal.
+ * unassigned ignorables. So is every other format character (category Cf):
+ * the Arabic, Syriac and Kaithi number and ayah signs, the Egyptian hieroglyph
+ * format controls, and the interlinear annotation characters, which hide the
+ * text between them. So are U+2800 BRAILLE PATTERN BLANK, which renders as a
+ * space but is no whitespace to a tokenizer or a filter, and C0 and C1
+ * controls other than tab, line feed and carriage return, which hide text in
+ * a terminal. A test holds this to the engine's own \p{Cf}.
  */
 export function isInvisible(cp: number): boolean {
   if (cp < 0xa0) return (cp < 0x20 && cp !== 0x09 && cp !== 0x0a && cp !== 0x0d) || cp >= 0x7f;
   if (cp < 0x2000) return NAMES.has(cp);
   if (cp <= 0x206f) return (cp >= 0x200b && cp <= 0x200f) || (cp >= 0x202a && cp <= 0x202e) || cp >= 0x2060;
-  if (cp < 0xfe00) return cp === 0x3164;
+  if (cp < 0xfe00) return cp === 0x2800 || cp === 0x3164;
   if (cp <= 0xfe0f) return true;
   if (cp < 0x10000) return cp === 0xfeff || cp === 0xffa0 || (cp >= 0xfff0 && cp <= 0xfffb);
-  return (cp >= 0x1bca0 && cp <= 0x1bca3) || (cp >= 0x1d173 && cp <= 0x1d17a) || (cp >= 0xe0000 && cp <= 0xe0fff);
+  return NAMES.has(cp) || (cp >= 0x1d173 && cp <= 0x1d17a) || (cp >= 0xe0000 && cp <= 0xe0fff);
 }
 
 /** A code point's name for a finding message: `U+200B ZERO WIDTH SPACE`. */
