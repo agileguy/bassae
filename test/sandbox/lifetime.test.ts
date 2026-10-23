@@ -160,9 +160,14 @@ test.skipIf(!status.available || process.platform !== "linux" || process.getuid?
   async () => {
     const owners: Record<string, number> = {};
     const runs = { "plain bun": [process.execPath, "-e", "console.log('up'); setInterval(() => {}, 1000)"], worker: [process.execPath, "--no-install", WORKER] };
+    // The worker says it is ready only once its whole batch is in, so it gets one that keeps it rendering meanwhile.
+    const spin = "{% for i in range(1000) %}{% for j in range(1000) %}{% for k in range(1000) %}{% endfor %}{% endfor %}{% endfor %}";
     for (const [name, argv] of Object.entries(runs)) {
       const proc = spawnSandboxed(argv)!;
       try {
+        proc.stdin.write(encode({ t: "init", template: spin, maxOutputBytes: 1000, timeoutMs: 60_000, cpuMs: 10_000, maxRssBytes: 2 ** 30 }));
+        proc.stdin.write(encode({ t: "req", request: { id: "a", context: {}, profile: "hf-default" } }));
+        proc.stdin.end();
         await proc.stdout.getReader().read();
         // The kernel names a process after the file it runs, cut to 15 bytes, whatever that file is called.
         const bun = descendants(proc.pid).find((pid) => readFileSync(`/proc/${pid}/comm`, "utf8").trim() === basename(process.execPath).slice(0, 15));

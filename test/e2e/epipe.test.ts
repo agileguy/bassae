@@ -94,9 +94,11 @@ describe("the real command", () => {
   }, SCAN_TIMEOUT);
 
   test("an uncaught exception or an unhandled rejection exits 3", async () => {
+    // On Linux, a timer can fire while the command's modules are still loading, before its handlers exist, and bun
+    // then exits 1 on its own. So each hook waits for the handler it means to reach.
     const hooks = makeTree({
-      "throw.ts": `setTimeout(() => { throw new Error("late throw"); }, 0);`,
-      "reject.ts": `setTimeout(() => { Promise.reject(new Error("late rejection")); }, 0);`,
+      "throw.ts": `const t = setInterval(() => { if (process.listenerCount("uncaughtException") === 0) return; clearInterval(t); throw new Error("late throw"); }, 1);`,
+      "reject.ts": `const t = setInterval(() => { if (process.listenerCount("unhandledRejection") === 0) return; clearInterval(t); Promise.reject(new Error("late rejection")); }, 1);`,
     });
     for (const [file, message] of [["throw.ts", "late throw"], ["reject.ts", "late rejection"]] as const) {
       const p = Bun.spawn([process.execPath, "--preload", join(hooks, file), CLI, "--version"], { cwd: ROOT, env: fixtureEnv(), stdout: "pipe", stderr: "pipe" });
