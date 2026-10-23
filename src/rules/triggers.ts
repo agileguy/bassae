@@ -345,9 +345,17 @@ export const KEY_FIELD: Field = PRESENCE;
 // ---- abstract values ----
 
 /** A template literal that can reach the output: its text, where it is, and the strongest test it depends on. */
+/** A block text is printed in: an `if` or inline-if arm, a loop body or its `else`, inside the block above it. Arms of one fork never run in the same render. */
+export interface Frame {
+  up?: Frame;
+  fork?: object;
+}
+
 export interface Lit {
   text: string;
   span: Span;
+  /** The block it is printed in, or made in when that block is deeper. */
+  at?: Frame;
   cond?: Cond;
   /** The generation-prompt branch it was emitted in, by If node id. */
   gen?: number;
@@ -395,8 +403,10 @@ export interface Val {
   macro?: string;
   /** The clock or chance as a value (`set f = strftime_now`): calling the value calls them. */
   fns?: string[];
-  /** It is `add_generation_prompt`, or a copy of it (`set g = add_generation_prompt`). */
+  /** It is `add_generation_prompt`, or a copy of it (`set g = add_generation_prompt`), or true only when the flag is set. */
   genFlag?: true;
+  /** A list, tuple or dict literal holding the flag: the indexes (from either end) or keys it is at. */
+  genAt?: (string | number)[];
   /** `.items()` / `|dictsort`: a two-name loop gets keys and values. */
   pairs?: boolean;
 }
@@ -942,6 +952,8 @@ export function genPolarity(n: Node, isFlag: (n: Node) => boolean = isGenFlag, d
         if (l === one || r === one) return one as "body" | "alternate";
         return l === both && r === both ? (both as "body" | "alternate") : undefined;
       }
+      const byValue = comparedFlag(n, o, isFlag, depth);
+      if (byValue) return byValue;
       if (o === "==" || o === "!=") {
         const lk = boolKonst(n.left as Node);
         const rk = boolKonst(n.right as Node);
@@ -959,6 +971,117 @@ export function genPolarity(n: Node, isFlag: (n: Node) => boolean = isGenFlag, d
 
 function isGenFlag(n: Node): boolean {
   return n.type === "Identifier" && String(n.value) === "add_generation_prompt";
+}
+
+type Konst = string | number | boolean;
+
+// A comparison of the flag, or of the flag passed through filters that keep
+// it a constant, with a constant or a list of them: `body` when the test can
+// hold only with the flag set, `alternate` when it can fail only with the flag
+// set (review round 2, security N4).
+function comparedFlag(n: Node, o: string, isFlag: (n: Node) => boolean, depth: number): "body" | "alternate" | undefined {
+  let holds: ((v: Konst) => boolean | undefined) | undefined;
+  let vals: { set: Konst[]; unset: Konst[] } | undefined;
+  if (o === "in" || o === "not in") {
+    const list = n.right as Node;
+    if (list?.type !== "ArrayLiteral" && list?.type !== "TupleLiteral") return undefined;
+    const ks = ((list.value as Node[]) ?? []).map(konstOf);
+    if (ks.some((k) => k === undefined)) return undefined;
+    vals = flagValues(n.left as Node, isFlag, depth + 1);
+    holds = (v) => ks.some((k) => compareKonst(v, "==", k!) === true) === (o === "in");
+  } else if (COMPARISONS.has(o)) {
+    const rk = konstOf(n.right as Node);
+    const lk = konstOf(n.left as Node);
+    if (rk !== undefined) {
+      vals = flagValues(n.left as Node, isFlag, depth + 1);
+      holds = (v) => compareKonst(v, o, rk);
+    } else if (lk !== undefined) {
+      vals = flagValues(n.right as Node, isFlag, depth + 1);
+      holds = (v) => compareKonst(lk, o, v);
+    }
+  }
+  if (!vals || !holds) return undefined;
+  const set = vals.set.map(holds);
+  const unset = vals.unset.map(holds);
+  if (set.includes(undefined) || unset.includes(undefined)) return undefined;
+  if (set.includes(true) && !unset.includes(true)) return "body";
+  if (set.includes(false) && !unset.includes(false)) return "alternate";
+  return undefined;
+}
+
+// The values `n` can take with the flag set and with it unset, when it is the
+// flag or the flag through `default`, `int`, `bool` or a filter that prints it.
+// Printed, the flag is `True` in jinja2 and `true` in the JS engine.
+function flagValues(n: Node, isFlag: (n: Node) => boolean, depth: number): { set: Konst[]; unset: Konst[] } | undefined {
+  if (!n || typeof n !== "object" || depth > 32) return undefined;
+  if (isFlag(n)) return { set: [true], unset: [false] };
+  if (n.type !== "FilterExpression") return undefined;
+  const inner = flagValues(n.operand as Node, isFlag, depth + 1);
+  const name = filterNameOf(n.filter as Node);
+  const each = (vs: Konst[]): Konst[] | undefined => {
+    const out: Konst[] = [];
+    for (const v of vs) {
+      const f = filtered(v, name);
+      if (!f) return undefined;
+      out.push(...f);
+    }
+    return out;
+  };
+  const set = inner && each(inner.set);
+  const unset = inner && each(inner.unset);
+  return set && unset ? { set, unset } : undefined;
+}
+
+function filtered(v: Konst, name: string): Konst[] | undefined {
+  const text = typeof v === "boolean" ? (v ? ["True", "true"] : ["False", "false"]) : [String(v)];
+  switch (name) {
+    case "default":
+    case "d":
+      return [v];
+    case "bool":
+      return typeof v === "string" ? undefined : [Boolean(v)];
+    case "int":
+      return typeof v === "string" ? undefined : [Math.trunc(Number(v))];
+    case "string":
+    case "trim":
+      return text.map((s) => s.trim());
+    case "lower":
+      return text.map((s) => s.toLowerCase());
+    case "upper":
+      return text.map((s) => s.toUpperCase());
+    case "capitalize":
+    case "title":
+      return text.map((s) => s.charAt(0).toUpperCase() + s.slice(1).toLowerCase());
+    case "tojson":
+      return [typeof v === "string" ? JSON.stringify(v) : String(v)];
+    default:
+      return undefined;
+  }
+}
+
+// jinja2's comparison, with a boolean equal to 0 or 1. Ordering a string
+// against a number raises, which says nothing about the flag.
+function compareKonst(a: Konst, o: string, b: Konst): boolean | undefined {
+  const x = typeof a === "boolean" ? Number(a) : a;
+  const y = typeof b === "boolean" ? Number(b) : b;
+  if (o === "==") return x === y;
+  if (o === "!=") return x !== y;
+  if (typeof x !== typeof y) return undefined;
+  if (o === "<") return x < y;
+  if (o === ">") return x > y;
+  if (o === "<=") return x <= y;
+  if (o === ">=") return x >= y;
+  return undefined;
+}
+
+function konstOf(n: Node): Konst | undefined {
+  if (n?.type === "StringLiteral") return String(n.value);
+  if (n?.type === "IntegerLiteral" || n?.type === "FloatLiteral") return Number(n.value);
+  if (n?.type === "Identifier") {
+    const v = String(n.value).toLowerCase();
+    if (v === "true" || v === "false") return v === "true";
+  }
+  return undefined;
 }
 
 export const FLAG_FILTERS = new Set(["default", "d", "int", "bool"]);

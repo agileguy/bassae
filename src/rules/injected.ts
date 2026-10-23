@@ -69,6 +69,7 @@ import {
   type Facts,
   type Field,
   type Fields,
+  type Frame,
   type Lit,
   type TestClass,
   type TestEnv,
@@ -198,6 +199,8 @@ interface Ctx {
   /** Literals held, at the test, in the values the enclosing content tests read. */
   subject?: ReadonlySet<Lit>;
   facts: Facts;
+  /** The block this point is in. Unset at the top level. */
+  path?: Frame;
   st: State;
   scope?: Scope;
   gen?: number;
@@ -355,12 +358,12 @@ class Interp {
     const subject = this.subjectOf(test, tc, c);
     const sb = new State(c.st);
     const sa = new State(c.st);
-    const body: Ctx = { ...c, cond, subject, fresh: false, st: sb, facts: factsFrom(test, true, c.facts) };
-    const alt: Ctx = { ...c, cond, subject, fresh: false, st: sa, facts: factsFrom(test, false, c.facts) };
-    const polarity = genPolarity(test, (x) => (x.type === "Identifier" || x.type === "MemberExpression") && this.eval(x, c).genFlag === true);
+    const [yes, no] = arms(c.path);
+    const body: Ctx = { ...c, cond, subject, fresh: false, st: sb, facts: factsFrom(test, true, c.facts), path: yes };
+    const alt: Ctx = { ...c, cond, subject, fresh: false, st: sa, facts: factsFrom(test, false, c.facts), path: no };
+    const polarity = this.genOf(test, c);
     if (polarity) {
-      let id = this.genIds.get(s);
-      if (id === undefined) this.genIds.set(s, (id = this.genIds.size));
+      const id = this.genId(s);
       if (polarity === "body") {
         body.gen = id;
         alt.genElse = id;
@@ -446,7 +449,11 @@ class Interp {
     let loop = strongest(condOf(it.truth, this.exprSpan(iterNode)), it.gate);
     if (filter) loop = strongest(loop, this.testCond(filter, { ...c, st: layer }));
     const inner = { cond: strongest(c.cond, loop), emitCond: strongest(c.emitCond, loop), fresh: true };
-    this.exec(s.body, { ...c, ...inner, st: layer }, sink);
+    const [each, none] = arms(c.path);
+    // A filter that holds only with the flag set makes the body a
+    // generation-prompt branch, and its `else` the arm exclusive with it.
+    const gen = filter && this.genOf(filter, { ...c, st: layer }) === "body" ? this.genId(s) : undefined;
+    this.exec(s.body, { ...c, ...inner, st: layer, path: each, gen: gen ?? c.gen }, sink);
     const next = new Map(back ?? []);
     let grew = false;
     for (const [k, v] of layer.own) {
@@ -463,7 +470,7 @@ class Interp {
       this.changed = true;
     }
     const els = new State(head);
-    this.exec(s.defaultBlock, { ...c, ...inner, st: els }, sink);
+    this.exec(s.defaultBlock, { ...c, ...inner, st: els, path: none, genElse: gen ?? c.genElse }, sink);
     this.escape(c.st, [head, layer, els], false);
   }
 
@@ -526,7 +533,8 @@ class Interp {
     // Punctuation is never injected text and is never the generation-prompt
     // marker; it is kept only to join the literals around it (`http{{ ':' }}//`).
     if (cond && WORDISH.test(l.text)) sink.truth = stronger(sink.truth, cond.test);
-    sink.lits.push({ text: l.text, span: l.span, cond, via: c.fresh ? ++this.vias : l.via, routed: l.routed, gen: l.gen ?? c.gen, genElse: l.genElse ?? c.genElse, folded: l.folded });
+    const at = placed(l.at, c.path ?? ROOT);
+    sink.lits.push({ text: l.text, span: l.span, at, cond, via: c.fresh ? ++this.vias : l.via, routed: l.routed, gen: l.gen ?? c.gen, genElse: l.genElse ?? c.genElse, folded: l.folded });
   }
 
   // ---- variables ----
@@ -650,7 +658,7 @@ class Interp {
     switch (node.type) {
       case "StringLiteral": {
         const s = String(node.value);
-        return { lits: [{ text: s, span: this.litSpan(node) }], data: "none", truth: "none", konst: s };
+        return { lits: [{ text: s, span: this.litSpan(node), at: c.path }], data: "none", truth: "none", konst: s };
       }
       case "IntegerLiteral":
       case "FloatLiteral":
@@ -664,14 +672,17 @@ class Interp {
       case "FilterExpression": {
         const o = this.eval(node.operand, c);
         const f = node.filter as Node;
-        const v = this.applyFilter(o, filterName(f), filterArgs(f), c, f);
-        // `add_generation_prompt|default(false)` is still the flag.
-        return o.genFlag && FLAG_FILTERS.has(filterName(f)) ? { ...v, genFlag: true } : v;
+        const name = filterName(f);
+        const v = this.applyFilter(o, name, filterArgs(f), c, f);
+        // `add_generation_prompt|default(false)` is still the flag, and so is
+        // `[add_generation_prompt]|first`.
+        const end = name === "first" ? 0 : name === "last" ? -1 : undefined;
+        return (o.genFlag && FLAG_FILTERS.has(name)) || (end !== undefined && o.genAt?.includes(end)) ? { ...v, genFlag: true } : v;
       }
       case "TestExpression":
-        return boolVal(this.testClass(node, c));
+        return this.flagged(boolVal(this.testClass(node, c)), node, c);
       case "UnaryExpression": {
-        if (String((node.operator as { value?: unknown })?.value) === "not") return boolVal(this.testClass(node.argument as Node, c));
+        if (String((node.operator as { value?: unknown })?.value) === "not") return this.flagged(boolVal(this.testClass(node.argument as Node, c)), node, c);
         return this.eval(node.argument, c);
       }
       case "BinaryExpression":
@@ -679,44 +690,62 @@ class Interp {
       case "Ternary": {
         const test = node.condition as Node;
         const cond = this.testCond(test, c);
-        const t = this.eval(node.trueExpr, { ...c, facts: factsFrom(test, true, c.facts) });
-        const f = this.eval(node.falseExpr, { ...c, facts: factsFrom(test, false, c.facts) });
-        return this.under(join(t, f), cond, undefined, this.subjectOf(test, cond, c));
+        const [yes, no] = arms(c.path);
+        let t = this.eval(node.trueExpr, { ...c, facts: factsFrom(test, true, c.facts), path: yes });
+        let f = this.eval(node.falseExpr, { ...c, facts: factsFrom(test, false, c.facts), path: no });
+        // The arm only the flag chooses is a generation-prompt branch.
+        const p = this.genOf(test, c);
+        if (p) {
+          const id = this.genId(node);
+          t = genArm(t, p === "body" ? id : undefined, p === "body" ? undefined : id);
+          f = genArm(f, p === "body" ? undefined : id, p === "body" ? id : undefined);
+        }
+        const v = this.under(join(t, f), cond, undefined, this.subjectOf(test, cond, c));
+        // Truthy only when the flag is set: each arm is the flag, is false, or runs only with the flag.
+        return (p === "body" || flagOrFalse(t)) && (p === "alternate" || flagOrFalse(f)) ? { ...v, genFlag: true } : v;
       }
       case "SelectExpression": {
         // `x if c` with no else.
         const test = node.test as Node;
         const cond = this.testCond(test, c);
-        return this.under(this.eval(node.lhs, { ...c, facts: factsFrom(test, true, c.facts) }), cond, undefined, this.subjectOf(test, cond, c));
+        const p = this.genOf(test, c);
+        let v = this.eval(node.lhs, { ...c, facts: factsFrom(test, true, c.facts), path: arms(c.path)[0] });
+        if (p === "body") v = { ...genArm(v, this.genId(node), undefined), genFlag: true };
+        return this.under(v, cond, undefined, this.subjectOf(test, cond, c));
       }
       case "ArrayLiteral":
       case "TupleLiteral": {
         let v: Val = { lits: [], data: "none", truth: "none" };
         const konsts: string[] = [];
         let allKonst = true;
-        for (const el of (node.value as Node[]) ?? []) {
+        const els = (node.value as Node[]) ?? [];
+        const genAt: number[] = [];
+        els.forEach((el, i) => {
           const e = this.eval(el, c);
           this.holds(e);
           if (typeof e.konst === "string") konsts.push(e.konst);
           else allKonst = false;
+          if (e.genFlag) genAt.push(i, i - els.length);
           v = join(v, { ...e, konst: undefined, konstList: undefined, ns: undefined, macro: undefined, path: undefined });
-        }
-        return { ...v, truth: "none", konst: undefined, konstList: allKonst ? konsts : undefined };
+        });
+        return { ...v, truth: "none", konst: undefined, konstList: allKonst ? konsts : undefined, genAt: genAt.length ? genAt : undefined };
       }
       case "ObjectLiteral": {
         const map = node.value as Map<unknown, unknown>;
         let v: Val = { lits: [], data: "none", truth: "none" };
         const keys: Lit[] = [];
+        const genAt: string[] = [];
         if (map instanceof Map) {
           for (const [k, val] of map) {
             const kv = this.eval(k, c);
             keys.push(...kv.lits);
             const vv = this.eval(val, c);
             this.holds(vv);
+            if (vv.genFlag && typeof kv.konst === "string") genAt.push(kv.konst);
             v = join(v, { ...vv, konst: undefined, konstList: undefined, ns: undefined, macro: undefined, path: undefined, fields: undefined, rest: undefined });
           }
         }
-        return { ...v, keys: [...(v.keys ?? []), ...keys], truth: "none" };
+        return { ...v, keys: [...(v.keys ?? []), ...keys], truth: "none", genAt: genAt.length ? genAt : undefined };
       }
       case "KeywordArgumentExpression":
         return this.eval(node.value, c);
@@ -963,7 +992,7 @@ class Interp {
     if (!formals.some((f) => f.name === "kwargs")) layer.own.set("kwargs", kwargs);
     for (const f of formals) if (!layer.own.has(f.name)) layer.own.set(f.name, f.def ? this.eval(f.def, c) : EMPTY);
     // The body runs under the call site's conditions: its text inherits them.
-    const inner: Ctx = { cond: c.cond, emitCond: c.emitCond, facts: NO_FACTS, st: layer, scope: { macro: name, caller }, gen: c.gen, genElse: c.genElse, stack: [...c.stack, name] };
+    const inner: Ctx = { cond: c.cond, emitCond: c.emitCond, facts: NO_FACTS, st: layer, scope: { macro: name, caller }, gen: c.gen, genElse: c.genElse, path: c.path, stack: [...c.stack, name] };
     const sink: Sink = { lits: [], data: "none", truth: "none" };
     this.exec(m.body, inner, sink);
     this.escape(c.st, [layer], true);
@@ -987,6 +1016,8 @@ class Interp {
       emitCond: strongest(c.emitCond, cr.ctx.emitCond),
       fresh: false,
       st: layer,
+      // Printed where the macro calls caller(), inside the call statement.
+      path: c.path,
       stack: [...c.stack, "caller()"],
     };
     const sink: Sink = { lits: [], data: "none", truth: "none" };
@@ -1211,11 +1242,18 @@ class Interp {
       // decides so, so its text depends on the left side as a test.
       const l = this.eval(n.left, c);
       const lc = this.testCond(n.left as Node, c);
-      const r = this.eval(n.right, { ...c, facts: factsFrom(n.left as Node, o === "and", c.facts) });
-      return join(l, this.under(r, lc));
+      let r = this.eval(n.right, { ...c, facts: factsFrom(n.left as Node, o === "and", c.facts), path: arms(c.path)[1] });
+      // The right operand is printed only when the left one is truthy (`and`)
+      // or falsy (`or`): when that takes the flag, only in the generation prompt.
+      const p = this.genOf(n.left as Node, c);
+      if (p === (o === "and" ? "body" : "alternate")) r = genArm(r, this.genId(n), undefined);
+      const v = join(l, this.under(r, lc));
+      // Truthy only when the flag is set.
+      const flag = o === "and" ? p === "body" || r.genFlag : (p === "body" || flagOrFalse(l)) && flagOrFalse(r);
+      return flag ? { ...v, genFlag: true } : v;
     }
     if (o === "in" || o === "not in" || o === "==" || o === "!=" || o === "<" || o === ">" || o === "<=" || o === ">=") {
-      return boolVal(this.testClass(n, c));
+      return this.flagged(boolVal(this.testClass(n, c)), n, c);
     }
     const l = this.eval(n.left, c);
     const r = this.eval(n.right, c);
@@ -1295,6 +1333,39 @@ class Interp {
     let cond: Cond | undefined;
     for (const l of lits) cond = strongest(cond, l.cond);
     return [{ text: konst, span: this.exprSpan(at), cond, folded: true }];
+  }
+
+  // ---- the generation flag ----
+
+  // Which arm of a test runs only with add_generation_prompt set (genPolarity).
+  private genOf(test: Node, c: Ctx): "body" | "alternate" | undefined {
+    return genPolarity(test, (x) => this.isFlag(x, c));
+  }
+
+  // The flag as an expression: the flag, a copy of it, a value true only when
+  // it is set, or an entry read out of a list, tuple or dict holding it.
+  // Tests and comparisons are left to genPolarity, which reads them apart.
+  private isFlag(x: Node, c: Ctx): boolean {
+    if (!FLAG_NODES.has(x.type)) return false;
+    if (this.eval(x, c).genFlag) return true;
+    if (x.type !== "MemberExpression") return false;
+    const prop = x.property as Node;
+    let key: unknown;
+    if (!x.computed) key = prop?.type === "Identifier" ? String(prop.value) : undefined;
+    else if (prop?.type === "UnaryExpression" && String((prop.operator as { value?: unknown })?.value) === "-") key = -Number((prop.argument as Node | undefined)?.value);
+    else key = this.eval(prop, c).konst;
+    return (typeof key === "string" || typeof key === "number") && this.eval(x.object, c).genAt?.includes(key) === true;
+  }
+
+  // A test's value: the flag when the test holds only with the flag set.
+  private flagged(v: Val, test: Node, c: Ctx): Val {
+    return this.genOf(test, c) === "body" ? { ...v, genFlag: true } : v;
+  }
+
+  private genId(n: Node): number {
+    let id = this.genIds.get(n);
+    if (id === undefined) this.genIds.set(n, (id = this.genIds.size));
+    return id;
   }
 
   // ---- tests ----
@@ -1385,6 +1456,21 @@ function element(v: Val): Val {
 
 function boolVal(cls: TestClass): Val {
   return { lits: [], data: cls, truth: cls };
+}
+
+// Expressions isFlag evaluates. A test or comparison reaches the flag through
+// genPolarity instead, which also keeps the two from calling each other.
+const FLAG_NODES = new Set(["Identifier", "MemberExpression", "FilterExpression", "Ternary", "SelectExpression"]);
+
+// `v` printed only in a generation-prompt branch, or only in the arm exclusive with one.
+function genArm(v: Val, gen: number | undefined, genElse: number | undefined): Val {
+  const tag = (l: Lit): Lit => ({ ...l, gen: l.gen ?? gen, genElse: l.genElse ?? genElse });
+  return { ...v, lits: v.lits.map(tag), keys: v.keys?.map(tag) };
+}
+
+// The flag itself, or a constant that is never true.
+function flagOrFalse(v: Val): boolean {
+  return v.genFlag === true || (v.konst === false || v.konst === 0 || v.konst === "" || v.konst === null);
 }
 
 // A guard in force (`if x is string`) refines what a membership test on `x` means.
@@ -1949,11 +2035,12 @@ export function joinedText(lits: Lit[], matcher: Scaffold): { urls: InjectedText
  * - The generation prompt's header is the first literal emitted in an
  *   `add_generation_prompt` branch. Residue after its first scaffolding match
  *   (a scripted `<think>` inside the header literal), and every literal
- *   emitted after it in program order, is prefill. A header literal with no
- *   scaffolding is all header (`### Response:`). The branch's `else` is
- *   exclusive with it and is never after it.
- * - An assistant header left open: the last one in program order, when no
- *   token after it ends the turn or starts another, whatever test gates it.
+ *   emitted after it in program order, is prefill. A header with no
+ *   scaffolding is its first line, up to its colon (`### Response:`). The
+ *   branch's `else` is exclusive with it and is never after it.
+ * - An assistant header left open: the last one in program order, whatever
+ *   test gates it, that no token after it ends the turn or starts another.
+ *   Every literal after it is prefill, except one in an arm exclusive with it.
  */
 export function toItems(lits: Lit[], matcher: Scaffold): InjectedText[] {
   const items = new Map<string, InjectedText>();
@@ -1979,26 +2066,56 @@ export function toItems(lits: Lit[], matcher: Scaffold): InjectedText[] {
   const res = lits.map((l) => matcher.residue(l.text));
   const open = openHeader(lits, res);
   const openGen = open && lits[open.index]!.gen;
+  const head = (open && lits[open.index]!.at) || ROOT;
   for (let i = 0; i < lits.length; i++) {
     const l = lits[i]!;
     const r = res[i]!;
-    if (l.genElse !== undefined && seen.has(l.genElse)) {
-      add(l, r.frags, false);
-      continue;
-    }
+    // The else of a generation-prompt branch never follows its header, but
+    // an assistant header it leaves open is still open (review round 2).
+    const genElse = l.genElse !== undefined && seen.has(l.genElse);
     // Residue from `cut` on is prefill.
-    let cut = after ? 0 : Infinity;
-    if (l.gen !== undefined && !seen.has(l.gen) && WORDISH.test(l.text)) {
+    let cut = after && !genElse ? 0 : Infinity;
+    if (!genElse && l.gen !== undefined && !seen.has(l.gen) && WORDISH.test(l.text)) {
       seen.add(l.gen);
-      cut = Math.min(cut, r.firstPieceEnd >= 0 ? r.firstPieceEnd : l.text.length);
+      cut = Math.min(cut, headerEnd(l.text, r));
       after = true;
     }
     if (open && i === open.index) cut = Math.min(cut, open.at);
-    else if (open && i > open.index && (openGen === undefined || l.genElse !== openGen)) cut = 0;
-    add(l, r.frags.filter((f) => f[0] < cut), false);
-    add(l, r.frags.filter((f) => f[0] >= cut), true);
+    else if (open && i > open.index && (openGen === undefined || l.genElse !== openGen) && !exclusive(head, l.at ?? ROOT)) cut = 0;
+    const frags = splitAt(l.text, r.frags, cut);
+    add(l, frags.filter((f) => f[0] < cut), false);
+    add(l, frags.filter((f) => f[0] >= cut), true);
   }
   return [...items.values()];
+}
+
+// Where the generation prompt's header ends in its literal. The header is the
+// first line with a letter or digit: up to its first scaffolding match when
+// it has one (`<|im_start|>`), else up to its colon (`### Response:`) or its
+// end. Text after the header is prefill, not more header (review round 2,
+// contracts R11). A literal that names the assistant later keeps its first match:
+// a line before that header (`Note: …`) is not the header.
+function headerEnd(text: string, r: Residue): number {
+  const start = text.search(WORDISH);
+  if (start < 0) return text.length;
+  const nl = text.indexOf("\n", start);
+  const end = nl < 0 ? text.length : nl;
+  if (r.firstPieceEnd >= 0 && (r.firstPieceEnd <= end || r.assistantEnd >= 0)) return r.firstPieceEnd;
+  const colon = text.indexOf(":", start);
+  return colon >= 0 && colon < end ? colon + 1 : end;
+}
+
+// A header with no scaffolding ends inside a residue run: split it there.
+function splitAt(text: string, frags: [number, number][], cut: number): [number, number][] {
+  if (!frags.some(([s, e]) => s < cut && cut < e)) return frags;
+  const out: [number, number][] = [];
+  for (const [s, e] of frags) {
+    if (s < cut && cut < e) {
+      pushFrag(text, s, cut, out);
+      pushFrag(text, cut, e, out);
+    } else out.push([s, e]);
+  }
+  return out;
 }
 
 // A token-shaped string, and the names that end a turn or start another
@@ -2018,15 +2135,71 @@ function closesTurn(text: string): boolean {
   return false;
 }
 
-// The last assistant header in program order, and where it ends, unless a
-// token after it closes the turn.
+// The last assistant header in program order that no token after it closes,
+// and where it ends. A closer counts only when every path through the header
+// prints it: in the header's block or one holding it, never under a test
+// after the header, in a loop that may not run, or in an arm exclusive with
+// the header (review round 2, security N4). A header such a closer leaves open
+// is not hidden by a later one either.
 function openHeader(lits: Lit[], res: Residue[]): { index: number; at: number } | undefined {
+  const closers = new Set<Frame>();
   for (let i = lits.length - 1; i >= 0; i--) {
     const text = lits[i]!.text;
+    const where = lits[i]!.at ?? ROOT;
     const at = res[i]!.assistantEnd;
-    if (at >= 0) return closesTurn(text.slice(at)) ? undefined : { index: i, at };
-    if (closesTurn(text)) return undefined;
+    if (at >= 0 && !closesTurn(text.slice(at)) && !heldBy(where, closers)) return { index: i, at };
+    if (closesTurn(text)) {
+      if (where === ROOT) return undefined;
+      closers.add(where);
+    }
   }
   return undefined;
+}
+
+// ---- blocks ----
+
+const ROOT: Frame = {};
+
+// The two arms of one `if`, loop or inline `if`, below `up`.
+function arms(up: Frame | undefined): [Frame, Frame] {
+  const fork = {};
+  return [
+    { up: up ?? ROOT, fork },
+    { up: up ?? ROOT, fork },
+  ];
+}
+
+// True when `outer` is `f` or a block holding it.
+function encloses(outer: Frame, f: Frame): boolean {
+  for (let x: Frame | undefined = f; x; x = x.up) if (x === outer) return true;
+  return false;
+}
+
+function heldBy(f: Frame, outers: ReadonlySet<Frame>): boolean {
+  for (let x: Frame | undefined = f; x; x = x.up) if (outers.has(x)) return true;
+  return false;
+}
+
+// Where a literal made in `made` lands when printed in `here`: the deeper of
+// the two when one holds the other. Otherwise both blocks' tests stand
+// between it and the output, so it is in a block of its own below `here`.
+function placed(made: Frame | undefined, here: Frame): Frame {
+  if (!made || encloses(made, here)) return here;
+  if (encloses(here, made)) return made;
+  return { up: here };
+}
+
+// True when no render prints in both blocks: they part at two arms of one fork.
+function exclusive(a: Frame, b: Frame): boolean {
+  const toward = new Map<Frame, Frame | undefined>();
+  let from: Frame | undefined;
+  for (let x: Frame | undefined = a; x; from = x, x = x.up) toward.set(x, from);
+  from = undefined;
+  for (let x: Frame | undefined = b; x; from = x, x = x.up) {
+    if (!toward.has(x)) continue;
+    const other = toward.get(x);
+    return other?.fork !== undefined && other.fork === from?.fork;
+  }
+  return false;
 }
 
