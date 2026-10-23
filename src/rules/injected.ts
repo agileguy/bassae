@@ -39,6 +39,9 @@ import {
   clsOf,
   condOf,
   countArith,
+  countField,
+  countPick,
+  countsOf,
   eitherRest,
   elementField,
   factsFrom,
@@ -52,6 +55,7 @@ import {
   memberField,
   NO_FACTS,
   pathOf,
+  rangeOf,
   restOf,
   rootField,
   sameFields,
@@ -825,6 +829,11 @@ class Interp {
             // The message goes to the exception, never into the prompt.
             for (const a of args) this.eval(a, c);
             return EMPTY;
+          case "range": {
+            const a = args.map((x) => this.eval(x, c));
+            for (const v of a) this.holds(v);
+            return rangeOf(a);
+          }
           case "dict": {
             let v: Val = EMPTY;
             const keys: Lit[] = [];
@@ -861,6 +870,7 @@ class Interp {
       const r = this.eval(callee.object, c);
       const prop = callee.property as Node;
       const method = !callee.computed && prop?.type === "Identifier" ? String(prop.value) : prop?.type === "StringLiteral" ? String(prop.value) : "";
+      if (method === "cycle" && r.fields?.includes(rootField("loop"))) return this.loopCycle(r, args, c, n);
       const out = this.method(r, method, args, c, callee.object as Node);
       if (KNOWN_METHODS.has(method)) return out;
       // `d.k()` with no such string, list or dict method: an entry holding a
@@ -871,6 +881,25 @@ class Interp {
     const fv = this.eval(callee, c);
     for (const a of args) this.holds(this.eval(a, c));
     return join(this.callFns(fv.fns, n), this.callEscaped(args, c, fv.gate));
+  }
+
+  // `loop.cycle(a, b, ...)`: the argument at the loop position modulo their
+  // number. Past two that is a threshold on the position (`loop.index0 % 40
+  // == 39`); two alternate, which is parity (Decisions 20:55; review round 2,
+  // item 1). Either way the position chooses it.
+  private loopCycle(loop: Val, args: Node[], c: Ctx, at: Node): Val {
+    const a = args.map((x) => this.eval(x, c));
+    const index0 = runtimeVal(memberField(rootField("loop"), "index0"), undefined);
+    const pos = countArith(index0, { ...EMPTY, konst: a.length }, "%");
+    const sel = pos ? this.selCond(pos, at) : undefined;
+    let gate = strongest(loop.gate, sel);
+    let data: TestClass = "presence";
+    for (const x of a) {
+      this.holds(x);
+      gate = strongest(gate, x.gate);
+      data = stronger(data, x.data);
+    }
+    return { lits: this.choose(a.flatMap((x) => [...x.lits, ...(x.keys ?? [])]), sel), data, truth: data, gate };
   }
 
   // A call through a value that may be strftime_now or random, or one the
@@ -999,10 +1028,16 @@ class Interp {
       case "get": {
         const k = a[0]?.konst;
         const fields = r.fields ? mapFields(r.fields, (f) => memberField(f, typeof k === "string" ? k : undefined)) : undefined;
-        // The key chooses an entry or the default: both depend on it. The
-        // value may be the default instead.
-        const sel = argNodes[0] ? this.selCond(a[0]!, argNodes[0]) : undefined;
-        return { ...base, lits: this.choose([...r.lits, ...(a[1]?.lits ?? [])], sel), data: fields ? clsOf(fields) : r.data, truth: fields ? "presence" : r.truth, fields, rest: fields ? eitherRest(r.rest, a[1]?.data) : undefined };
+        // The key chooses an entry or the default: what comes back, and
+        // whether it is anything, depend on it (review round 2, item 2). A
+        // count picks an entry whose key is a number by a threshold (Gemini
+        // D1t). The value may be the default instead, which an empty list or
+        // dict adds nothing to.
+        let sel = argNodes[0] ? this.selCond(a[0]!, argNodes[0]) : undefined;
+        const pick = argNodes[0] ? countPick(a[0]!, (r.keys ?? []).map((l) => l.text)) : undefined;
+        if (pick) sel = strongest(sel, condOf(pick === "presence" ? "none" : pick, this.exprSpan(argNodes[0]!)));
+        const dflt = a[1] && !a[1].fields ? restOf(a[1]) : a[1]?.data;
+        return { ...base, gate: strongest(base.gate, sel), lits: this.choose([...r.lits, ...(a[1]?.lits ?? [])], sel), data: fields ? clsOf(fields) : r.data, truth: fields ? "presence" : r.truth, fields, rest: fields ? eitherRest(r.rest, dflt) : undefined };
       }
       case "items":
       case "keys":
@@ -1024,6 +1059,14 @@ class Interp {
       }
       case "pop":
         return { ...base, lits: r.lits, data: r.data, truth: r.truth };
+      case "count": {
+        // How often a value occurs in runtime text or a runtime list grows with
+        // it, as its length does: past 1 a test on it is a threshold. Compared
+        // with 0 or 1 it is as telling as `x in s` (review round 2, Codex N2).
+        const d = maxData(r, a);
+        if (!isRuntime(r) || countsOf(r)) return { ...base, lits: [], data: d, truth: d };
+        return { ...base, lits: [], data: d, truth: d, fields: [countField(0, d === "nondeterministic" ? "nondeterministic" : "content")] };
+      }
       default:
         // startswith, endswith, find, count, isdigit and the rest compute from
         // the receiver's text: they reveal it and print none of it.
@@ -1071,7 +1114,8 @@ class Interp {
       case "tojson":
       case "pprint":
         // The text holds every field, so a test on it reads the strongest one.
-        return { ...keep, lits: [...o.lits, ...(o.keys ?? [])], data: o.fields ? stronger(o.data, clsOf(o.fields)) : o.data, konst: name === "string" && typeof o.konst === "string" ? o.konst : undefined };
+        // A count's digits are the count (`messages|length|string == '41'`).
+        return { ...keep, lits: [...o.lits, ...(o.keys ?? [])], data: o.fields ? stronger(o.data, clsOf(o.fields)) : o.data, konst: name === "string" && typeof o.konst === "string" ? o.konst : undefined, fields: countsOf(o), rest: countsOf(o) ? o.rest : undefined };
       case "safe":
       case "e":
       case "escape":
@@ -1512,6 +1556,9 @@ function sameVal(a: Val, b: Val): boolean {
   if (String(a.fns) !== String(b.fns) || a.genFlag !== b.genFlag) return false;
   if ((a.konstList === undefined) !== (b.konstList === undefined)) return false;
   for (let i = 0; i < a.lits.length; i++) if (a.lits[i]!.cond?.test !== b.lits[i]!.cond?.test) return false;
+  // A key's condition can grow on its own (`selectattr` by a value a later
+  // pass learns is content), and join keeps the key list's length.
+  for (let i = 0; i < (a.keys?.length ?? 0); i++) if (a.keys![i]!.cond?.test !== b.keys![i]!.cond?.test) return false;
   return true;
 }
 

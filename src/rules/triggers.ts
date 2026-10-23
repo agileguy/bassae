@@ -427,9 +427,19 @@ function gateOf(v: Val): TestClass {
   return v.gate?.test ?? "none";
 }
 
-/** What `v` may be besides its fields, for a join: all of it when it has none. */
+/**
+ * What `v` may be besides its fields, for a join: all of it when it has none.
+ * An empty list or dict (`|default([])`, `or {}`) equals no string or number
+ * and has no element or member to read, so it adds nothing (review round 2,
+ * Codex N5).
+ */
 export function restOf(v: Val): TestClass | undefined {
-  return v.fields ? v.rest : v.data;
+  if (v.fields) return v.rest;
+  return isEmptyConst(v) ? undefined : v.data;
+}
+
+function isEmptyConst(v: Val): boolean {
+  return !isRuntime(v) && v.konst === undefined && v.lits.length === 0 && (v.konstList?.length === 0 || v.keys?.length === 0);
 }
 
 /** Either of two rests. */
@@ -530,13 +540,34 @@ function membership(a: Node, b: Node, env: TestEnv, facts: Facts): TestClass {
   const va = env.value(a, facts);
   const vb = env.value(b, facts);
   const gates = stronger(gateOf(va), gateOf(vb));
-  let cls = vocabIn(a, b, vb, env, facts);
+  let cls = countIn(a, b, vb, env, facts) ?? vocabIn(a, b, vb, env, facts);
   if (cls === undefined) {
     if (isMapping(vb)) cls = stronger(isRuntime(vb) ? "presence" : "none", stronger(readOf(va), vb.rest ?? "none"));
     else if (!isRuntime(vb)) cls = readOf(va);
     else cls = stronger(readOf(vb), readOf(va));
   }
   return stronger(cls, gates);
+}
+
+// A count in a list or range: `messages|length in [41, 42]`, `loop.index in
+// range(40, 1000)`, `40 in range(messages|length)`. It is the count compared
+// with each value it may equal, and a list or range whose values are not known
+// may hold any threshold (review round 2, Codex N2, Gemini N1).
+function countIn(a: Node, b: Node, vb: Val, env: TestEnv, facts: Facts): TestClass | undefined {
+  const elems = vb.fields && vb.fields.length > 0 && vb.fields.every((f) => f.kind === "list" && f.elem?.kind === "count") ? elemsOf(vb) : undefined;
+  if (!elems && isRuntime(vb)) return undefined;
+  const x = operand(a, env, facts, 0);
+  if (elems) return countTest(x, elems) ?? countTest(elems, x);
+  if (!countsOf(x)) return undefined;
+  const list = constList(b, vb, env, facts);
+  if (!list) return countTest(x, { lits: [], data: "none", truth: "none" });
+  let cls = readOf(x);
+  for (const k of list) cls = stronger(cls, countTest(x, { lits: [], data: "none", truth: "none", konst: k })!);
+  return cls;
+}
+
+function elemsOf(v: Val): Val {
+  return { lits: [], data: v.data, truth: "presence", gate: v.gate, fields: mapFields(v.fields!, elementField), rest: v.rest };
 }
 
 function vocabIn(a: Node, b: Node, vb: Val, env: TestEnv, facts: Facts): TestClass | undefined {
@@ -613,6 +644,8 @@ function constList(n: Node, v: Val, env: TestEnv, facts: Facts): (string | numbe
 const ZERO: Val = { lits: [], data: "none", truth: "none", konst: 0 };
 const ARITHMETIC = new Set(["+", "-", "*", "/", "//", "%", "**"]);
 const LENGTHS = new Set(["length", "count", "wordcount"]);
+// Filters that leave a count's value as it is: its digits, or the number.
+const AS_NUMBER = new Set(["string", "int", "float"]);
 
 function filterName(f: Node): string {
   if (!f || typeof f !== "object") return "";
@@ -629,6 +662,10 @@ function operand(n: Node, env: TestEnv, facts: Facts, depth: number): Val {
   if (countsOf(v) || depth > 16 || !n || typeof n !== "object") return v;
   if (n.type === "FilterExpression" && LENGTHS.has(filterName(n.filter as Node))) {
     return { ...lengthOf(operand(n.operand as Node, env, facts, depth + 1)), gate: v.gate };
+  }
+  if (n.type === "FilterExpression" && AS_NUMBER.has(filterName(n.filter as Node))) {
+    const inner = operand(n.operand as Node, env, facts, depth + 1);
+    if (countsOf(inner)) return { ...inner, gate: strongest(inner.gate, v.gate) };
   }
   if (n.type === "BinaryExpression" && ARITHMETIC.has(op(n))) {
     const l = operand(n.left as Node, env, facts, depth + 1);
@@ -651,7 +688,7 @@ function identOnly(v: Val): boolean {
 }
 
 /** The counts a value may be, when every field it may be is a count (`rest` says what else it may be). */
-function countsOf(v: Val): Fields | undefined {
+export function countsOf(v: Val): Fields | undefined {
   return v.fields && v.fields.length > 0 && v.fields.every((f) => f.kind === "count") ? v.fields : undefined;
 }
 
@@ -667,28 +704,87 @@ function thresholdOf(fs: Fields): TestClass {
 // a long enough conversation crosses (ISC-18, Decisions 19:15). A template value
 // whose constant is not known (`40 if tools else 41`) may be any threshold, and
 // so may a count that may be such a value instead (`n if c else 40`) when it
-// is compared with a count.
+// is compared with a count. A string of digits is that number: a count's
+// `|string` is still the count (`messages|length|string == '41'`).
+//
+// Residuals: counts do not record what they count, so two counts of different
+// things within 1 of each other read as near, as two positions in one
+// conversation do: `m.content|length == loop.index` and `m.content|length -
+// loop.index == 0` (Gemini A1, A10) are presence. Parity (`% 2`, `is odd`,
+// a two-value `loop.cycle`) is presence by Decisions 20:55.
 function countTest(x: Val, other: Val): TestClass | undefined {
   const xs = countsOf(x);
   if (!xs) return undefined;
   const near = stronger(stronger(readOf(x), readOf(other)), stronger(x.rest ?? "none", other.rest ?? "none"));
   const ys = countsOf(other);
+  const k = numberOf(other.konst);
   let far: boolean;
   if (ys) far = x.rest !== undefined || other.rest !== undefined || xs.some((a) => ys.some((b) => !(Math.abs(a.off! - b.off!) <= 1)));
   else if (isRuntime(other)) return undefined;
-  else if (typeof other.konst === "number") far = xs.some((a) => !(Math.abs((other.konst as number) - a.off!) <= 1));
+  else if (k !== undefined) far = xs.some((a) => !(Math.abs(k - a.off!) <= 1));
   else far = other.konst === undefined;
   return far ? stronger(near, ys ? stronger(thresholdOf(xs), thresholdOf(ys)) : thresholdOf(xs)) : near;
+}
+
+function numberOf(k: Val["konst"]): number | undefined {
+  if (typeof k === "number") return k;
+  return typeof k === "string" && /^\s*[-+]?\d+\s*$/.test(k) ? Number(k) : undefined;
+}
+
+/**
+ * The class of picking one of the entries named `names` by `key`, when `key`
+ * is a count: `{'41': 'P'}.get(messages|length|string)` picks P only once the
+ * conversation is 41 long. Undefined when `key` is not a count.
+ */
+export function countPick(key: Val, names: readonly string[]): TestClass | undefined {
+  if (!countsOf(key)) return undefined;
+  let cls = readOf(key);
+  for (const name of names) cls = stronger(cls, countTest(key, { lits: [], data: "none", truth: "none", konst: name })!);
+  return cls;
+}
+
+/**
+ * `range(stop)`, `range(start, stop, step)`. It is empty unless `stop` is past
+ * `start`, so its emptiness is that comparison. Each element lies between the
+ * two, so where either is a count the elements are that count: an element
+ * equal to a constant or another count is the count compared with it (`for i
+ * in range(messages|length)` then `i == 40` is `messages|length > 40`). A
+ * runtime argument that is no count may make them something else. With no
+ * count among the bounds the elements are not known: constant bounds make a
+ * constant that may hold any threshold.
+ */
+export function rangeOf(a: readonly Val[]): Val {
+  const start = a.length >= 2 ? a[0]! : ZERO;
+  const stop = a.length >= 2 ? a[1]! : (a[0] ?? ZERO);
+  let data: TestClass = "none";
+  let gate: Cond | undefined;
+  for (const x of a) {
+    data = stronger(data, x.data);
+    gate = strongest(gate, x.gate);
+  }
+  const empty = countTest(stop, start) ?? countTest(start, stop) ?? stronger(readOf(start), readOf(stop));
+  const truth = stronger(empty, a[2] ? readOf(a[2]) : "none");
+  const bounds = [...(countsOf(start) ?? []), ...(countsOf(stop) ?? [])];
+  if (bounds.length === 0) return { lits: [], data, truth, gate };
+  let rest: TestClass | undefined;
+  for (const x of a) rest = eitherRest(rest, countsOf(x) ? x.rest : isRuntime(x) ? x.data : undefined);
+  return { lits: [], data, truth, gate, fields: mapFields(bounds, listOf), rest };
 }
 
 /**
  * `|length`, `|count`, `|wordcount`: as telling as the value's emptiness, and
  * a count when the value holds content or the clock, so a threshold on it is
- * judged as one. The length of schema is never a count.
+ * judged as one. The length of schema is never a count. The length of a
+ * count's digits (`messages|length|string|length > 1`) grows with the count,
+ * so every test on it is a threshold.
  */
 export function lengthOf(o: Val, gate?: Cond): Val {
   const v: Val = { lits: [], data: o.truth, truth: o.truth, gate: gate ?? o.gate };
-  if (countsOf(o)) return v; // a number has no length
+  const cs = countsOf(o);
+  if (cs) {
+    const t = stronger(o.data, thresholdOf(cs));
+    return { ...v, data: t, truth: t };
+  }
   const d = o.fields ? clsOf(o.fields) : o.data;
   return d === "content" || d === "nondeterministic" ? { ...v, fields: [countField(0, d)], rest: o.rest } : v;
 }
