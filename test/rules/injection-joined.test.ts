@@ -80,4 +80,5 @@ test("ISC-19, ISC-20: no registry template, scanned as unknown, has a URL or blo
       expect([k.entry.sha256, hits(k.text, "url_in_text", scaffolding), hits(k.text, "encoded_blob", scaffolding)]).toEqual([k.entry.sha256, [], []]);
     }
   }
-});
+  // Seventy full analyses: about 2.5 s here, 5.5 s on the CI runner, past bun's 5 s default.
+}, 30_000);
