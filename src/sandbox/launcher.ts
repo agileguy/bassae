@@ -240,17 +240,25 @@ export function sandboxAvailable(): Promise<SandboxStatus> {
 
 let procTaskInfo: ((pid: number) => number | undefined) | undefined;
 
+/**
+ * Opens libproc once. A renderer calls it when it is made, before any probe is built: bun:ffi's dlopen throws once
+ * anything has set a property on Object.prototype, so an open left to the first poll could fail for a reason a
+ * template chose, and every render then reads as a memory breach.
+ */
+export function openDarwinRss(): void {
+  if (procTaskInfo) return;
+  const { symbols } = dlopen("/usr/lib/libproc.dylib", {
+    proc_pidinfo: { args: [FFIType.i32, FFIType.i32, FFIType.u64, FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
+  });
+  // struct proc_taskinfo is 96 bytes; pti_resident_size is its second u64. 4 is PROC_PIDTASKINFO.
+  const info = new BigUint64Array(12);
+  procTaskInfo = (p) => (symbols.proc_pidinfo(p, 4, 0n, ptr(info), 96) === 96 ? Number(info[1]) : undefined);
+}
+
 /** Resident bytes of one macOS process, or undefined when they cannot be read. */
 export function darwinRss(pid: number): number | undefined {
-  if (!procTaskInfo) {
-    const { symbols } = dlopen("/usr/lib/libproc.dylib", {
-      proc_pidinfo: { args: [FFIType.i32, FFIType.i32, FFIType.u64, FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
-    });
-    // struct proc_taskinfo is 96 bytes; pti_resident_size is its second u64. 4 is PROC_PIDTASKINFO.
-    const info = new BigUint64Array(12);
-    procTaskInfo = (p) => (symbols.proc_pidinfo(p, 4, 0n, ptr(info), 96) === 96 ? Number(info[1]) : undefined);
-  }
-  return procTaskInfo(pid);
+  if (!procTaskInfo) openDarwinRss();
+  return procTaskInfo!(pid);
 }
 
 const gone = (e: unknown) => ["ENOENT", "ESRCH"].includes((e as NodeJS.ErrnoException).code ?? "");

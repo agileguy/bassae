@@ -16,6 +16,7 @@ if (!live) {
 const BUN = process.execPath;
 const ROGUE = join(import.meta.dir, "rogue-worker.ts");
 const PROBE = join(import.meta.dir, "render-probe.ts");
+const POLLUTED = join(import.meta.dir, "polluted-parent.ts");
 const BUSY = join(import.meta.dir, "busy-worker.ts");
 const SLOW = 30_000;
 // Spins for hours on small ranges, staying near 100 MiB for its first seconds, so only a timeout or a kill ends it.
@@ -84,6 +85,20 @@ describe.skipIf(!live)("from any working directory", () => {
       SLOW,
     );
   }
+});
+
+describe.skipIf(!live || process.platform !== "darwin")("a polluted scanner", () => {
+  // bun:ffi's dlopen throws once Object.prototype has a property of its own, so libproc opens with the renderer,
+  // before any probe is built. A fresh process, because this one opened it long ago.
+  test(
+    "still reads a worker's memory when Object.prototype is polluted after the renderer is made",
+    async () => {
+      const proc = Bun.spawn([BUN, POLLUTED], { stdout: "pipe", stderr: "pipe" });
+      const [out] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+      expect(JSON.parse(out)).toEqual([ok("a", "hi")]);
+    },
+    SLOW,
+  );
 });
 
 describe.skipIf(!live)("rendering", () => {
@@ -448,11 +463,12 @@ describe.skipIf(!live)("the memory cap fails closed (ISC-43)", () => {
   test(
     "a batch is split by size, so no worker has to hold more than 16 MiB of requests",
     async () => {
-      // 48 MiB of requests, which one worker cannot hold under a 96 MiB cap; 16 MiB at a time, it can. The template
+      // 49 MiB of requests, which one worker cannot hold under a 128 MiB cap; 16 MiB at a time, it can. A worker
+      // holding one 16 MiB batch peaks near 104 MiB, so 96 MiB was too tight to pass every time. The template
       // tests the string but never copies it, as the library's slicing and length filter do.
       const big = "x".repeat(7 * 2 ** 20);
       const requests = Array.from({ length: 7 }, (_, i) => req(`r${i}`, { big }));
-      const results = await renderer.renderBatch("{% if big %}big{% endif %}", requests, { maxRssBytes: 96 * 2 ** 20 });
+      const results = await renderer.renderBatch("{% if big %}big{% endif %}", requests, { maxRssBytes: 128 * 2 ** 20 });
       expect(results).toEqual(requests.map((r) => ok(r.id, "big")));
     },
     SLOW,

@@ -1,7 +1,7 @@
 // The renderer the scanner calls: one sandboxed worker per template, which stops at the first cap breach.
 
 import { CAP_FAILURES, DEFAULT_RENDER_LIMITS, type Renderer, type RenderLimits, type RenderRequest, type RenderResult } from "../types.ts";
-import { runWorker, type WorkerOptions } from "./launcher.ts";
+import { openDarwinRss, runWorker, type WorkerOptions } from "./launcher.ts";
 
 export { sandboxAvailable } from "./launcher.ts";
 export type { SandboxKind, SandboxStatus, WorkerOptions } from "./launcher.ts";
@@ -60,6 +60,15 @@ async function renderAll(template: string, requests: RenderRequest[], sizes: num
  * result is a `sandbox` failure.
  */
 export function createRenderer(options: WorkerOptions = {}): Renderer {
+  // macOS reads a worker's memory through libproc. Open it now, before any probe is built, so nothing a template
+  // does to the scanner's objects can stop it opening later. Should it fail here, the first poll fails closed.
+  if (process.platform === "darwin" && !options.residentMemory) {
+    try {
+      openDarwinRss();
+    } catch {
+      // left to the first poll
+    }
+  }
   return {
     async renderBatch(template, requests, limits = {}) {
       const caps: RenderLimits = {

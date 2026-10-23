@@ -46,9 +46,6 @@ const SAMPLE_AROUND = 80;
 // the output cap, and 256 MiB across the scan's pool of 8. Past it nothing more renders, and the result is incomplete.
 export const OUTPUT_BUDGET = 32 * 2 ** 20;
 
-/** A DiffRenderResult that also says why it is incomplete, where its counts alone do not. */
-export type DiffRenderReport = DiffRenderResult & { gaps?: string[] };
-
 // What a finding calls each of CAP_FAILURES.
 const CAP_NAMES: ReadonlyMap<RenderFailure, string> = new Map([
   ["timeout", `time cap (${DEFAULT_RENDER_LIMITS.timeoutMs} ms)`],
@@ -67,12 +64,12 @@ export interface IntegrityChecks {
  * render_divergence, env_profile_divergence, content_integrity, tool_integrity and render_dos for one template.
  * Never throws: an internal failure is a scanner_error finding and an incomplete result.
  */
-export async function diffRender(input: DiffRenderInput, renderer: Renderer, transforms: readonly Transform[]): Promise<DiffRenderReport> {
+export async function diffRender(input: DiffRenderInput, renderer: Renderer, transforms: readonly Transform[]): Promise<DiffRenderResult> {
   return diffRenderWith(input, renderer, transforms, { checkContent, checkTools });
 }
 
 /** diffRender with the integrity checks passed in. */
-export async function diffRenderWith(input: DiffRenderInput, renderer: Renderer, transforms: readonly Transform[], checks: IntegrityChecks): Promise<DiffRenderReport> {
+export async function diffRenderWith(input: DiffRenderInput, renderer: Renderer, transforms: readonly Transform[], checks: IntegrityChecks): Promise<DiffRenderResult> {
   const t = input.template;
   const base: FindingBase = { file: t.source.path, templateName: t.source.name, templateSha256: t.sha256 };
   try {
@@ -177,7 +174,7 @@ function isRefusal(r: RenderResult, templateText: string): boolean {
 
 // ---- the run ----
 
-async function run(input: DiffRenderInput, renderer: Renderer, transforms: readonly Transform[], checks: IntegrityChecks, base: FindingBase): Promise<DiffRenderReport> {
+async function run(input: DiffRenderInput, renderer: Renderer, transforms: readonly Transform[], checks: IntegrityChecks, base: FindingBase): Promise<DiffRenderResult> {
   const text = input.template.text;
   const scaffolding = input.scaffolding ?? new Set<string>();
   // A template that never reads `tools` gets no probe passing any: it cannot render them (ISC-22.4).
