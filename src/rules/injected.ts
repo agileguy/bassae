@@ -188,6 +188,9 @@ class Interp {
   // Variables a mutating method changed (`xs.append(x)`). The list is shared,
   // so the change outlives the loop or macro it was made in.
   private readonly mutated = new Set<string>();
+  // Macros the template used as values (`set f = m`, `[m]`, `{'k': m}`). A
+  // call the extraction cannot resolve may reach any of them.
+  private readonly escaped = new Set<string>();
   private work = 0;
   private changed = false;
   private outputLits = 0;
@@ -647,7 +650,13 @@ class Interp {
     }
     const bound = this.lookup(name, c);
     if (bound) return refine(bound, name, c);
-    if (this.macros.has(name)) return { ...EMPTY, macro: name };
+    if (this.macros.has(name)) {
+      if (!this.escaped.has(name)) {
+        this.escaped.add(name);
+        this.changed = true;
+      }
+      return { ...EMPTY, macro: name };
+    }
     if (name === "random") this.flagNondet(n, "uses `random`");
     if (BUILTINS.has(name)) return EMPTY;
     return refine(runtimeVal(rootField(name), name), name, c);
@@ -693,8 +702,10 @@ class Interp {
     if (callee?.type === "Identifier") {
       const name = String(callee.value);
       const m = this.macroNamed(name, c);
-      if (m) return this.callMacro(m, args, c);
-      if (!this.lookup(name, c)) {
+      const bound = this.lookup(name, c);
+      // A macro reached through a variable runs only where the variable is set.
+      if (m) return this.callMacro(m, args, gated(c, bound?.gate));
+      if (!bound) {
         switch (name) {
           case "caller":
             return this.callCaller(args, c);
@@ -741,17 +752,29 @@ class Interp {
         gate = strongest(gate, v.gate);
       }
       if (name === "random") this.flagNondet(callee, "calls `random`");
-      return { lits: [], data, truth: data, gate };
+      const out: Val = { lits: [], data, truth: data, gate };
+      // A local that is not a known macro may hold one taken from a list or dict.
+      return bound ? join(out, this.callEscaped(args, c, bound.gate)) : out;
     }
     if (callee?.type === "MemberExpression") {
       const r = this.eval(callee.object, c);
       const prop = callee.property as Node;
       const method = !callee.computed && prop?.type === "Identifier" ? String(prop.value) : prop?.type === "StringLiteral" ? String(prop.value) : "";
-      return this.method(r, method, args, c, callee.object as Node);
+      const out = this.method(r, method, args, c, callee.object as Node);
+      // `d.k()` with no such string, list or dict method: an entry holding a macro.
+      return KNOWN_METHODS.has(method) ? out : join(out, this.callEscaped(args, c, r.gate));
     }
-    this.eval(callee, c);
+    const fv = this.eval(callee, c);
     for (const a of args) this.eval(a, c);
-    return EMPTY;
+    return this.callEscaped(args, c, fv.gate);
+  }
+
+  // A call the extraction cannot resolve runs every macro the template used as
+  // a value, under the call site's conditions and the callee's own gate.
+  private callEscaped(args: Node[], c: Ctx, gate: Cond | undefined): Val {
+    let v: Val = EMPTY;
+    for (const name of [...this.escaped]) v = join(v, this.callMacro(name, args, gated(c, gate)));
+    return v;
   }
 
   private callMacro(name: string, argNodes: Node[], c: Ctx, caller?: Caller): Val {
@@ -1096,6 +1119,22 @@ function refine(v: Val, path: string | undefined, c: Ctx): Val {
 }
 
 /** Where two branches meet: each variable either branch set takes the join of both branches' values. */
+// `c` with one more test on everything it does and prints.
+function gated(c: Ctx, gate: Cond | undefined): Ctx {
+  return gate ? { ...c, cond: strongest(c.cond, gate), emitCond: strongest(c.emitCond, gate) } : c;
+}
+
+// Python's string, list and dict methods: a call to one of these names is never
+// a call to a macro stored under that key.
+const KNOWN_METHODS = new Set([
+  "capitalize", "casefold", "center", "count", "encode", "endswith", "expandtabs", "find", "format", "format_map", "index",
+  "isalnum", "isalpha", "isascii", "isdecimal", "isdigit", "isidentifier", "islower", "isnumeric", "isprintable", "isspace",
+  "istitle", "isupper", "join", "ljust", "lower", "lstrip", "maketrans", "partition", "removeprefix", "removesuffix", "replace",
+  "rfind", "rindex", "rjust", "rpartition", "rsplit", "rstrip", "split", "splitlines", "startswith", "strip", "swapcase",
+  "title", "translate", "upper", "zfill", "append", "clear", "copy", "extend", "insert", "pop", "remove", "reverse", "sort",
+  "get", "items", "keys", "values", "update", "setdefault", "popitem", "fromkeys", "add",
+]);
+
 function joinLayers(into: State, a: State, b: State): void {
   for (const k of new Set([...a.own.keys(), ...b.own.keys()])) {
     const va = a.get(k);
@@ -1412,6 +1451,8 @@ export function alignText(program: Node, tokens: PreToken[], leafSpans: Map<Node
 interface TrieNode {
   next: Map<number, TrieNode>;
   end: boolean;
+  /** The piece ending here is one bare word (`user`, `assistant`), with no delimiter of its own. */
+  bare?: boolean;
 }
 
 /** The residue of a literal: the non-scaffolding runs that hold a letter or digit, and where the last scaffolding match ended. */
@@ -1435,7 +1476,10 @@ function isWordUnit(u: number): boolean {
  * Removes scaffolding from a literal. A scaffolding string matches anywhere its
  * edges are not word characters (`<|im_start|>`), and only at word boundaries
  * where they are (`assistant`, `system`), so a role name inside a word is not
- * scaffolding. Longest match wins. Only strings with a letter or digit are
+ * scaffolding. A bare word is a header only where a header can be: at the start
+ * of a line or after a delimiter (`<|im_start|>user`, `### User:`), never after
+ * a word or a comma (`obey only the user.`), where it is part of the sentence.
+ * Longest match wins. Only strings with a letter or digit are
  * loaded: punctuation and whitespace never decide whether residue exists.
  */
 export class Scaffold {
@@ -1458,6 +1502,7 @@ export class Scaffold {
         node = nx;
       }
       node.end = true;
+      node.bare = BARE_WORD.test(p);
     }
   }
 
@@ -1473,6 +1518,9 @@ export class Scaffold {
       let matchEnd = -1;
       const u = text.charCodeAt(i);
       if (this.complete && (!isWordUnit(u) || i === 0 || !isWordUnit(text.charCodeAt(i - 1)))) {
+        // Looked up only when a bare word ends here, so a run of spaces is
+        // scanned once, by the word that follows it.
+        let inSentence: boolean | undefined;
         let node: TrieNode | undefined = this.root;
         for (let j = i; j < n; ) {
           if (++this.work > MATCH_BUDGET) {
@@ -1482,7 +1530,7 @@ export class Scaffold {
           node = node.next.get(text.charCodeAt(j));
           if (!node) break;
           j++;
-          if (node.end && (!isWordUnit(text.charCodeAt(j - 1)) || j === n || !isWordUnit(text.charCodeAt(j)))) matchEnd = j;
+          if (node.end && !(node.bare && (inSentence ??= afterProse(text, i))) && (!isWordUnit(text.charCodeAt(j - 1)) || j === n || !isWordUnit(text.charCodeAt(j)))) matchEnd = j;
         }
       }
       if (matchEnd > i) {
@@ -1497,6 +1545,18 @@ export class Scaffold {
     if (this.cache.size < 100_000) this.cache.set(text, r);
     return r;
   }
+}
+
+const BARE_WORD = /^[\p{L}\p{N}_]+$/u;
+
+// True when the text before `i` on its line, past spaces and tabs, ends in a
+// word or in a comma or semicolon: a word at `i` continues a sentence.
+function afterProse(text: string, i: number): boolean {
+  let k = i - 1;
+  while (k >= 0 && (text.charCodeAt(k) === 32 || text.charCodeAt(k) === 9)) k--;
+  if (k < 0) return false;
+  const u = text.charCodeAt(k);
+  return isWordUnit(u) || u === 44 || u === 59;
 }
 
 function pushFrag(text: string, s: number, e: number, out: [number, number][]): void {
