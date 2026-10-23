@@ -71,7 +71,8 @@ describe("compareLocal (ISC-23)", () => {
     const root = tempRoot();
     const dir = hfDir(root);
     const gguf = await readGgufModel(writeGguf(join(dir, "m.gguf"), { default: INJECTED }));
-    expect(selectBaseline(gguf.templates[0]!, gguf, noRegistry)).toEqual({ kind: "none" });
+    const t = gguf.templates[0]!;
+    expect(selectBaseline(t, gguf, noRegistry.match(t), noRegistry)).toEqual({ kind: "none" });
   });
 
   test("an identical or whitespace-only GGUF template gives nothing", async () => {
