@@ -28,11 +28,14 @@ const MAX_COUNT = 200;
 const MAX_LENGTH = 200_000;
 
 type Message = { role: string; content: unknown; [field: string]: unknown };
+// A threshold probe's conversation, built only once the cap keeps the probe: `count` messages, or one user content
+// `length` characters long. A template can list a thousand thresholds near MAX_LENGTH.
+type Sized = { count: number } | { length: number };
 
 interface Spec {
   label: string;
   role: Probe["role"];
-  messages: Message[];
+  messages: Message[] | Sized;
   tools?: unknown[];
   gen?: boolean;
   now?: string;
@@ -192,11 +195,10 @@ function varySpecs(withTools: boolean): Spec[] {
     }
   }
   // Fifty messages with a system turn first, and forty-nine without for templates that refuse one.
-  out.push({ label: "count:50", role: "vary", messages: conversation(50) });
-  out.push({ label: "count:49", role: "vary", messages: conversation(49) });
-  const long = longText(48_000);
-  out.push({ label: "long:user", role: "vary", messages: [{ role: "user", content: long }] });
-  out.push({ label: "long:system", role: "vary", messages: [{ role: "system", content: long }, TALK[0]!] });
+  out.push({ label: "count:50", role: "vary", messages: { count: 50 } });
+  out.push({ label: "count:49", role: "vary", messages: { count: 49 } });
+  out.push({ label: "long:user", role: "vary", messages: { length: 48_000 } });
+  out.push({ label: "long:system", role: "vary", messages: [{ role: "system", content: longText(48_000) }, TALK[0]!] });
   return out;
 }
 
@@ -588,7 +590,7 @@ function triggerSpecs(t: TriggerCandidate, i: number, text: string | undefined, 
       // A loop counter (`loop.index0 == 3`, `loop.length > 3`): most loops walk the messages, so a conversation that reaches it.
       const count = path[1] === "index0" || path[1] === "revindex0" ? n + 1 : n;
       if (role === "explain") return { specs: [], cut: 0 };
-      return count >= 1 && count <= MAX_COUNT ? { specs: [{ label: `count:${count}`, role, messages: conversation(count) }], cut: 0 } : { specs: [], cut: 1 };
+      return count >= 1 && count <= MAX_COUNT ? { specs: [{ label: `count:${count}`, role, messages: { count } }], cut: 0 } : { specs: [], cut: 1 };
     }
     if (path.length > 0) return { specs: [{ label, role, ...place(path, n, reads) }], cut: 0 };
     // A threshold on a computed value: most likely a message count or a content length, so both are sent. A number
@@ -598,9 +600,9 @@ function triggerSpecs(t: TriggerCandidate, i: number, text: string | undefined, 
     if (written !== undefined && !/\|\s*(?:length|count)\b|\blength\s*\(/.test(written)) return { specs: [], cut: 0 };
     const specs: Spec[] = [];
     let cut = 0;
-    if (n >= 1 && n <= MAX_COUNT) specs.push({ label: `count:${n}`, role, messages: conversation(n) });
+    if (n >= 1 && n <= MAX_COUNT) specs.push({ label: `count:${n}`, role, messages: { count: n } });
     else cut++;
-    if (n >= 1 && n <= MAX_LENGTH) specs.push({ label: `length:${n}`, role, messages: [{ role: "user", content: longText(n) }] });
+    if (n >= 1 && n <= MAX_LENGTH) specs.push({ label: `length:${n}`, role, messages: { length: n } });
     else cut++;
     return { specs, cut };
   }
@@ -649,7 +651,15 @@ function contentsOf(messages: readonly Message[]): ProbeContent[] {
   return out;
 }
 
+/** The conversation a spec sends, building a threshold's now that the cap has kept it. */
+function messagesOf(spec: Spec): Message[] {
+  const m = spec.messages;
+  if (Array.isArray(m)) return m;
+  return "count" in m ? conversation(m.count) : [{ role: "user", content: longText(m.length) }];
+}
+
 function toProbe(spec: Spec): Probe {
+  const messages = messagesOf(spec);
   // transformers' apply_chat_template always passes tools and documents, None when there are none, and templates
   // written for it test `tools is not none`; leaving them undefined would make ordinary use fail to render.
   const context: Record<string, unknown> = {
@@ -657,7 +667,7 @@ function toProbe(spec: Spec): Probe {
     eos_token: EOS,
     documents: null,
     ...spec.extra,
-    messages: spec.messages,
+    messages,
     add_generation_prompt: spec.gen ?? true,
     tools: spec.tools ?? null,
   };
@@ -667,7 +677,7 @@ function toProbe(spec: Spec): Probe {
     request: { id: spec.label, context, profile: "hf-default", now: spec.now ?? REFERENCE_DATE },
     role: spec.role,
     label: spec.label,
-    contents: contentsOf(spec.messages),
+    contents: contentsOf(messages),
     tools: spec.tools ?? [],
     inputs: [...inputs],
   };
@@ -689,13 +699,22 @@ export interface ProbeOptions {
   reads?: readonly string[];
 }
 
-/** The fixed matrix plus each trigger candidate's probes, deduplicated and capped at MAX_PROBES. */
+/**
+ * The fixed matrix plus each trigger candidate's probes, deduplicated and capped at MAX_PROBES. A threshold's
+ * conversation is built only for a probe the cap keeps, so a template that lists a thousand thresholds costs
+ * the scanner a thousand small specs, not a thousand long contents.
+ */
 export function buildProbes(triggers: readonly TriggerCandidate[], options: ProbeOptions = {}): ProbeMatrix {
   const withTools = options.tools !== false;
   const specs = [...explainSpecs(withTools), ...varySpecs(withTools)];
   const reads = readsOf([...triggers.map((t) => t.input), ...(options.reads ?? [])]);
   let cut = 0;
+  // A candidate alike in everything its probes are built from adds nothing; the first keeps its index.
+  const alike = new Set<string>();
   triggers.forEach((t, i) => {
+    const key = JSON.stringify([t.test, t.value, t.op, t.input, options.text?.slice(t.span.start, t.span.end)]);
+    if (alike.has(key)) return;
+    alike.add(key);
     const r = triggerSpecs(t, i, options.text, reads);
     specs.push(...(withTools ? r.specs : r.specs.map((s) => ({ ...s, tools: undefined }))));
     cut += r.cut;

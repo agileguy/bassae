@@ -666,4 +666,38 @@ describe("the per-template cap", () => {
   test("a stock-sized trigger list fits", () => {
     expect(buildProbes(Array.from({ length: 40 }, (_, i) => trigger(`value ${i}`))).cut).toBe(0);
   });
+
+  // runtime review SF5: a template with 1,101 `|length >` thresholds near 198,000 (trig/len.jinja).
+  const LENGTHS = 1101;
+  const lengthText = Array.from({ length: LENGTHS }, (_, i) => `{%- if messages[-1].content|length > ${198_000 + i} -%}{%- endif -%}`).join("\n");
+  const lengthTriggers = Array.from({ length: LENGTHS }, (_, i) => {
+    const written = `messages[-1].content|length > ${198_000 + i}`;
+    const start = lengthText.indexOf(written);
+    return trigger(198_000 + i, { op: ">", span: { start, end: start + written.length, line: i + 1, col: 1 } });
+  });
+
+  test("thresholds past the cap are counted, not sent; the ones kept are the first, in order, each content as long as it says", () => {
+    const { probes, cut } = buildProbes([...lengthTriggers, lengthTriggers[0]!], { text: lengthText });
+    expect(probes).toHaveLength(MAX_PROBES);
+    const kept = probes.filter((p) => p.label.startsWith("length:"));
+    expect(kept.map((p) => p.label)).toEqual(kept.map((_, i) => `length:${198_001 + i}`));
+    for (const p of kept) expect(p.contents[0]!.text).toHaveLength(Number(p.label.slice("length:".length)));
+    // Every count is past MAX_COUNT; every length the cap leaves out is counted once, the repeated candidate not at all.
+    expect(cut).toBe(LENGTHS + LENGTHS - kept.length);
+  });
+
+  test("the content of a threshold the cap cuts is never built, so 1,101 of them cost the scanner little memory", () => {
+    const script = `
+      const { buildProbes } = await import(${JSON.stringify(join(import.meta.dir, "../../src/diffrender/probes.ts"))});
+      const { text, triggers } = JSON.parse(await Bun.stdin.text());
+      Bun.gc(true);
+      const base = process.resourceUsage().maxRSS;
+      buildProbes(triggers, { text });
+      console.log(JSON.stringify({ base, peak: process.resourceUsage().maxRSS }));`;
+    const run = Bun.spawnSync([process.execPath, "-e", script], { stdin: Buffer.from(JSON.stringify({ text: lengthText, triggers: lengthTriggers })) });
+    expect(run.exitCode).toBe(0);
+    const { base, peak } = JSON.parse(run.stdout.toString()) as { base: number; peak: number };
+    // Building every content and keying on it took about 20 times the baseline; the probes kept need far less.
+    expect(peak / base).toBeLessThan(4);
+  });
 });
