@@ -1266,7 +1266,7 @@ class Interp {
         return { lits: [], data: o.data, truth: o.data, gate };
       case "map": {
         const attr = kwargKonst(argNodes, "attribute");
-        const efs = o.fields ? mapFields(o.fields, elementField) : undefined;
+        const efs = o.fields ? mapFields(o.fields, o.pairs ? pairField : elementField) : undefined;
         if (attr !== undefined && efs) {
           const fs = mapFields(efs, (f) => memberPath(f, attr));
           return { ...keep, lits: seqOf(o).lits, data: clsOf(fs), fields: mapFields(fs, listOf), rest: o.rest };
@@ -1279,7 +1279,8 @@ class Interp {
       case "select":
       case "reject": {
         // Which elements survive depends on the test applied to each one.
-        const efs = o.fields ? mapFields(o.fields, elementField) : undefined;
+        // Pairs are tested as pairs and stay pairs (review round 3, runtime R3-5).
+        const efs = o.fields ? mapFields(o.fields, o.pairs ? pairField : elementField) : undefined;
         let fs: Fields | undefined;
         let testAt: number;
         if (name === "selectattr" || name === "rejectattr") {
@@ -1297,7 +1298,7 @@ class Interp {
         // What the elements are compared with (`select('in', x)`) decides too.
         for (const x of a.slice(testAt + 1)) sel = stronger(sel, x.data);
         const cond = strongest(this.argsCond(a, argNodes), condOf(sel === "presence" ? "none" : sel, this.exprSpan(fnode)));
-        return { ...keep, lits: this.choose(o.lits, cond), keys: o.keys && this.choose(o.keys, cond), fields: o.fields, rest: o.rest, truth: stronger(o.truth, sel) };
+        return { ...keep, lits: this.choose(o.lits, cond), keys: o.keys && this.choose(o.keys, cond), fields: o.fields, rest: o.rest, truth: stronger(o.truth, sel), pairs: o.pairs };
       }
       case "random": {
         this.flagNondet(fnode, "uses the `random` filter");

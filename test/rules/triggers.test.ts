@@ -220,7 +220,8 @@ test("lengthOf, countArith and vocabClass: counts carry their shift and threshol
 
 test("memberPath: a dotted attribute is read part by part, a part of digits indexing a list (review round 2, runtime N7)", () => {
   const tool = elementField(rootField("tools"));
-  expect(memberField(tool, "function.name").cls).toBe("presence");
+  // Looked up whole it falls to the record's other fields, undocumented since review round 3 (runtime S3-2).
+  expect(memberField(tool, "function.name").undocumented).toBe(true);
   expect(memberPath(tool, "function.name").cls).toBe("content");
   expect(memberPath(tool, "function.name")).toBe(memberField(memberField(tool, "function"), "name"));
   const message = elementField(rootField("messages"));

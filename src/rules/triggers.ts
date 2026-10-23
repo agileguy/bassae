@@ -22,8 +22,9 @@
 //                     record, a length or loop threshold further than 1 from
 //                     0, anything serialized from these, and any test at all,
 //                     even `is defined`, on a kwarg no runtime or stock
-//                     template documents or on a message, tool-call or
-//                     content-part field outside the schema
+//                     template documents or on a message, tool-call,
+//                     content-part or tool-definition field outside the
+//                     schema
 //   nondeterministic  reads the clock (strftime_now(), date_string, today) or a
 //                     random choice
 //
@@ -210,16 +211,26 @@ const DOCUMENTS: Field = { cls: "content", kind: "list", elem: ANY_CONTENT };
 
 // A tool definition, in the OpenAI form (`{'type': 'function', 'function':
 // {...}}`) or bare. Its name and description are text the caller wrote; its
-// parameters are schema.
-const FUNCTION_DEF: Field = { cls: "content", kind: "record", fields: { name: TEXT, description: TEXT, parameters: SCHEMA, response: SCHEMA }, other: SCHEMA };
-const TOOL: Field = { cls: "content", kind: "record", fields: { type: TYPE, function: FUNCTION_DEF, name: TEXT, description: TEXT, parameters: SCHEMA, response: SCHEMA }, other: SCHEMA };
+// parameters are schema, and so are Gemma 4's and FunctionGemma's `response`
+// and Qwen3-Coder's `return`. A field outside these lists is undocumented
+// (review round 3, runtime S3-2).
+const FUNCTION_DEF: Field = { cls: "content", kind: "record", fields: { name: TEXT, description: TEXT, parameters: SCHEMA, response: SCHEMA, return: SCHEMA }, other: UNDOCUMENTED };
+const TOOL: Field = {
+  cls: "content",
+  kind: "record",
+  fields: { type: TYPE, function: FUNCTION_DEF, name: TEXT, description: TEXT, parameters: SCHEMA, response: SCHEMA, return: SCHEMA },
+  other: UNDOCUMENTED,
+};
 const TOOLS: Field = { cls: "content", kind: "list", elem: TOOL };
 const BUILTINS: Field = { cls: "content", kind: "list", elem: { cls: "content", kind: "string", vocab: BUILTIN_NAMES } };
 
 // Kwargs with a documented set of values: content, except compared with one of them.
+// tool_choice's form naming one function has only `type` and `function`; the
+// caller sets it per request, so any other field is undocumented (review round
+// 3, runtime S3-2).
 const FLAG: Field = { cls: "content", kind: "any", vocab: FLAGS };
 const EFFORT: Field = { cls: "content", kind: "string", vocab: EFFORTS };
-const TOOL_CHOICE: Field = { cls: "content", kind: "any", vocab: TOOL_CHOICES, fields: { type: TYPE, function: FUNCTION_DEF }, other: SCHEMA };
+const TOOL_CHOICE: Field = { cls: "content", kind: "any", vocab: TOOL_CHOICES, fields: { type: TYPE, function: FUNCTION_DEF }, other: UNDOCUMENTED };
 
 // Counts, one node per offset and threshold class so identity stays stable
 // across passes. An offset past MAX_OFFSET saturates to infinity, so a loop
@@ -309,13 +320,21 @@ export function memberField(f: Field, key: string | undefined): Field {
 /**
  * The schema node an `attribute=` argument reads from one element, split the way jinja2's make_attrgetter splits it:
  * on dots, a part of digits indexing a list. Looked up whole, `function.name` missed and fell to the tool record's
- * `other`, which is presence (review round 2, runtime N7, security N2).
+ * `other`, which was presence (review round 2, runtime N7, security N2).
  */
 export function memberPath(f: Field, attr: string | undefined): Field {
   if (attr === undefined) return memberField(f, undefined);
   let g = f;
-  for (const part of attr.split(".")) g = memberField(g, /^\d+$/.test(part) ? undefined : part);
+  for (const part of attr.split(".")) g = /^\d+$/.test(part) ? indexField(g, String(Number(part))) : memberField(g, part);
   return g;
+}
+
+// Index `i` of `f`. A list with positions (a `.items()` or `|dictsort` pair)
+// has its key at 0, its value at 1 and nothing past them: `attribute='1'`
+// reads each pair's value (review round 3, runtime R3-5).
+function indexField(f: Field, i: string): Field {
+  if (f.kind === "list" && f.fields) return Object.hasOwn(f.fields, i) ? f.fields[i]! : PRESENCE;
+  return memberField(f, undefined);
 }
 
 /** A set of schema nodes, by identity: a variable assigned from two different fields is either one. Sets only grow under join, and the nodes are finite, so the fixpoint converges. */
@@ -606,12 +625,21 @@ function restNumsOf(v: Val): number[] | undefined {
   return k === undefined ? undefined : [k];
 }
 
+// Past this many the numbers are not kept, which judges them far: content.
+// Kept whole, k joins cost k² (review round 3, runtime R3-2).
+const MAX_REST_NUMS = 64;
+
 /** The numbers either of two values may be besides their fields, when every one is known (Decisions 23:40). */
 export function eitherNums(a: Val, b: Val): number[] | undefined {
   const x = restNumsOf(a);
   const y = restNumsOf(b);
   if (!x || !y || x.length + y.length === 0) return undefined;
-  return [...new Set([...x, ...y])].sort((p, q) => p - q);
+  // The same array when one side adds nothing, so a join in a pass that
+  // changes nothing copies nothing.
+  if (y.every((k) => x.includes(k))) return x;
+  if (x.every((k) => y.includes(k))) return y;
+  const out = [...new Set([...x, ...y])].sort((p, q) => p - q);
+  return out.length > MAX_REST_NUMS ? undefined : out;
 }
 
 // A test the fields alone pass as `cls`, on a value that may be something
