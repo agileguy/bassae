@@ -1,6 +1,6 @@
 // Test-only stand-in for the render worker that misbehaves on purpose, so the tests can check
 // that the parent enforces the caps itself instead of trusting the worker.
-// Usage: bun rogue-worker.ts <stall|wrong-id|claim-timeout|huge|exit|ffi-exit|noisy|skip-ready|fat-error|wide-error|fat-parsed|xcpu|lagging|late|slow-claim|spent|spent-early>
+// Usage: bun rogue-worker.ts <stall|wrong-id|claim-timeout|huge|exit|ffi-exit|noisy|skip-ready|fat-error|wide-error|fat-parsed|xcpu|lagging|late|slow-claim|spent|spent-early|linger <code>>
 
 import { dlopen, FFIType } from "bun:ffi";
 import { encode, SPENT_EXIT_CODE, type RequestMessage } from "../../src/sandbox/protocol.ts";
@@ -92,5 +92,13 @@ switch (mode) {
   case "spent-early":
     // Ends itself as if spent, though it has answered nothing.
     process.exit(SPENT_EXIT_CODE);
+    break;
+  case "linger":
+    // Answers its first request, then takes 300 ms to exit with the given code, as a big worker can take a while to
+    // go. It holds 128 MiB more meanwhile, so a test's memory reader can tell it has answered.
+    await answers(ids[0]!, `linger ${ids.length}`);
+    Object.assign(globalThis, { held: Buffer.alloc(128 * 2 ** 20, 1) });
+    await Bun.sleep(300);
+    process.exit(Number(process.argv[3]));
     break;
 }

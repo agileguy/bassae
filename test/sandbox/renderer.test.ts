@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRenderer, sandboxAvailable } from "../../src/sandbox/index.ts";
 import { darwinRss, linuxTreeRss, runWorker } from "../../src/sandbox/launcher.ts";
-import { MESSAGE_KEEP, TRUNCATED } from "../../src/sandbox/protocol.ts";
+import { MEMORY_EXIT_CODE, MESSAGE_KEEP, SPENT_EXIT_CODE, TIMEOUT_EXIT_CODE, TRUNCATED } from "../../src/sandbox/protocol.ts";
 import type { RenderFailure, RenderRequest, RenderResult } from "../../src/types.ts";
 
 const status = await sandboxAvailable();
@@ -417,10 +417,11 @@ describe.skipIf(!live)("the memory cap fails closed (ISC-43)", () => {
           return reads.get(pid)! > 30 ? undefined : 1;
         },
       });
-      // The cap itself is out of reach, so only the unreadable samples can end this render early.
+      // The cap itself is out of reach, so only the unreadable samples can end this render early. They must fail for a
+      // second first, since a worker on its way out cannot be read either: about 1.3 s in all, far short of the timeout.
       const [results, ms] = await timed(() => blind.renderBatch(SPIN, [req("a")], { timeoutMs: 10_000, maxRssBytes: 2 ** 34 }));
       expect(results).toEqual([failed("a", "memory")]);
-      expect(ms).toBeLessThan(2000);
+      expect(ms).toBeLessThan(3000);
     },
     SLOW,
   );
@@ -586,6 +587,34 @@ describe.skipIf(!live)("the parent does not trust the worker", () => {
   test("a worker that ends itself before answering anything fails the in-flight request", async () => {
     expect(await rogue("spent-early").renderBatch("", two)).toEqual([failed("a", "render_error"), failed("b", "render_error")]);
   });
+
+  // A worker on its way out can no longer be read, and stays so until it has gone, which for a big one under load can
+  // be longer than a few polls (review round 3, MUST FIX A). Each of these workers takes 300 ms to exit after its
+  // answer, holding 128 MiB meanwhile, which this reader takes as unreadable. How it exited decides, never the reads.
+  const readRss = process.platform === "darwin" ? darwinRss : linuxTreeRss;
+  const lingering = (code: number) =>
+    createRenderer({
+      command: [BUN, ROGUE, "linger", String(code)],
+      readable: [ROGUE],
+      residentMemory: (pid) => {
+        const bytes = readRss(pid);
+        return bytes !== undefined && bytes > 96 * 2 ** 20 ? undefined : bytes;
+      },
+    });
+  for (const [code, after] of [
+    [SPENT_EXIT_CODE, [ok("b", "linger 2"), ok("c", "linger 1")]],
+    [MEMORY_EXIT_CODE, [{ id: "b", ok: false, failure: "memory", message: expect.stringContaining("by its own reading") }, skipped("c", "memory")]],
+    [TIMEOUT_EXIT_CODE, [failed("b", "timeout"), skipped("c", "timeout")]],
+    [7, [failed("b", "render_error"), ok("c", "linger 1")]],
+  ] as const) {
+    test(
+      `a worker that cannot be read while it exits ${code} is judged by its exit code, not as unreadable`,
+      async () => {
+        expect(await lingering(code).renderBatch("", [req("a"), req("b"), req("c")])).toEqual([ok("a", "linger 3"), ...after]);
+      },
+      SLOW,
+    );
+  }
 
   test("a worker's exit message keeps its stderr but not the macOS xcode-select line its FFI load provokes", async () => {
     expect(await rogue("ffi-exit").renderBatch("", [req("a")])).toEqual([

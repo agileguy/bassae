@@ -79,8 +79,11 @@ const GRACE_MS = 1000;
 const CREDIT_MS = 50;
 // How long a worker this side has killed gets for its last lines to be read, before the breach is judged without them.
 const DRAIN_MS = 1000;
-// Consecutive memory samples that may fail before the worker counts as over the cap.
-const RSS_MISSES = 3;
+// How long the worker's memory may go unread, by the backstop clock, before it counts as over the cap. A worker that
+// has begun to exit cannot be read either, and a big one can take a while to go before this side hears that it has;
+// the exit path then judges it by how it ended. That took up to 19 ms with four scans recycling workers at once, and
+// longer than three 10 ms polls on a busier machine.
+const BLIND_MS = 1000;
 const STDERR_KEEP = 2048;
 
 const sbplString = (s: string) => `"${s.replace(/[\\"]/g, "\\$&")}"`;
@@ -362,7 +365,8 @@ export async function runWorker(
     let parsed = false;
     let settled = false;
     let ended = false;
-    let misses = 0;
+    // Awake time the worker's memory has gone unread, by the backstop clock.
+    let blind = 0;
     let poll: Timer | undefined;
     let drain: Timer | undefined;
     // Awake time since the worker's last line, by the backstop clock.
@@ -443,7 +447,8 @@ export async function runWorker(
 
     poll = setInterval(() => {
       const now = performance.now();
-      waited += Math.min(now - tick, CREDIT_MS);
+      const awake = Math.min(now - tick, CREDIT_MS);
+      waited += awake;
       tick = now;
       if (!ready && waited > STARTUP_MS) return settle(`worker did not start within ${STARTUP_MS}ms`);
       if (ready && waited > limits.timeoutMs + GRACE_MS) {
@@ -457,10 +462,10 @@ export async function runWorker(
       }
       if (bytes === undefined) {
         // Once stdout has ended the worker is on its way out, and the exit path below says why.
-        if (!ended && ++misses >= RSS_MISSES) breach("memory", `worker resident memory could not be read ${RSS_MISSES} times in a row`);
+        if (!ended && (blind += awake) >= BLIND_MS) breach("memory", `worker resident memory could not be read for ${BLIND_MS}ms`);
         return;
       }
-      misses = 0;
+      blind = 0;
       if (bytes > limits.maxRssBytes) breach("memory", `worker resident memory ${mib(bytes)} exceeded the ${mib(limits.maxRssBytes)} cap`);
     }, POLL_MS);
     // A broken pipe reads as end of stream; the exit path then reports it.
