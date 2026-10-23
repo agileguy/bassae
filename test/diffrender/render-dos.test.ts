@@ -6,9 +6,10 @@ import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import { diffRender, diffRenderWith, OUTPUT_BUDGET } from "../../src/diffrender/index.ts";
 import { buildProbes } from "../../src/diffrender/probes.ts";
+import { analyzeInjection, buildScaffolding } from "../../src/rules/injection.ts";
 import { createRenderer, sandboxAvailable } from "../../src/sandbox/index.ts";
 import { makeTemplateFromString } from "../../src/template.ts";
-import { CAP_FAILURES, DEFAULT_RENDER_LIMITS, type DiffRenderInput, type IntegrityIssue, type RenderRequest, type RenderResult, type Renderer } from "../../src/types.ts";
+import { CAP_FAILURES, DEFAULT_RENDER_LIMITS, type DiffRenderInput, type IntegrityIssue, type ModelRecord, type RenderRequest, type RenderResult, type Renderer } from "../../src/types.ts";
 
 const FIXTURES = join(import.meta.dir, "fixtures", "probes");
 const fixture = (name: string) => Bun.file(join(FIXTURES, `${name}.jinja`)).text();
@@ -180,6 +181,21 @@ describe("bounded cost (Decisions 02:58)", () => {
     expect(gaps(r)).toEqual([expect.stringMatching(/^the 32 MiB output budget was spent, so \d+ of 26 probes were not rendered under both profiles$/)]);
   });
 
+  test("a spent budget with probes cut: the gap counts against the same total as the probe counts, and its numbers are true", async () => {
+    const triggers = Array.from({ length: 200 }, (_, i) => ({ value: `secret phrase ${i}`, op: "==" as const, test: "content" as const, span: { start: 0, end: 0, line: 1, col: 1 } }));
+    const { probes, cut } = buildProbes(triggers, { tools: false });
+    const cap = DEFAULT_RENDER_LIMITS.maxOutputBytes;
+    const fill = { "hf-default": "h".repeat(cap - 64), "jinja2-globals": "j".repeat(cap - 64) };
+    const { renderer, batches } = scripted((req) => ({ id: req.id, ok: true, output: fill[req.profile] }));
+    const r = await diffRender({ ...input("{{ x }}"), triggers }, renderer, []);
+    const profiles = new Map<string, number>();
+    for (const req of batches.flat()) profiles.set(req.id.split("/")[0]!, (profiles.get(req.id.split("/")[0]!) ?? 0) + 1);
+    const both = [...profiles.values()].filter((n) => n === 2).length;
+    expect(cut).toBeGreaterThan(0);
+    expect(r.probes.total).toBe(probes.length + cut);
+    expect(gaps(r)).toEqual([`the 32 MiB output budget was spent, so ${probes.length - both} of ${r.probes.total} probes were not rendered under both profiles, and ${cut} more were cut before rendering`]);
+  });
+
   test("an output the two profiles share is held once, so a template within the budget renders whole", async () => {
     // 26 probes of 1 MiB, the same under both profiles: 26 MiB held once, 52 MiB if held twice.
     const out = "s".repeat(DEFAULT_RENDER_LIMITS.maxOutputBytes - 64);
@@ -305,4 +321,29 @@ describe.skipIf(!status.available)("render_dos through the sandboxed renderer", 
       SLOW,
     );
   }
+
+  test(
+    "big-output: 990 KB renders spend the budget, and the gap counts against the same total as the probe counts",
+    async () => {
+      const text = await fixture("big-output");
+      const template = makeTemplateFromString({ kind: "bare", path: "/t.jinja", realPath: "/t.jinja", name: "default" }, text);
+      const a = analyzeInjection({ template, scaffolding: buildScaffolding({ specialTokens: [] } as unknown as ModelRecord), knownGood: false });
+      const { probes, cut } = buildProbes(a.triggers, { tools: false, text, reads: a.reads });
+      const ok = new Map<string, number>();
+      const counting: Renderer = {
+        async renderBatch(t, requests) {
+          const results = await renderer.renderBatch(t, requests);
+          for (const res of results) if (res.ok) ok.set(res.id.split("/")[0]!, (ok.get(res.id.split("/")[0]!) ?? 0) + 1);
+          return results;
+        },
+      };
+      const r = await diffRender({ template, injected: a.injected, triggers: a.triggers, reads: a.reads }, counting, []);
+      const both = [...ok.values()].filter((n) => n === 2).length;
+      expect(cut).toBeGreaterThan(0);
+      expect(r.probes.total).toBe(probes.length + cut);
+      expect(r.complete).toBe(false);
+      expect(r.gaps).toEqual([`the 32 MiB output budget was spent, so ${probes.length - both} of ${r.probes.total} probes were not rendered under both profiles, and ${cut} more were cut before rendering`]);
+    },
+    SLOW,
+  );
 });

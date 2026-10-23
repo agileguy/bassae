@@ -279,8 +279,10 @@ async function run(input: DiffRenderInput, renderer: Renderer, transforms: reado
 
   const gaps: string[] = [];
   if (spent) {
+    // Counted against the same total as the probe counts, which holds the probes cut before rendering too.
     const short = outcomes.filter((o) => PROFILES.some((p) => !o[p])).length;
-    gaps.push(`the ${OUTPUT_BUDGET / 2 ** 20} MiB output budget was spent, so ${short} of ${probes.length} probes were not rendered under both profiles`);
+    const others = cut > 0 ? `, and ${cut} more were cut before rendering` : "";
+    gaps.push(`the ${OUTPUT_BUDGET / 2 ** 20} MiB output budget was spent, so ${short} of ${total} probes were not rendered under both profiles${others}`);
   }
 
   const complete = failed === 0 && !spent && !(explainCount > 0 && explainRefused === explainCount) && internal === undefined;
