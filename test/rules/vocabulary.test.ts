@@ -167,3 +167,19 @@ test("ISC-18: the gpt-oss tool-schema type-length fallback stays presence", () =
   expect(cls(src)).toBe("presence");
   expect(highs(src)).toEqual([]);
 });
+
+// ---- serialization reads every field ----
+
+test("ISC-18: a test on serialized messages, documents or tools reads their content", () => {
+  for (const s of ["messages|tojson", "messages|string", "documents|tojson", "tools|tojson", "messages[0]|tojson", "m.tool_calls|tojson", "messages|pprint", "'' ~ messages", "messages|join(',')"]) {
+    const src = `{% for m in messages %}{% if 'xyzzy' in ${s} %}${INJ}{% endif %}{% endfor %}`;
+    expect({ s, highs: highs(src) }).toEqual({ s, highs: ["content_trigger"] });
+  }
+  expect(highs(`{% for ch in messages|string %}{% if ch == 'x' %}${INJ}{% endif %}{% endfor %}`)).toEqual(["content_trigger"]);
+  expect(highs(`{% set s = messages|tojson %}{% if s.find('xyzzy') > 0 %}${INJ}{% endif %}`)).toEqual(["content_trigger"]);
+});
+
+test("ISC-18: a serialized parameter schema or role list is still a presence test", () => {
+  expect(cls(`{% for t in tools %}{% if 'object' in t.function.parameters|tojson %}${INJ}{% endif %}{% endfor %}`)).toBe("presence");
+  expect(cls(`{% if 'tool' in messages|map(attribute='role')|list|tojson %}${INJ}{% endif %}`)).toBe("presence");
+});

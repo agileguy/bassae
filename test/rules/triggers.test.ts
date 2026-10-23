@@ -161,6 +161,11 @@ test("classifyTest: the length of schema is not a count", () => {
   expectAll("presence", ["tool.parameters.required|length > 5", "tool.function.parameters.type|length > 1"]);
 });
 
+test("classifyTest: serializing conversation data reads every field of it", () => {
+  expectAll("content", ["'x' in messages|tojson", "'x' in messages|string", "'x' in documents|tojson", "'x' in tools|tojson", "'x' in tool_calls|tojson"]);
+  expectAll("presence", ["'object' in tool.parameters|tojson"]);
+});
+
 test("classifyTest: the gate that chose a value is part of every test on it", () => {
   const gated: Val = { lits: [], data: "none", truth: "none", konst: 0, gate: { test: "content", span: SPAN } };
   expectAll("content", ["k", "loop.index0 > k", "message.role == k", "message.type == k"], { k: gated });
