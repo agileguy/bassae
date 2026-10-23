@@ -237,11 +237,12 @@ test("ISC-18: selectattr on a type in its vocabulary stays presence; another val
   for (const f of ["selectattr('type', 'equalto', 'image')", "rejectattr('type', 'equalto', 'text')", "selectattr('type', '==', 'image')", "selectattr('type', 'in', ['image', 'video'])", "selectattr('type', 'defined')"]) {
     expect({ f, cls: cls(src(f)) }).toEqual({ f, cls: "presence" });
   }
-  for (const f of ["selectattr('type', 'equalto', 'zz-trigger')", "selectattr('text', 'equalto', 'xyzzy')", "selectattr('type', 'in', ['image', 'zz-trigger'])"]) {
+  for (const f of ["selectattr('type', 'equalto', 'xyzzy')", "selectattr('text', 'equalto', 'xyzzy')", "selectattr('type', 'in', ['image', 'zz-trigger'])", "rejectattr('type', 'equalto', 'xyzzy')"]) {
     expect({ f, cls: cls(src(f)), highs: highs(src(f)) }).toEqual({ f, cls: "content", highs: ["content_trigger"] });
   }
   expect(cls(`{% for m in messages|selectattr('role', 'equalto', 'user') %}${INJ}{% endfor %}`)).toBe("presence");
-  expect(cls(`{% for m in messages|selectattr('name', 'equalto', 'sudo') %}${INJ}{% endfor %}`)).toBe("content");
+  const sudo = `{% for m in messages|selectattr('name', 'equalto', 'sudo') %}${INJ}{% endfor %}`;
+  expect({ cls: cls(sudo), highs: highs(sudo) }).toEqual({ cls: "content", highs: ["content_trigger"] });
 });
 
 // Llama 3.2 Vision and Mistral-style templates count a message's image parts.
