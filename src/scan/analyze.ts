@@ -152,6 +152,7 @@ async function analyze(ctx: AnalysisContext, baseline: Baseline, env: AnalyzeEnv
         const p = r.probes;
         gaps.push(`differential rendering incomplete: ${p.rendered} of ${p.total} probes rendered, ${p.refused} refused, ${p.failed} failed`);
       }
+      for (const g of r.gaps ?? []) gaps.push(`differential rendering incomplete: ${g}`);
     } catch (e) {
       // diffRender never throws by contract; a hook that does costs this template its coverage, not the scan.
       pushAll(findings, [{ ruleId: "scanner_error", severity: "MEDIUM", message: `differential rendering failed: ${errorText(e)}`, ...base }]);
