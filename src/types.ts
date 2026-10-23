@@ -241,6 +241,9 @@ export interface RenderRequest {
  */
 export type RenderFailure = "timeout" | "memory" | "output_limit" | "stack" | "parse" | "render_error" | "sandbox" | "skipped";
 
+/** The failures that breach a cap: after the first, nothing more renders for that template (Decisions 17:35). */
+export const CAP_FAILURES: ReadonlySet<RenderFailure> = new Set<RenderFailure>(["timeout", "memory", "output_limit", "stack"]);
+
 export type RenderResult =
   | { id: string; ok: true; output: string }
   | { id: string; ok: false; failure: RenderFailure; message: string };
@@ -355,6 +358,8 @@ export interface DiffRenderInput {
   triggers: readonly TriggerCandidate[];
   /** From the injection rules: a key a probe adds holds what the template reads under it (ISC-22). */
   reads?: readonly string[];
+  /** The template's scaffolding (AnalysisContext.scaffolding): content integrity takes a turn's role only from a role word right after a turn-opening token the model declares, never from the template's inner tags. */
+  scaffolding?: ReadonlySet<string>;
 }
 
 export interface DiffRenderResult extends RuleResult {

@@ -145,7 +145,7 @@ async function analyze(ctx: AnalysisContext, baseline: Baseline, env: AnalyzeEnv
     gaps.push(`renderer unavailable: ${env.unavailable ?? "none supplied"}`);
   } else {
     try {
-      const r = await env.diffRender({ template: t, injected: injection.injected, triggers: injection.triggers, reads: injection.reads }, env.renderer, env.transforms);
+      const r = await env.diffRender({ template: t, injected: injection.injected, triggers: injection.triggers, reads: injection.reads, scaffolding: ctx.scaffolding }, env.renderer, env.transforms);
       pushAll(findings, r.findings);
       probes = r.probes;
       if (!r.complete) {

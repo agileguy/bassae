@@ -135,7 +135,8 @@ function longestPrefix(output: string, text: string, from: number): number {
 const label = (c: ProbeContent, i: number) => `${c.role} content ${i} (message ${c.message})`;
 
 /** The content_integrity issues in one rendered probe's output. Empty when every content arrived intact. */
-export function checkContent(probe: Probe, output: string, transforms: readonly Transform[]): IntegrityIssue[] {
+// `scaffolding` is the template's scaffolding set: the turn-opening tokens its model declares are among it.
+export function checkContent(probe: Probe, output: string, transforms: readonly Transform[], _scaffolding: ReadonlySet<string> = new Set()): IntegrityIssue[] {
   const allowed = transforms.flatMap((t) => (CONTENT_MATCHERS[t.id] ? [CONTENT_MATCHERS[t.id]!] : []));
   const context = (probe.request.context ?? {}) as Record<string, unknown>;
   const inputs: ScanInput[] = probe.contents.map((c) => ({ role: c.role, message: c.message, field: "content", text: c.text }));
