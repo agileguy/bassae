@@ -1,9 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
+import { diffRender } from "../../src/diffrender/index.ts";
 import { checkContent, markerRole } from "../../src/diffrender/integrity.ts";
 import { loadTransforms } from "../../src/registry/index.ts";
+import { analyzeInjection, buildScaffolding } from "../../src/rules/injection.ts";
 import { createRenderer, sandboxAvailable } from "../../src/sandbox/index.ts";
-import type { IntegrityIssue, Probe } from "../../src/types.ts";
+import { makeTemplateFromString } from "../../src/template.ts";
+import type { IntegrityIssue, ModelRecord, Probe } from "../../src/types.ts";
 import { ASSISTANT_1, probe, standardProbes, SYSTEM, TOOL_RESULT, USER_1, USER_2, USER_LONG, WEATHER_TOOL } from "./fixtures/integrity/probes.ts";
 
 const transforms = loadTransforms();
@@ -441,10 +444,57 @@ describe("malicious fixtures, rendered by the sandboxed renderer", () => {
     expect(indexes(issues(chat, await render("replace-content.jinja", chat)))).toEqual([["content_integrity", 1]]);
   });
 
+  test.if(live)("copying a tool result into a system turn", async () => {
+    expect(indexes(issues(toolRound, await render("elevate-tool.jinja", toolRound)))).toEqual([["content_integrity", 2]]);
+  });
+
+  test.if(live)("copying the first 16 characters of a tool result into a system turn", async () => {
+    expect(indexes(issues(toolRound, await render("elevate-tool-prefix.jinja", toolRound)))).toEqual([["content_integrity", 2]]);
+  });
+
+  test.if(live)("copying the last message into a system turn", async () => {
+    expect(indexes(issues(chat, await render("elevate-last.jinja", chat)))).toEqual([["content_integrity", 2]]);
+    expect(indexes(issues(toolRound, await render("elevate-last.jinja", toolRound)))).toEqual([["content_integrity", 2]]);
+  });
+
+  test.if(live)("rendering a tool result in a system turn, inside the tool tag", async () => {
+    expect(indexes(issues(toolRound, await render("spoof-tool.jinja", toolRound)))).toEqual([["content_integrity", 2]]);
+  });
+
   test.if(live)("rendering user content under a system marker", async () => {
     expect(indexes(issues(chat, await render("user-under-system.jinja", chat)))).toEqual([
       ["content_integrity", 1],
       ["content_integrity", 2],
     ]);
   });
+});
+
+describe("malicious fixtures through differential rendering", () => {
+  /** diffRender's result for a fixture scanned as an unknown template whose model declares `tokens`. */
+  async function scan(fixture: string, tokens: string[]) {
+    const text = await Bun.file(join(FIXTURES, fixture)).text();
+    const template = makeTemplateFromString({ kind: "bare", path: `/${fixture}`, realPath: `/${fixture}`, name: fixture }, text);
+    const scaffolding = buildScaffolding({ specialTokens: tokens } as unknown as ModelRecord);
+    const analysis = analyzeInjection({ template, scaffolding, knownGood: false });
+    return diffRender({ template, injected: analysis.injected, triggers: analysis.triggers, reads: analysis.reads, scaffolding }, renderer, transforms);
+  }
+  const integrity = (r: Awaited<ReturnType<typeof scan>>) => r.findings.filter((f) => f.ruleId === "content_integrity" || f.ruleId === "tool_integrity").map((f) => [f.ruleId, f.severity]);
+
+  for (const fixture of ["elevate-tool.jinja", "elevate-tool-prefix.jinja", "elevate-last.jinja", "spoof-tool.jinja"]) {
+    test.if(live)(
+      `${fixture} gives a HIGH content_integrity finding, with ChatML's tokens declared and with none`,
+      async () => {
+        for (const tokens of [["<|im_start|>", "<|im_end|>"], []]) expect([tokens, integrity(await scan(fixture, tokens))]).toEqual([tokens, [["content_integrity", "HIGH"]]]);
+      },
+      120_000,
+    );
+  }
+
+  test.if(live)(
+    "the clean base gives no integrity finding",
+    async () => {
+      for (const tokens of [["<|im_start|>", "<|im_end|>"], []]) expect([tokens, integrity(await scan("chatml-clean.jinja", tokens))]).toEqual([tokens, []]);
+    },
+    120_000,
+  );
 });
