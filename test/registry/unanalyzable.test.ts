@@ -39,3 +39,19 @@ test("the exemption is for the exact bytes: an edited copy or a whitespace varia
   expect(registry.match(variant).kind).toBe("whitespace");
   expect(highUnanalyzable(variant, registry.match(variant).kind === "exact").length).toBeGreaterThan(0);
 });
+
+// ISC-12.1 follows the renderer: every pinned stock template, Gemma 4's map('upper') and Qwen3-Coder's
+// reject("in", ...) among them, is fully analyzable on its own merits, with no registry exemption.
+test("ISC-12.1: every checked-in stock template is complete for code execution without the registry", () => {
+  const stock = loadRegistry();
+  const seen = new Set<string>();
+  for (const { entry, text } of stock.entries) {
+    if (seen.has(entry.sha256)) continue;
+    seen.add(entry.sha256);
+    const t = makeTemplateFromString({ ...source, path: entry.path, realPath: entry.path }, text);
+    const r = analyzeCodeExec({ template: t, scaffolding: new Set(), knownGood: false });
+    const gaps = r.findings.filter((f) => f.ruleId === "unanalyzable").map((f) => f.message);
+    expect({ sha256: entry.sha256, complete: r.complete, gaps }).toEqual({ sha256: entry.sha256, complete: true, gaps: [] });
+  }
+  expect(seen.size).toBeGreaterThanOrEqual(21);
+});

@@ -8,7 +8,7 @@
 // size cap there is no AST, token array or line map, and only the raw-text
 // forms of the text rules run.
 
-import type { AnalysisContext, Finding, FindingBase, InjectedText, KnownGoodTemplate, ModelRecord, RuleResult } from "../types.ts";
+import type { AnalysisContext, Finding, FindingBase, InjectedText, InjectionAnalysis, KnownGoodTemplate, ModelRecord, RuleResult, TriggerCandidate } from "../types.ts";
 import { parseTemplate, WHOLE_TEMPLATE } from "../parse/parse.ts";
 import { preLex } from "../parse/prelexer.ts";
 import { extract, rawItems, Scaffold } from "./injected.ts";
@@ -188,12 +188,31 @@ export function extractInjectedText(ctx: AnalysisContext): InjectedText[] {
   return extract(outcome, ctx.template.text, scaffolding).items;
 }
 
-/** unbaselined_text, prefill_injection, content_trigger, nondeterministic_trigger, url_in_text, encoded_blob and invisible_char. The raw-text forms of ISC-19 to ISC-21 still run when the template does not parse (ISC-12). */
-export function analyzeInjection(ctx: AnalysisContext): RuleResult {
+/**
+ * unbaselined_text, prefill_injection, content_trigger, nondeterministic_trigger, url_in_text, encoded_blob and invisible_char,
+ * with the injected text itself (ISC-17) and every trigger candidate (ISC-22.1). The raw-text forms of ISC-19 to ISC-21 still
+ * run when the template does not parse (ISC-12).
+ */
+export function analyzeInjection(ctx: AnalysisContext): InjectionAnalysis {
+  // The text and the candidates come from the walk the findings do: the
+  // template is parsed and interpreted once (ISC-17, ISC-22.1).
+  const walk: Walk = {};
+  const r = analyzeRules(ctx, walk);
+  return { ...r, injected: walk.injected ?? [], triggers: walk.triggers ?? [], reads: walk.reads ?? [] };
+}
+
+/** What the rules' walk found besides findings, for the caller to keep. */
+interface Walk {
+  injected?: InjectedText[];
+  triggers?: TriggerCandidate[];
+  reads?: string[];
+}
+
+function analyzeRules(ctx: AnalysisContext, walk: Walk = {}): RuleResult {
   const t = ctx.template;
   const base: FindingBase = { file: t.source.path, templateName: t.source.name, templateSha256: t.sha256 };
   try {
-    return analyze(ctx, base);
+    return analyze(ctx, base, walk);
   } catch (e) {
     // An internal failure is reported, never thrown, and the template is
     // incomplete: we cannot vouch for text we did not finish reading.
@@ -205,7 +224,7 @@ export function analyzeInjection(ctx: AnalysisContext): RuleResult {
   }
 }
 
-function analyze(ctx: AnalysisContext, base: FindingBase): RuleResult {
+function analyze(ctx: AnalysisContext, base: FindingBase, walk: Walk): RuleResult {
   const t = ctx.template;
   const outcome = parseTemplate(t.text);
   const findings: Finding[] = [];
@@ -213,6 +232,9 @@ function analyze(ctx: AnalysisContext, base: FindingBase): RuleResult {
 
   if (outcome.program) {
     const ex = extract(outcome, t.text, scaffolding);
+    walk.injected = ex.items;
+    walk.triggers = ex.triggers;
+    walk.reads = ex.reads;
     pushAll(findings, itemFindings(ex.items, ctx, base, t.text));
     for (const n of ex.nondeterministic) {
       pushAll(findings, [{ ruleId: "nondeterministic_trigger", severity: "HIGH", message: n.message, ...base, span: n.span, excerpt: clip(t.text.slice(n.span.start, n.span.end)) }]);
@@ -229,7 +251,9 @@ function analyze(ctx: AnalysisContext, base: FindingBase): RuleResult {
   pushAll(findings, findUrlsRaw(outcome, t.text, base, baselinedLiteral(ctx)));
   pushAll(findings, findEncodedBlobs(outcome, t.text, base, baselinedLiteral(ctx)));
   pushAll(findings, findInvisibleChars(t.text, base, outcome));
-  if (!outcome.oversized) pushAll(findings, itemFindings(rawItems(outcome, new Scaffold(scaffolding)), ctx, base, t.text));
+  const raw = rawItems(outcome, new Scaffold(scaffolding));
+  walk.injected = raw;
+  if (!outcome.oversized) pushAll(findings, itemFindings(raw, ctx, base, t.text));
   return { findings: capPerRule(dedupe(findings), base), complete: false };
 }
 

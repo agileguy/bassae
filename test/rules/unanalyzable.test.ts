@@ -35,6 +35,38 @@ test("ISC-12: raw-text rules still fire on an unparseable template", () => {
   expect(r.complete).toBe(false);
 });
 
+// The library's own text, an internal TypeError among it, goes to detail.raw; the message says what is wrong.
+test("ISC-12: a parse failure says what is wrong in plain words and keeps the library's text in detail.raw", () => {
+  const cases: [string, string, RegExp][] = [
+    ["{% if x %}a", "it ends inside a block that is never closed: an {% if %}, {% for %}, {% macro %} or other block has no end tag", /^TypeError: /],
+    ["{% for m in messages %}{{ m }}", "it ends inside a block that is never closed: an {% if %}, {% for %}, {% macro %} or other block has no end tag", /^TypeError: /],
+    ["{{ 'abc }}", "it ends inside an unclosed string, '{{' or '{%'", /^SyntaxError: Unexpected end of input$/],
+    ["{# note", "a '{#' comment is never closed", /^SyntaxError: Missing end of comment tag$/],
+    ["{{ }}", "an expression is missing or incomplete before '}}'", /^SyntaxError: Unexpected token: CloseExpression$/],
+    ["{{ x | }}", "an expression is missing or incomplete before '}}'", /CloseExpression/],
+    ["{{ a b }}", "expected '}}' but found a name", /Identifier !== CloseExpression/],
+    ["{{ (a }}", "expected ')' but found '}}'", /CloseExpression !== CloseParen/],
+    ["{% 1 %}", "a '{%' tag must start with a statement name, not a number", /Unknown statement, got NumericLiteral/],
+    ["{% endif %}", "{% endif %} has no open block to close or continue", /Unknown statement type: endif/],
+    ["{% with a = 1 %}{% endwith %}", "{% with %} is a statement it does not support", /Unknown statement type: with/],
+    ["{{ a ; b }}", "unexpected character ';'", /Unexpected character: ;/],
+    ["{% for 1 in xs %}{% endfor %}", "a {% for %} loop variable must be a name or a tuple of names", /got IntegerLiteral instead/],
+  ];
+  for (const [src, problem, raw] of cases) {
+    const [f, ...rest] = unanalyzable(src);
+    expect({ src, message: f?.message, rest }).toEqual({ src, message: `@huggingface/jinja cannot parse this template: ${problem}`, rest: [] });
+    expect({ src, raw: String(f!.detail?.raw) }).toEqual({ src, raw: expect.stringMatching(raw) });
+    expect(f!.message).not.toMatch(/Error|undefined is not|Cannot read|tokens\[|CloseExpression|Identifier|NumericLiteral/);
+  }
+});
+
+test("ISC-12: a name from the template is clipped in a parse failure's message and raw text", () => {
+  const [f] = unanalyzable(`{% ${"x".repeat(100_000)} %}`);
+  expect(f!.message.length).toBeLessThan(200);
+  expect(f!.message).toContain("is a statement it does not support");
+  expect(String(f!.detail?.raw).length).toBeLessThan(600);
+});
+
 // ISC-12 — known-good exempts the unanalyzable finding only.
 test("ISC-12: a known-good unparseable template raises no unanalyzable finding", () => {
   const r = scanFile("jinja2-only/with.jinja", true);
@@ -65,25 +97,65 @@ test("ISC-12.2: jinja2-valid constructs the library rejects all report HIGH", ()
 
 // A benign unimplemented data filter is MEDIUM, and the template is still incomplete.
 test("a benign unimplemented filter is MEDIUM and marks the template incomplete", () => {
-  const r = scan("{{ keys | reject('in', handled) }}");
+  const r = scan("{{ prices | sum }}");
   expect(r.findings.some((f) => f.ruleId === "unanalyzable" && f.severity === "MEDIUM")).toBe(true);
   expect(r.findings.some((f) => f.severity === "HIGH")).toBe(false);
   expect(r.complete).toBe(false);
 });
 
-// map('upper') is the gemma-4 stock pattern: MEDIUM, naming the positional form,
-// with the span and excerpt on the filter name so Phase 3 can locate it.
-test("map with a positional filter name is MEDIUM, names the form, and points at 'map'", () => {
-  const src = "{{ (v | map('upper') | list) }}";
-  const r = scan(src);
-  const f = r.findings.find((x) => x.ruleId === "unanalyzable");
-  expect(f?.severity).toBe("MEDIUM");
-  expect(f?.message).toContain("'map' (positional filter argument)");
-  expect(f?.excerpt).toBe("map");
-  expect(f?.span?.start).toBe(src.indexOf("map"));
-  expect(r.complete).toBe(false);
-  // The implemented attribute= form is not a finding.
-  expect(scan("{{ v | map(attribute='name') | list }}").findings).toHaveLength(0);
+// The render worker runs these (src/sandbox/polyfills.ts), so they are neither findings nor gaps (ISC-12.1):
+// map('upper') is the Gemma 4 stock pattern and reject("in", ...) the Qwen3-Coder one.
+test("ISC-12.1: constructs the render worker polyfills are not findings", () => {
+  for (const src of [
+    "{{ (v | map('upper') | list) }}",
+    "{% for k in fields.keys() | reject(\"in\", handled_keys) %}{{ k }}{% endfor %}",
+    "{{ xs | select('odd') | list }}{{ xs | reject | list }}{{ xs | select('>', 1) | list }}{{ xs | select('ne', 2) | list }}",
+    "{{ ms | selectattr('role', 'in', ['user']) | list }}{{ ms | rejectattr('a.b', 'equalto', 1) | list }}",
+    "{{ xs | map('d', '-') | join }}{{ xs | map('select', 'lessthan', 3) | map('list') | list }}",
+    "{{ x | d }}{{ x | default }}{{ x | d('a', true) }}{{ xs | count }}{{ xs | min }}{{ xs | max(attribute='n') }}",
+    "{% if x is float %}f{% endif %}",
+  ]) {
+    const r = scan(src);
+    expect({ src, findings: r.findings.filter((f) => f.ruleId === "unanalyzable") }).toEqual({ src, findings: [] });
+    expect({ src, complete: r.complete }).toEqual({ src, complete: true });
+  }
+});
+
+// A filter or test name the template computes could be anything the renderer lacks, attr and format included.
+test("ISC-12.1: a filter or test named at render time inside map/select/reject is HIGH", () => {
+  for (const [src, name] of [
+    ["{{ xs | map(f) | list }}", "map"],
+    ["{{ xs | map(*fs) | list }}", "map"],
+    ["{{ xs | select(t) | list }}", "select"],
+    ["{{ xs | reject(t ~ '') | list }}", "reject"],
+    ["{{ xs | selectattr('a', t) | list }}", "selectattr"],
+    ["{{ xs | rejectattr(*at) | list }}", "rejectattr"],
+    ["{{ xs | map('map', f) | list }}", "map"],
+  ] as const) {
+    const u = unanalyzable(src);
+    expect({ src, severities: u.map((f) => f.severity) }).toEqual({ src, severities: ["HIGH"] });
+    expect(u[0]!.message).toContain(`'${name}' (${name === "map" ? "filter" : "test"} name chosen at render time)`);
+  }
+  // An attribute path chosen at render time names no filter or test.
+  expect(unanalyzable("{{ xs | map(attribute=a) | list }}{{ xs | selectattr(a) | list }}{{ xs | map(**kw) | list }}")).toEqual([]);
+});
+
+test("ISC-12.1: a filter map() names that the renderer lacks is MEDIUM, at the name", () => {
+  const src = "{{ (v | map('round') | list) }}";
+  const u = unanalyzable(src);
+  expect(u.map((f) => f.severity)).toEqual(["MEDIUM"]);
+  expect(u[0]!.message).toContain("'round' (named in map())");
+  expect(u[0]!.excerpt).toBe("'round'");
+  expect(u[0]!.span?.start).toBe(src.indexOf("'round'"));
+  expect(scan(src).complete).toBe(false);
+});
+
+// map('map', 'attr', ...) hands 'attr' on to the inner map: classified as if used directly.
+test("ISC-12.1: names passed on by a nested map are classified too", () => {
+  expect(unanalyzable("{{ xs | map('map', 'attr', 'x') | list }}").some((f) => f.severity === "HIGH" && f.message.includes("'attr'"))).toBe(true);
+  expect(unanalyzable("{{ xs | map('select', 'divisibleby', 2) | list }}").map((f) => f.severity)).toEqual(["MEDIUM"]);
+  expect(unanalyzable("{{ xs | map('rejectattr', 'a', 'banana') | list }}").map((f) => f.severity)).toEqual(["HIGH"]);
+  expect(unanalyzable("{{ xs | map('map', 'upper') | list }}{{ xs | map('map', attribute='a') | list }}")).toEqual([]);
 });
 
 // ISC-12.1 boundary (team-lead, 2026-10-22 17:50): a filter or test name that is
@@ -119,14 +191,14 @@ test("ISC-12.1: a filter or test named by string inside map/select/reject is cla
   expect(unanalyzable("{{ xs | selectattr('a', 'banana') | list }}").some((f) => f.severity === "HIGH" && f.message.includes("'banana'"))).toBe(true);
   // map('attr', ...) reaches attributes by name exactly like |attr.
   expect(unanalyzable("{{ xs | map('attr', 'name') | list }}").some((f) => f.severity === "HIGH" && f.message.includes("'attr'"))).toBe(true);
-  // A builtin test the library lacks, handed to reject: MEDIUM only.
-  const stock = unanalyzable('{{ ks | reject("in", handled) | list }}');
-  expect(stock.every((f) => f.severity === "MEDIUM")).toBe(true);
-  expect(stock.map((f) => f.message).join(" ")).toContain("test 'in'");
+  // A builtin test the renderer lacks, handed to reject: MEDIUM only.
+  const lacking = unanalyzable("{{ ns | reject('divisibleby', 3) | list }}");
+  expect(lacking.map((f) => f.severity)).toEqual(["MEDIUM"]);
+  expect(lacking[0]!.message).toContain("test 'divisibleby'");
 });
 
 test("unimplemented jinja2 builtin filters and tests stay MEDIUM", () => {
-  for (const src of ["{{ x | d('a') }}", "{{ x | wordwrap }}", "{{ x | xmlattr }}", "{% if x is escaped %}y{% endif %}"]) {
+  for (const src of ["{{ x | sum }}", "{{ x | wordwrap }}", "{{ x | xmlattr }}", "{% if x is escaped %}y{% endif %}"]) {
     expect(unanalyzable(src).map((f) => f.severity)).toEqual(["MEDIUM"]);
   }
 });

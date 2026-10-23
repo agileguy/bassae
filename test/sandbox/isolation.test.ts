@@ -18,6 +18,7 @@ interface CanaryReport {
   checkout: string;
   spawn: string;
   userns: string;
+  sysctl: string;
   connect: string;
 }
 
@@ -76,7 +77,8 @@ test("a bwrap without --disable-userns is a downgrade the status names, not a si
 test("control: outside the sandbox the canary can write, read and connect", async () => {
   const { report, wrote, accepted } = await runCanary((argv) => Bun.spawn(argv, { stdout: "pipe" }));
   const userns = process.platform === "linux" ? "ok" : "n/a";
-  expect(report).toEqual({ write: "ok", read: "ok", stat: "ok", home: "ok", checkout: "ok", spawn: "ok", userns, connect: "ok" });
+  const sysctl = process.platform === "darwin" ? "ok" : "n/a";
+  expect(report).toEqual({ write: "ok", read: "ok", stat: "ok", home: "ok", checkout: "ok", spawn: "ok", userns, sysctl, connect: "ok" });
   expect(wrote).toBe(true);
   expect(accepted).toBe(1);
 });
@@ -95,6 +97,8 @@ test.skipIf(!status.available)("under the worker's sandbox wrapper the canary ca
   expect(accepted).toBe(0);
   // bwrap has no exec filter; the macOS profile denies fork outright.
   if (status.available && status.kind === "sandbox-exec") expect(report.spawn).toStartWith("denied");
+  // The macOS profile allows only the sysctls bun reads to start, not the host's name.
+  if (status.available && status.kind === "sandbox-exec") expect(report.sysctl).toStartWith("denied");
   // Not even a helper the worker could reach may make a user namespace of its own.
   if (disablesUserns) expect(report.userns).toStartWith("denied");
 });

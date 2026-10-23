@@ -7,7 +7,7 @@ import { constants } from "node:os";
 import { basename, join } from "node:path";
 import { sandboxAvailable } from "../../src/sandbox/index.ts";
 import { spawnSandboxed } from "../../src/sandbox/launcher.ts";
-import { encode } from "../../src/sandbox/protocol.ts";
+import { decodeChild, encode, MEMORY_EXIT_CODE, TIMEOUT_EXIT_CODE } from "../../src/sandbox/protocol.ts";
 
 const status = await sandboxAvailable();
 const PARENT = join(import.meta.dir, "orphan-parent.ts");
@@ -28,6 +28,9 @@ function descendants(root: number): number[] {
   }
   return found;
 }
+
+/** The kinds of line a worker wrote, each of which must be well-formed. */
+const said = (out: string) => out.split("\n").filter(Boolean).map((line) => decodeChild(line)?.t ?? `malformed: ${line}`);
 
 /** Running, as opposed to gone or a zombie waiting to be reaped. */
 function running(pid: number): boolean {
@@ -58,13 +61,38 @@ async function killMidRender(mode: "wait" | "block", signal: NodeJS.Signals, pat
 }
 
 test.skipIf(!status.available)(
+  "with no parent watching at all, the worker's own clock ends a render that runs past the cap",
+  async () => {
+    const spin = "{% for i in range(1000) %}{% for j in range(1000) %}{% for k in range(1000) %}{% endfor %}{% endfor %}{% endfor %}";
+    const worker = spawnSandboxed([process.execPath, "--no-install", WORKER])!;
+    const start = performance.now();
+    try {
+      // The CPU limit is far off, so only the worker's clock can end this render so soon.
+      worker.stdin.write(encode({ t: "init", template: spin, maxOutputBytes: 1000, timeoutMs: 300, cpuMs: 30_000, maxRssBytes: 2 ** 30 }));
+      worker.stdin.write(encode({ t: "req", request: { id: "a", context: {}, profile: "hf-default" } }));
+      worker.stdin.end();
+      const [out] = await Promise.all([new Response(worker.stdout).text(), new Response(worker.stderr).text(), worker.exited]);
+      const ms = performance.now() - start;
+      console.log(`[sandbox] worker ended by its own clock after ${ms.toFixed(0)}ms at timeoutMs 300`);
+      expect(said(out)).toEqual(["ready", "parsed"]);
+      expect(worker.exitCode).toBe(TIMEOUT_EXIT_CODE);
+      expect(ms).toBeLessThan(3000);
+    } finally {
+      worker.kill("SIGKILL");
+    }
+  },
+  30_000,
+);
+
+test.skipIf(!status.available)(
   "with no parent watching at all, the worker's own CPU limit ends a render that never finishes",
   async () => {
     const spin = "{% for i in range(1000) %}{% for j in range(1000) %}{% for k in range(1000) %}{% endfor %}{% endfor %}{% endfor %}";
     const worker = spawnSandboxed([process.execPath, "--no-install", WORKER])!;
     const start = performance.now();
     try {
-      worker.stdin.write(encode({ t: "init", template: spin, maxOutputBytes: 1000, cpuMs: 500 }));
+      // The worker's clock is far off, so this checks the backstop behind it.
+      worker.stdin.write(encode({ t: "init", template: spin, maxOutputBytes: 1000, timeoutMs: 60_000, cpuMs: 500, maxRssBytes: 2 ** 30 }));
       worker.stdin.write(encode({ t: "req", request: { id: "a", context: {}, profile: "hf-default" } }));
       worker.stdin.end();
       const out = new Response(worker.stdout).text();
@@ -75,10 +103,28 @@ test.skipIf(!status.available)(
       console.log(`[sandbox] worker ${how} after ${ms.toFixed(0)}ms at cpuMs 500, core_pattern ${CORE_PATTERN}`);
       expect(ended).toBe(true);
       console.log(`[sandbox] its stderr: ${(await err).trim() || "-"}`);
-      expect(await out).toBe('{"t":"ready"}\n{"t":"parsed"}\n');
+      expect(said(await out)).toEqual(["ready", "parsed"]);
       // bwrap reports a child killed by a signal as exit 128 + the signal.
       expect(worker.signalCode === "SIGXCPU" || worker.exitCode === 128 + constants.signals.SIGXCPU).toBe(true);
       expect(ms).toBeLessThan(3000);
+    } finally {
+      worker.kill("SIGKILL");
+    }
+  },
+  30_000,
+);
+
+test.skipIf(!status.available)(
+  "with no parent watching at all, the worker's own memory watchdog ends a render that keeps allocating",
+  async () => {
+    const worker = spawnSandboxed([process.execPath, "--no-install", WORKER])!;
+    try {
+      worker.stdin.write(encode({ t: "init", template: "{% set xs = range(10**7) %}fine", maxOutputBytes: 1000, timeoutMs: 60_000, cpuMs: 10_000, maxRssBytes: 128 * 2 ** 20 }));
+      worker.stdin.write(encode({ t: "req", request: { id: "a", context: {}, profile: "hf-default" } }));
+      worker.stdin.end();
+      const [out] = await Promise.all([new Response(worker.stdout).text(), new Response(worker.stderr).text(), worker.exited]);
+      expect(said(out)).toEqual(["ready", "parsed"]);
+      expect(worker.exitCode).toBe(MEMORY_EXIT_CODE);
     } finally {
       worker.kill("SIGKILL");
     }
@@ -96,11 +142,11 @@ test("a worker under a host's own CPU cap still ends by SIGXCPU, never by the ha
     stderr: "pipe",
   });
   try {
-    worker.stdin.write(encode({ t: "init", template: spin, maxOutputBytes: 1000, cpuMs: 10_000 }));
+    worker.stdin.write(encode({ t: "init", template: spin, maxOutputBytes: 1000, timeoutMs: 60_000, cpuMs: 10_000, maxRssBytes: 2 ** 30 }));
     worker.stdin.write(encode({ t: "req", request: { id: "a", context: {}, profile: "hf-default" } }));
     worker.stdin.end();
     const [out] = await Promise.all([new Response(worker.stdout).text(), new Response(worker.stderr).text(), worker.exited]);
-    expect(out).toBe('{"t":"ready"}\n{"t":"parsed"}\n');
+    expect(said(out)).toEqual(["ready", "parsed"]);
     expect(worker.signalCode).toBe("SIGXCPU");
   } finally {
     worker.kill("SIGKILL");
@@ -114,9 +160,14 @@ test.skipIf(!status.available || process.platform !== "linux" || process.getuid?
   async () => {
     const owners: Record<string, number> = {};
     const runs = { "plain bun": [process.execPath, "-e", "console.log('up'); setInterval(() => {}, 1000)"], worker: [process.execPath, "--no-install", WORKER] };
+    // The worker says it is ready only once its whole batch is in, so it gets one that keeps it rendering meanwhile.
+    const spin = "{% for i in range(1000) %}{% for j in range(1000) %}{% for k in range(1000) %}{% endfor %}{% endfor %}{% endfor %}";
     for (const [name, argv] of Object.entries(runs)) {
       const proc = spawnSandboxed(argv)!;
       try {
+        proc.stdin.write(encode({ t: "init", template: spin, maxOutputBytes: 1000, timeoutMs: 60_000, cpuMs: 10_000, maxRssBytes: 2 ** 30 }));
+        proc.stdin.write(encode({ t: "req", request: { id: "a", context: {}, profile: "hf-default" } }));
+        proc.stdin.end();
         await proc.stdout.getReader().read();
         // The kernel names a process after the file it runs, cut to 15 bytes, whatever that file is called.
         const bun = descendants(proc.pid).find((pid) => readFileSync(`/proc/${pid}/comm`, "utf8").trim() === basename(process.execPath).slice(0, 15));
@@ -214,7 +265,7 @@ test.skipIf(!status.available)(
     const { survivors, ms } = await killMidRender("block", "SIGKILL", 15_000);
     console.log(`[sandbox] worker gone ${ms.toFixed(0)}ms after SIGKILL to its hung parent`);
     expect(survivors).toEqual([]);
-    // The worker's own CPU limit for one render at timeoutMs 1000 is 2.5 seconds, rounded up to a whole second.
+    // The worker's own clock ends a render at timeoutMs 1000, and its CPU limit, 2.5 s rounded up to a whole second, backs that.
     expect(ms).toBeLessThan(4500);
   },
   30_000,

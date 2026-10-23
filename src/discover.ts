@@ -10,6 +10,11 @@ export interface Discovery {
   models: DiscoveredModel[];
   /** scanner_error findings: paths that could not be read, links not followed, budgets run out. The CLI decides what they do to coverage. */
   findings: Finding[];
+  /**
+   * Every directory the walk listed or tried to, by realpath, each once: roots, plain subdirectories and those
+   * reached through links alike. --extract counts each as scanned (security S1).
+   */
+  walked: string[];
 }
 
 /** What one walk may do. Running out is a HIGH finding, never a silent stop. */
@@ -51,6 +56,7 @@ class Walker {
   private readonly dirs = new Map<string, string>();
   // A walked directory reached again elsewhere: whatever was found under the key is reachable under each value too.
   private readonly aliases = new Map<string, string[]>();
+  private readonly walked: string[] = [];
   private readonly models = new Map<string, DiscoveredModel>();
   // GGUF verdict per realpath, so a blob linked from many snapshots is opened once. Unreadable counts as no.
   private readonly magic = new Map<string, boolean>();
@@ -76,7 +82,7 @@ class Walker {
       const hfCache = firstHfCacheLocation([...paths, m.id]);
       return hfCache ? { ...m, paths, hfCache } : { ...m, paths };
     });
-    return { models, findings: this.findings };
+    return { models, findings: this.findings, walked: this.walked };
   }
 
   // `real` is the realpath of `path`, carried down so plain entries need no realpath call of their own.
@@ -94,6 +100,7 @@ class Walker {
       return;
     }
     this.dirs.set(key, path);
+    this.walked.push(real);
 
     const entries = await this.try(path, async () =>
       (await readdir(path, { withFileTypes: true })).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)),

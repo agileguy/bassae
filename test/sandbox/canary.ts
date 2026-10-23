@@ -2,6 +2,7 @@
 // what a hijacked worker would try and prints one JSON line saying what got through.
 // Usage: bun canary.ts <write-path> <tcp-port> <read-path> <home-path> <checkout-path>
 
+import { dlopen, FFIType, ptr } from "bun:ffi";
 import { readFileSync, statSync, writeFileSync } from "node:fs";
 import { connect } from "node:net";
 
@@ -52,6 +53,19 @@ const report = {
       : attempt(() => {
           const p = Bun.spawnSync(["/usr/bin/unshare", "--user", "/usr/bin/true"], { stderr: "pipe" });
           if (!p.success) throw new Error(p.stderr.toString().trim() || `exit ${p.exitCode}`);
+        }),
+  // A sysctl the worker has no use for, the host's name. macOS only: bwrap filters no sysctl.
+  sysctl:
+    process.platform !== "darwin"
+      ? "n/a"
+      : attempt(() => {
+          const { sysctlbyname } = dlopen("/usr/lib/libSystem.B.dylib", {
+            sysctlbyname: { args: [FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.u64], returns: FFIType.i32 },
+          }).symbols;
+          const name = Buffer.from("kern.hostname\0");
+          const value = new Uint8Array(256);
+          const size = new BigUint64Array([256n]);
+          if (sysctlbyname(ptr(name), ptr(value), ptr(size), null, 0) !== 0) throw new Error("sysctlbyname failed");
         }),
   connect: await tryConnect(Number(portArg)),
 };

@@ -278,11 +278,16 @@ describe("registryDivergence (ISC-25)", () => {
   });
 
   test("ISC-25: a rewrite whose tests cannot be classified is MEDIUM, not LOW (review round 2, security N5)", async () => {
-    // Each pass splits x once more, so its value never settles.
-    const grows = "{% set x = messages %}{% for m in messages %}{% set x = x.split() %}{% endfor %}\n";
-    const [f] = await registryDivergence(tpl(grows + RENAMED), registry(grows + CHATML), quiet, echo);
+    // Each variable is set from the next one along, so each pass carries the
+    // content one link back and the walk stops before it settles.
+    const chain = "{% for m in messages %}" + Array.from({ length: 12 }, (_, i) => `{% set v${i} = v${i + 1} ~ m.content %}`).join("") + "{% endfor %}\n";
+    const [f] = await registryDivergence(tpl(chain + RENAMED), registry(chain + CHATML), quiet, echo);
     expect(f).toMatchObject({ severity: "MEDIUM" });
     expect(f!.message).toContain("control flow only, but the tests it changed could not be classified");
+    // A value that grows on every pass is still classed: the interpreter bounds it.
+    const grows = "{% set x = messages %}{% for m in messages %}{% set x = x.split() %}{% endfor %}\n";
+    const [g] = await registryDivergence(tpl(grows + RENAMED), registry(grows + CHATML), quiet, echo);
+    expect(g!.message).not.toContain("could not be classified");
   });
 
   test("outcome 3 without a sandbox: a control-flow rewrite is LOW only when every probe renders the same", async () => {

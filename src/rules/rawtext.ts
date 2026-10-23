@@ -14,10 +14,13 @@ interface RawPattern {
   ruleId: RuleId;
   re: RegExp;
   message: (m: RegExpExecArray) => string;
+  /** A match inside a string literal spans the whole literal, quotes included, once per literal. */
+  literal?: boolean;
 }
 
 const PATTERNS: RawPattern[] = [
-  { ruleId: "dunder_access", re: /__[A-Za-z0-9]+__/g, message: (m) => `dunder attribute '${m[0]}'` },
+  // The AST rule spans x['__init__'] as its quoted key, so the raw scans do too: the same column either way.
+  { ruleId: "dunder_access", re: /__[A-Za-z0-9]+__/g, message: (m) => `dunder attribute '${m[0]}'`, literal: true },
   { ruleId: "dynamic_attribute", re: /\|\s*(attr|format)\b/g, message: (m) => `'|${m[1]}' reaches attributes by name` },
   { ruleId: "dynamic_attribute", re: /\.\s*format\s*\(/g, message: () => ".format() reaches attributes by name" },
   {
@@ -55,6 +58,41 @@ const PATTERNS: RawPattern[] = [
 // a cap a 16 MiB string of dunders would allocate millions of findings.
 const RAW_CAP = 100;
 
+/**
+ * The string literals of one tag interior, found by walking it forward once with nextTag's quote rules: a quote
+ * opens a literal that runs to the same quote, a backslash escapes the next unit, and an unclosed one runs to the
+ * end of the interior. Matches are asked about in increasing order, so the walk never goes back.
+ */
+class Literals {
+  private i: number;
+  private last: { start: number; end: number } | undefined;
+  constructor(
+    private readonly text: string,
+    from: number,
+    private readonly end: number,
+  ) {
+    this.i = from;
+  }
+  /** The literal holding offset `at`, or undefined outside every literal. */
+  around(at: number): { start: number; end: number } | undefined {
+    if (this.last && at < this.last.end) return at > this.last.start ? this.last : undefined;
+    const t = this.text;
+    while (this.i <= at) {
+      const q = t.charCodeAt(this.i);
+      if (q !== 0x27 && q !== 0x22) {
+        this.i++;
+        continue;
+      }
+      let j = this.i + 1;
+      while (j < this.end && t.charCodeAt(j) !== q) j += t.charCodeAt(j) === 0x5c ? 2 : 1;
+      this.last = { start: this.i, end: Math.min(j + 1, this.end) };
+      this.i = this.last.end;
+      if (at < this.last.end) return at > this.last.start ? this.last : undefined;
+    }
+    return undefined;
+  }
+}
+
 export function runRawText(regions: TextRun[], lines: LineMap, text: string, base: Base): Finding[] {
   const findings: Finding[] = [];
   for (const p of PATTERNS) {
@@ -62,10 +100,16 @@ export function runRawText(regions: TextRun[], lines: LineMap, text: string, bas
     for (const region of regions) {
       if (hits >= RAW_CAP) break;
       p.re.lastIndex = 0;
+      let literals: Literals | undefined;
+      let spanned = -1;
       let m: RegExpExecArray | null;
       while ((m = p.re.exec(region.value)) !== null) {
-        const start = region.start + m.index;
-        const end = start + m[0].length;
+        if (p.literal) literals ??= new Literals(text, region.start, region.start + region.value.length);
+        const lit = literals?.around(region.start + m.index);
+        if (lit && lit.start === spanned) continue;
+        const start = lit?.start ?? region.start + m.index;
+        const end = lit?.end ?? start + m[0].length;
+        if (lit) spanned = lit.start;
         findings.push({
           ruleId: p.ruleId,
           severity: "HIGH",
@@ -188,6 +232,9 @@ export function runRawTextStreaming(text: string, base: Base): Finding[] {
     let cs = -1;
     let ce = -1;
     let noMoreTags = false;
+    // Made on a tag's first match only, so a template of millions of tags allocates none for most of them.
+    let literals: Literals | undefined;
+    let spanned = -1;
     let m: RegExpExecArray | null;
     while (hits < RAW_CAP && (m = p.re.exec(text)) !== null) {
       const mi = m.index;
@@ -201,9 +248,14 @@ export function runRawTextStreaming(text: string, base: Base): Finding[] {
         cs = tag.start;
         ce = tag.end;
         tagFrom = tag.next;
+        literals = undefined;
       }
       if (mi >= cs && mi < ce) {
-        allHits.push({ off: mi, end: mi + m[0].length, ruleId: p.ruleId, message: p.message(m) });
+        if (p.literal) literals ??= new Literals(text, cs, ce);
+        const lit = literals?.around(mi);
+        if (lit && lit.start === spanned) continue;
+        if (lit) spanned = lit.start;
+        allHits.push({ off: lit?.start ?? mi, end: lit?.end ?? mi + m[0].length, ruleId: p.ruleId, message: p.message(m) });
         hits++;
       }
     }

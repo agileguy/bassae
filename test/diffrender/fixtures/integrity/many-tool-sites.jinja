@@ -1,0 +1,6 @@
+{%- if tools -%}namespace functions {
+
+{% for i in range(104000) %}type a = 
+{% endfor %}} // namespace functions{%- endif -%}
+{%- for m in messages -%}<|{{ m.role }}|>{{ m.content }}<|end|>{%- endfor -%}
+{%- if add_generation_prompt -%}<|assistant|>{%- endif -%}

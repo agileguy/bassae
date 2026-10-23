@@ -596,6 +596,8 @@ export interface Val {
   restNums?: number[];
   /** The access path (`message.content`), for `is mapping` / `is string` guards. */
   path?: string;
+  /** The runtime input the value was read from, as a path from a context root with `[]` for any element (`messages[].content`), through loops, macro arguments and transforms that keep its words. Unset once it is computed (ISC-22.1). */
+  src?: string;
   /** A guard in force says the value is (not) a string. */
   shape?: "string" | "nonstring";
   /** A compile-time constant. */
@@ -633,6 +635,13 @@ export const NO_FACTS: Facts = new Map();
 /** What classifyTest needs from the extraction: the abstract value of an expression under some guard facts. */
 export interface TestEnv {
   value(n: Node, facts: Facts): Val;
+  /**
+   * Told of each test classifyTest classes whole, below any `and`, `or`, `not` or inline if, with its class. A
+   * comparison or membership test passes its two operands as it compared them, so the extraction can list the
+   * literal it names (ISC-22.1) and divergence can see the test (ISC-25), and `own`: its class apart from the
+   * gates its operands carry, the tests that chose or set them, which are tests of their own.
+   */
+  tested?(n: Node, cls: TestClass, operands?: readonly [Val, Val], own?: TestClass): void;
 }
 
 // Tests that read nothing of the value: whether it is there, and its type.
@@ -733,42 +742,50 @@ function thereOf(v: Val): TestClass {
 /** The strength of `n` used as a condition. Never throws on any AST shape. */
 export function classifyTest(n: Node, env: TestEnv, facts: Facts): TestClass {
   if (!n || typeof n !== "object") return "none";
+  if (n.type === "UnaryExpression" && op(n) === "not") return classifyTest(n.argument as Node, env, facts);
+  if (n.type === "BinaryExpression" && (op(n) === "and" || op(n) === "or")) {
+    // The right side runs only when the left one is true (and) or false (or),
+    // so the left side's guards hold while it is classified.
+    const l = classifyTest(n.left as Node, env, facts);
+    const r = classifyTest(n.right as Node, env, factsFrom(n.left as Node, op(n) === "and", facts));
+    return stronger(l, r);
+  }
+  if (n.type === "Ternary") {
+    const c = n.condition as Node;
+    const t = classifyTest(n.trueExpr as Node, env, factsFrom(c, true, facts));
+    const f = classifyTest(n.falseExpr as Node, env, factsFrom(c, false, facts));
+    return stronger(classifyTest(c, env, facts), stronger(t, f));
+  }
+  const [cls, operands, own] = wholeTest(n, env, facts);
+  env.tested?.(n, cls, operands, own ?? cls);
+  return cls;
+}
+
+// A test no `and`, `or`, `not` or inline if splits further, and for a
+// comparison the operands it compared and its class without their gates.
+function wholeTest(n: Node, env: TestEnv, facts: Facts): [TestClass, (readonly [Val, Val])?, TestClass?] {
   switch (n.type) {
     case "StringLiteral":
     case "IntegerLiteral":
     case "FloatLiteral":
-      return "none";
+      return ["none"];
     case "UnaryExpression":
-      if (op(n) === "not") return classifyTest(n.argument as Node, env, facts);
-      return truthOf(env.value(n, facts));
+      return [truthOf(env.value(n, facts))];
     case "BinaryExpression": {
       const o = op(n);
-      if (o === "and" || o === "or") {
-        // The right side runs only when the left one is true (and) or false (or),
-        // so the left side's guards hold while it is classified.
-        const l = classifyTest(n.left as Node, env, facts);
-        const r = classifyTest(n.right as Node, env, factsFrom(n.left as Node, o === "and", facts));
-        return stronger(l, r);
-      }
       if (o === "in" || o === "not in") return membership(n.left as Node, n.right as Node, env, facts);
       if (COMPARISONS.has(o)) return comparison(n.left as Node, n.right as Node, o, env, facts);
-      return truthiness(n, env, facts);
+      return [truthiness(n, env, facts)];
     }
     case "TestExpression": {
       const name = testName(n);
       const v = env.value(n.operand as Node, facts);
-      if (SHAPE_TESTS.has(name)) return stronger(stronger(isRuntime(v) ? "presence" : "none", thereOf(v)), gateOf(v));
-      if (TRUTH_TESTS.has(name)) return truthOf(v);
-      return readOf(v); // odd, even, lower, upper, ...: the value itself
-    }
-    case "Ternary": {
-      const c = n.condition as Node;
-      const t = classifyTest(n.trueExpr as Node, env, factsFrom(c, true, facts));
-      const f = classifyTest(n.falseExpr as Node, env, factsFrom(c, false, facts));
-      return stronger(classifyTest(c, env, facts), stronger(t, f));
+      if (SHAPE_TESTS.has(name)) return [stronger(stronger(isRuntime(v) ? "presence" : "none", thereOf(v)), gateOf(v))];
+      if (TRUTH_TESTS.has(name)) return [truthOf(v)];
+      return [readOf(v)]; // odd, even, lower, upper, ...: the value itself
     }
     default:
-      return truthiness(n, env, facts);
+      return [truthiness(n, env, facts)];
   }
 }
 
@@ -782,7 +799,7 @@ function truthiness(n: Node, env: TestEnv, facts: Facts): TestClass {
 // `a == b`, `a < b`, ...: a count against a threshold, a field with a
 // vocabulary for equality with a constant, an id against an id or a role
 // against a role, or else both values read whole.
-function comparison(a: Node, b: Node, o: string, env: TestEnv, facts: Facts): TestClass {
+function comparison(a: Node, b: Node, o: string, env: TestEnv, facts: Facts): [TestClass, readonly [Val, Val], TestClass] {
   const va = operand(a, env, facts, 0);
   const vb = operand(b, env, facts, 0);
   const gates = stronger(gateOf(va), gateOf(vb));
@@ -792,7 +809,7 @@ function comparison(a: Node, b: Node, o: string, env: TestEnv, facts: Facts): Te
   // sorts after 'user' (review round 2, ruling c).
   const vocab = eq ? (vocabTest(a, vb, env, facts) ?? vocabTest(b, va, env, facts)) : undefined;
   const cls = countTest(va, vb) ?? countTest(vb, va) ?? vocab ?? join ?? stronger(readOf(va), readOf(vb));
-  return stronger(cls, gates);
+  return [stronger(cls, gates), [va, vb], cls];
 }
 
 // `a in b`. On a record (a message, a content part, a tool call, or anything an
@@ -802,17 +819,21 @@ function comparison(a: Node, b: Node, o: string, env: TestEnv, facts: Facts): Te
 // against fixed values, so it is as strong as reading `a`. A field with a
 // vocabulary is judged against it: `p.type in ['image', 'video']`, `'browser'
 // in builtin_tools`.
-function membership(a: Node, b: Node, env: TestEnv, facts: Facts): TestClass {
+function membership(a: Node, b: Node, env: TestEnv, facts: Facts): [TestClass, readonly [Val, Val], TestClass] {
   const va = env.value(a, facts);
   const vb = env.value(b, facts);
   const gates = stronger(gateOf(va), gateOf(vb));
   let cls = countIn(a, b, vb, env, facts) ?? vocabIn(a, b, vb, env, facts);
   if (cls === undefined) {
-    if (isMapping(vb)) cls = stronger(isRuntime(vb) ? "presence" : "none", stronger(readOf(va), vb.rest ?? "none"));
+    // A constant key asks what `x.k is defined` asks: whether a key the
+    // schema does not document is there is the caller's choice (ruling d).
+    const k = constOf(va);
+    const there = typeof k === "string" && vb.fields ? presenceOf(mapFields(vb.fields, (f) => memberField(f, k))) : "none";
+    if (isMapping(vb)) cls = stronger(isRuntime(vb) ? "presence" : "none", stronger(stronger(readOf(va), vb.rest ?? "none"), there));
     else if (!isRuntime(vb)) cls = readOf(va);
     else cls = stronger(readOf(vb), readOf(va));
   }
-  return stronger(cls, gates);
+  return [stronger(cls, gates), [va, vb], cls];
 }
 
 // A count in a list or range: `messages|length in [41, 42]`, `loop.index in
@@ -903,6 +924,12 @@ function cased(n: Node): [Node, string[]] {
     } else break;
   }
   return [n, maps.reverse()];
+}
+
+/** True when `n`, under any case and whitespace transforms, is a slice (`m.content[:5]|lower`): compared with a literal it is slice equality (ISC-22.1). */
+export function isSlice(n: Node): boolean {
+  const [inner] = cased(n);
+  return inner?.type === "MemberExpression" && !!inner.computed && (inner.property as Node)?.type === "SliceExpression";
 }
 
 function isCaseMethod(callee: Node): boolean {

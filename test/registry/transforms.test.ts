@@ -14,6 +14,10 @@ const EVIDENCE: Record<string, string[]> = {
   "trim-content": ["message['content'] | trim", "item['text'] | trim"],
   "fold-system-into-first-user": ["set first_user_prefix = messages[0]['content'] + '", "set loop_messages = messages[1:]", "(first_user_prefix if loop.first else \"\")"],
   "drop-past-analysis": ["future_final_message.found", "CoT is dropped during all previous turns"],
+  "gpt-oss-typescript-tools": ["macro render_tool_namespace(namespace_name, tools)", "\"type \"+ tool.name + \" = \"", "render_tool_namespace(\"functions\", tools)"],
+  "gemma4-tool-declarations": ["macro format_function_declaration(tool_data)", "{{- '<|tool>' -}}", "format_function_declaration(tool) | trim"],
+  "functiongemma-tool-declarations": ["macro format_function_declaration(tool_data)", "<start_function_declaration>", "format_function_declaration(tool) | trim"],
+  "qwen-xml-tool-list": ["macro render_item_list(item_list, tag_name='required')", "\\n<function>\\n<name>", "render_item_list(tool.parameters.required, 'required')"],
 };
 
 test("the allowlist strips past <think> blocks, among others", () => {

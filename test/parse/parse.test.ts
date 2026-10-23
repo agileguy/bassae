@@ -26,13 +26,11 @@ test("attr and format filters are flagged HIGH unsupported", () => {
 });
 
 test("a benign unimplemented filter is MEDIUM, implemented filters are silent", () => {
-  const reject = parseTemplate(`{{ keys | reject('in', handled) }}`);
-  expect(reject.unsupported.find((c) => c.name === "reject")?.severity).toBe("MEDIUM");
+  const sum = parseTemplate(`{{ prices | sum }}`);
+  expect(sum.unsupported.find((c) => c.name === "sum")?.severity).toBe("MEDIUM");
 
-  const upper = parseTemplate(`{{ names | map('upper') | list }}`);
-  expect(upper.unsupported.find((c) => c.name === "map")?.severity).toBe("MEDIUM");
-
-  const ok = parseTemplate(`{{ d | dictsort }}{{ xs | join(',') }}{{ s | trim }}`);
+  // The render worker polyfills these (src/sandbox/polyfills.ts).
+  const ok = parseTemplate(`{{ d | dictsort }}{{ xs | join(',') }}{{ s | trim }}{{ keys | reject('in', handled) }}{{ names | map('upper') | list }}`);
   expect(ok.unsupported).toHaveLength(0);
 });
 

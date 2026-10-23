@@ -130,7 +130,8 @@ export function parseTemplate(text: string): ParseOutcome {
     libraryShape = preParseLimit(tokens.map(fromLibrary));
     if (!libraryShape) program = parse(tokens) as unknown as Node;
   } catch (e) {
-    parseError = e instanceof Error ? e.message : String(e);
+    // The name tells the library's own SyntaxError from an internal crash such as a TypeError.
+    parseError = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
   }
   if (libraryShape) {
     const capAt = { ...WHOLE_TEMPLATE };
@@ -291,6 +292,9 @@ function fromLibrary(t: { value: string; type: string }): PreToken {
 // implement, and for filter and test names that are not jinja2 builtins.
 // Unparseable statements never reach here; they surface as a parse error whose
 // text names the construct.
+// Filters that take the name of another filter or test as an argument.
+const NAMES_ANOTHER = new Set(["map", "select", "reject", "selectattr", "rejectattr"]);
+
 function findUnsupported(program: Node, spans: Map<Node, Span>): UnsupportedConstruct[] {
   const out: UnsupportedConstruct[] = [];
   const seen = new Set<string>();
@@ -316,32 +320,40 @@ function findUnsupported(program: Node, spans: Map<Node, Span>): UnsupportedCons
 
   // map('upper'), reject('in', xs) and selectattr('a', 'eq', 1) name another
   // filter or test by string; classify that name as if it were used directly.
-  const checkNamedArg = (name: string, args: Node[]): void => {
-    const positional = args.filter((a) => a.type !== "KeywordArgumentExpression");
-    const at = name === "selectattr" || name === "rejectattr" ? 1 : 0;
-    const arg = positional[at];
-    if (arg?.type !== "StringLiteral") return;
-    const named = String(arg.value);
-    if (name === "map") classifyFilter(named, arg, "named in map()");
-    else if (name === "select" || name === "reject" || name === "selectattr" || name === "rejectattr") classifyTest(named, arg, `named in ${name}()`);
+  // A name the template computes could be attr, format or one the renderer
+  // lacks: HIGH. map('map', 'select', 'in', xs) hands each name on to the next
+  // filter, so the chain is walked to its end, iteratively (ISC-31).
+  const checkNamedArg = (name: string, at: Node, args: Node[]): void => {
+    const positional = args.filter((a) => a.type !== "KeywordArgumentExpression" && a.type !== "KeywordSpreadExpression");
+    for (let from = 0; NAMES_ANOTHER.has(name); from++) {
+      const index = from + (name === "selectattr" || name === "rejectattr" ? 1 : 0);
+      const arg = positional[index];
+      if (positional.slice(from, index + 1).some((a) => a.type === "SpreadExpression") || (arg && arg.type !== "StringLiteral")) {
+        const kind = name === "map" ? "filter" : "test";
+        add({ kind: "filter", name, severity: "HIGH", form: `${kind} name chosen at render time`, reason: `could name attr, format or a ${kind} the renderer lacks, so it cannot be analyzed`, span: spans.get(at) });
+        return;
+      }
+      if (!arg) return;
+      const named = String(arg.value);
+      if (name !== "map") return classifyTest(named, arg, `named in ${name}()`);
+      classifyFilter(named, arg, "named in map()");
+      name = named;
+      at = arg;
+    }
   };
 
   const checkFilter = (filter: Node): void => {
     const id = filter.type === "CallExpression" ? (filter.callee as Node) : filter;
     const name = String(id.value);
     const args = filter.type === "CallExpression" ? (filter.args as Node[]) : [];
-    // `map` is only implemented with attribute=; a positional arg (e.g. map('upper'))
-    // throws at render, so it is a benign MEDIUM, not a code-exec HIGH.
-    if (name === "map" && filter.type === "CallExpression" && !args.some((a) => a.type === "KeywordArgumentExpression")) {
-      add({ kind: "filter", name, severity: "MEDIUM", form: "positional filter argument", span: spans.get(id) });
-    } else if (name === "unique" && filter.type === "CallExpression" && args.length > 0) {
+    if (name === "unique" && filter.type === "CallExpression" && args.length > 0) {
       // Plain `|unique` works, but `|unique(...)` (any argument, including
       // attribute=) throws at render in @huggingface/jinja (N3).
       add({ kind: "filter", name, severity: "MEDIUM", form: "called with arguments", reason: "throws at render in @huggingface/jinja", span: spans.get(id) });
     } else {
       classifyFilter(name, id);
     }
-    checkNamedArg(name, args);
+    checkNamedArg(name, id, args);
   };
 
   // Explicit stack (ISC-31). A name-bearing child (a filter/test name, a dotted
