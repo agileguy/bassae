@@ -72,12 +72,16 @@ export function findInvisibleChars(text: string, base: FindingBase, outcome?: Pa
   return finish("invisible_char", "HIGH", base, [raw, escaped], placer(outcome, text));
 }
 
-/** The raw-text form of ISC-19 for a template with no AST (ISC-12): URLs, emails and domains in text between tags and in string literals, streamed when the template is over the size cap. */
-export function findUrlsRaw(outcome: ParseOutcome, text: string, base: FindingBase): Finding[] {
+/**
+ * The raw-text form of ISC-19 for a template with no AST (ISC-12): URLs, emails and domains in text between tags and in string literals, streamed when the template is over the size cap.
+ * A literal `baselined` accepts is skipped, before the cap counts its hits. It is asked once per literal, and only for a literal with a hit.
+ */
+export function findUrlsRaw(outcome: ParseOutcome, text: string, base: FindingBase, baselined?: (from: number, to: number) => boolean): Finding[] {
   const hits = new Hits();
   eachLiteral(outcome, text, (kind, from, to) => {
+    let skip: boolean | undefined;
     scanUrls(text, from, to, (start, end, url) => {
-      if (!hits.take()) return;
+      if ((skip ??= baselined?.(from, to) ?? false) || !hits.take()) return;
       const match = text.slice(start, end);
       const where = kind === "text" ? "template text" : "a string literal";
       hits.kept.push({ start, end, message: `${where} contains ${URL_KIND[url]} '${clip(match)}'`, excerpt: match, detail: { kind: url, match: clip(match) } });

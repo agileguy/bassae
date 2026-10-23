@@ -225,6 +225,10 @@ export interface Lit {
   via?: number;
   /** It reached a variable under a content test that reads a value already holding it (`set r = c.split('</think>')[0]` under `'</think>' in c`): the test moved the text, it did not put it there. */
   routed?: boolean;
+  /** Not text: a runtime value or whitespace printed here, so the literals on either side are not adjacent. */
+  brk?: true;
+  /** Folded from several literals (`'a' ~ 'b'`, `|join`): no one literal in the template holds this text. */
+  folded?: true;
 }
 
 /** What the extraction knows about one runtime value. */
@@ -255,6 +259,10 @@ export interface Val {
   nsInit?: Map<string, Val>;
   /** A macro, by name. */
   macro?: string;
+  /** The clock or chance as a value (`set f = strftime_now`): calling the value calls them. */
+  fns?: string[];
+  /** It is `add_generation_prompt`, or a copy of it (`set g = add_generation_prompt`). */
+  genFlag?: true;
   /** `.items()` / `|dictsort`: a two-name loop gets keys and values. */
   pairs?: boolean;
 }
@@ -427,52 +435,79 @@ function collectFacts(n: Node, positive: boolean, out: Map<string, "string" | "n
 }
 
 /**
- * Which branch of an If is the generation prompt: `body` for a test that holds
- * when `add_generation_prompt` is true, `alternate` for its negation, undefined
- * when the test does not decide on it.
+ * Which branch of an If runs only when `add_generation_prompt` is set: `body`
+ * when the test holding implies the flag, `alternate` when the test failing
+ * does, undefined when neither does. `isFlag` says which expressions are the
+ * flag; the caller can resolve copies of it (`set g = add_generation_prompt`).
  */
-export function genPolarity(n: Node, depth = 0): "body" | "alternate" | undefined {
+export function genPolarity(n: Node, isFlag: (n: Node) => boolean = isGenFlag, depth = 0): "body" | "alternate" | undefined {
   if (!n || typeof n !== "object" || depth > 32) return undefined;
+  if (isFlag(n)) return "body";
+  const sub = (x: unknown) => genPolarity(x as Node, isFlag, depth + 1);
   switch (n.type) {
-    case "Identifier":
-      return String(n.value) === "add_generation_prompt" ? "body" : undefined;
-    case "UnaryExpression": {
-      if (op(n) !== "not") return undefined;
-      const inner = genPolarity(n.argument as Node, depth + 1);
-      return inner === "body" ? "alternate" : inner === "alternate" ? "body" : undefined;
-    }
+    case "UnaryExpression":
+      return op(n) === "not" ? flip(sub(n.argument)) : undefined;
+    case "FilterExpression":
+      // `|default(false)`, `|int` and `|bool` keep the flag's truth.
+      return FLAG_FILTERS.has(filterNameOf(n.filter as Node)) ? sub(n.operand) : undefined;
     case "TestExpression": {
-      const operand = n.operand as Node;
-      if (operand?.type !== "Identifier" || String(operand.value) !== "add_generation_prompt") return undefined;
       const name = testName(n);
       if (name !== "true" && name !== "false") return undefined;
-      return (name === "true") !== Boolean(n.negate) ? "body" : "alternate";
+      const p = sub(n.operand);
+      return (name === "true") !== Boolean(n.negate) ? p : flip(p);
     }
     case "BinaryExpression": {
       const o = op(n);
-      if (o === "and") {
-        // The body runs only with the flag set when either conjunct requires it.
-        const l = genPolarity(n.left as Node, depth + 1);
-        const r = genPolarity(n.right as Node, depth + 1);
-        return l === "body" || r === "body" ? "body" : undefined;
-      }
-      if (o === "or") {
-        const l = genPolarity(n.left as Node, depth + 1);
-        const r = genPolarity(n.right as Node, depth + 1);
-        return l === "body" || r === "body" ? "body" : undefined;
+      if (o === "and" || o === "or") {
+        const l = sub(n.left);
+        const r = sub(n.right);
+        // `a and b` holds only when both do, so either implying the flag is
+        // enough; it fails when either fails, so both failures must imply it.
+        // `a or b` is the dual.
+        const [one, both] = o === "and" ? ["body", "alternate"] : ["alternate", "body"];
+        if (l === one || r === one) return one as "body" | "alternate";
+        return l === both && r === both ? (both as "body" | "alternate") : undefined;
       }
       if (o === "==" || o === "!=") {
-        const l = n.left as Node;
-        const r = n.right as Node;
-        const flag = l?.type === "Identifier" && String(l.value) === "add_generation_prompt" ? r : r?.type === "Identifier" && String(r.value) === "add_generation_prompt" ? l : undefined;
-        if (!flag || flag.type !== "Identifier") return undefined;
-        const v = String(flag.value).toLowerCase();
-        if (v !== "true" && v !== "false") return undefined;
-        return (v === "true") === (o === "==") ? "body" : "alternate";
+        const lk = boolKonst(n.left as Node);
+        const rk = boolKonst(n.right as Node);
+        const p = lk !== undefined ? sub(n.right) : rk !== undefined ? sub(n.left) : undefined;
+        const k = lk ?? rk;
+        if (p === undefined || k === undefined) return undefined;
+        return k === (o === "==") ? p : flip(p);
       }
       return undefined;
     }
     default:
       return undefined;
   }
+}
+
+function isGenFlag(n: Node): boolean {
+  return n.type === "Identifier" && String(n.value) === "add_generation_prompt";
+}
+
+export const FLAG_FILTERS = new Set(["default", "d", "int", "bool"]);
+
+function filterNameOf(f: Node): string {
+  if (f?.type === "Identifier") return String(f.value);
+  if (f?.type === "CallExpression") return String((f.callee as Node | undefined)?.value ?? "");
+  return "";
+}
+
+function flip(p: "body" | "alternate" | undefined): "body" | "alternate" | undefined {
+  return p === "body" ? "alternate" : p === "alternate" ? "body" : undefined;
+}
+
+// `true`, `True`, `1` as true; `false`, `False`, `0` as false.
+function boolKonst(n: Node): boolean | undefined {
+  if (n?.type === "Identifier") {
+    const v = String(n.value).toLowerCase();
+    return v === "true" ? true : v === "false" ? false : undefined;
+  }
+  if (n?.type === "IntegerLiteral") {
+    const v = Number(n.value);
+    return v === 1 ? true : v === 0 ? false : undefined;
+  }
+  return undefined;
 }
