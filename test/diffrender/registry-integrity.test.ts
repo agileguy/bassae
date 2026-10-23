@@ -1,5 +1,7 @@
 // Acceptance for ISC-22.3 and ISC-22.4: every template pinned in the registry, rendered by the real sandboxed
-// renderer under both environment profiles, gives no content or tool issue on any standard probe.
+// renderer under both environment profiles, gives no content or tool issue on any standard probe. Content is read
+// twice: with no token declared, as for a bare template, and with the markup tokens the template prints declared, as
+// its model declares them, so a turn opens only at the model's own opener (Decisions 02:58).
 
 import { expect, test } from "bun:test";
 import { checkContent } from "../../src/diffrender/integrity.ts";
@@ -76,6 +78,11 @@ function readsTools(text: string): boolean {
   return false;
 }
 
+test("a template's declared tokens include its turn openers", () => {
+  const opener = /<\|im_start\|>|<start_of_turn>|<\|turn>|<\|start\|>|<\|system\|>/;
+  for (const known of distinct()) expect([known.entry.family, [...declaredBy(known.text)].some((t) => opener.test(t))]).toEqual([known.entry.family, true]);
+});
+
 test("the tools gate counts identifier reads, not text", () => {
   for (const t of ["{{ tools }}", "{% if tools is not none %}x{% endif %}", "{{ x[tools] }}", "{% for t in tools %}{% endfor %}", "{{ f(tools) }}"]) {
     expect(readsTools(t)).toBe(true);
@@ -84,6 +91,9 @@ test("the tools gate counts identifier reads, not text", () => {
     expect(readsTools(t)).toBe(false);
   }
 });
+
+/** The markup tokens a template prints (`<|im_start|>`, `<start_of_turn>`, `<|system|>`), as its model declares them. */
+const declaredBy = (text: string): ReadonlySet<string> => new Set(text.match(/<\|?[A-Za-z_][A-Za-z0-9_]*\|?>/g) ?? []);
 
 /** One template per distinct SHA-256, named by its first registry entry. */
 function distinct(): KnownGoodTemplate[] {
@@ -104,6 +114,7 @@ async function sweep(probes: Probe[]): Promise<Sweep> {
   const out: Sweep = { names: [], failures: [], checked: 0, withTools: 0 };
   for (const known of distinct()) {
     const name = `${known.entry.family} ${known.entry.sha256.slice(0, 12)}`;
+    const declared = declaredBy(known.text);
     for (const profile of PROFILES) {
       const sent = probes.filter((p) => p.tools.length === 0 || readsTools(known.text)).map((p) => ({ ...p, request: { ...p.request, profile } }));
       const results = await renderer.renderBatch(known.text, sent.map((p) => p.request));
@@ -117,6 +128,9 @@ async function sweep(probes: Probe[]): Promise<Sweep> {
         if (p.tools.length > 0) out.withTools++;
         const found: IntegrityIssue[] = [...checkContent(p, r.output, transforms), ...checkTools(p, r.output, transforms)];
         for (const issue of found) out.failures.push(`${name} ${p.label} ${profile}: ${issue.ruleId}[${issue.index}] ${issue.message}`);
+        for (const issue of checkContent(p, r.output, transforms, declared)) {
+          out.failures.push(`${name} ${p.label} ${profile} declared: ${issue.ruleId}[${issue.index}] ${issue.message}`);
+        }
       }
     }
     out.names.push(name);
