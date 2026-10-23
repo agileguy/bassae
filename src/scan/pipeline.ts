@@ -89,7 +89,8 @@ export async function scanWith(options: ScanOptions, setup: RendererSetup): Prom
   const jobs: (() => Promise<void>)[] = [];
   for (const record of records) {
     const tamper = await guard(record, "local tamper check", () => checkLocalTamper(record));
-    const modelFindings = finalizeFindings([...record.findings, ...intra.get(record)!, ...tamper, ...(local.get(record) ?? [])], record.id);
+    // Finalized where they are placed, once every template is drafted (attach.ts).
+    const modelFindings = [...record.findings, ...intra.get(record)!, ...tamper, ...(local.get(record) ?? [])];
     const drafts: Draft[] = [];
     for (const [i, group] of groupTemplates(record).entries()) {
       jobs.push(async () => {
@@ -221,7 +222,7 @@ function sitesOf(group: ExtractedTemplate[], record: ModelRecord): TemplateSite[
 }
 
 function modelReport(record: ModelRecord, modelFindings: Finding[], drafts: Draft[], precedence: ReturnType<typeof loadPrecedence>): ModelReport {
-  const rest = attachModelFindings(modelFindings, drafts);
+  const rest = attachModelFindings(modelFindings, drafts, record.id);
   const templates: TemplateReport[] = drafts.map(({ matchKind, ...d }) => {
     const severity = highestSeverity(d.findings);
     return { ...d, status: statusOf(d.findings, d.gaps, matchKind), ...(severity ? { severity } : {}) };
