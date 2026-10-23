@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRenderer, sandboxAvailable } from "../../src/sandbox/index.ts";
-import { darwinRss, linuxTreeRss } from "../../src/sandbox/launcher.ts";
+import { darwinRss, linuxTreeRss, runWorker } from "../../src/sandbox/launcher.ts";
 import { MESSAGE_KEEP, TRUNCATED } from "../../src/sandbox/protocol.ts";
 import type { RenderFailure, RenderRequest, RenderResult } from "../../src/types.ts";
 
@@ -40,6 +40,9 @@ async function timed<T>(fn: () => Promise<T>): Promise<[T, number]> {
 }
 
 const renderer = createRenderer();
+
+/** Stops this process's event loop, as a scanner busy elsewhere does, for `ms`. */
+const block = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
 const CHATML =
   "{% for message in messages %}<|im_start|>{{ message.role }}\n{{ message.content }}<|im_end|>\n{% endfor %}" +
@@ -311,17 +314,41 @@ describe.skipIf(!live)("caps (ISC-43)", () => {
     SLOW,
   );
 
-  // GC and JIT threads count towards CPU time, so the worker's own CPU limit could beat the parent's timer, and
-  // whether a render timed out would turn on how busy a machine's GC threads are (ISC-31). At timeoutMs 8000 the
-  // limit is 13 s of CPU, reached at 1.3 s a second only after 10 s. At the timeout and a second, 9 to 10 s of
-  // CPU, it would have come first, by 7.7 s.
+  // GC and JIT threads count towards CPU time, so the worker's own CPU limit could beat its clock, and whether a
+  // render timed out would turn on how busy a machine's GC threads are (ISC-31). At timeoutMs 8000 the limit is
+  // 13 s of CPU, reached at 1.3 s a second only after 10 s, so the worker's clock comes first, by 2 s.
   test(
-    "at a long timeout, a render using about 1.3 s of CPU a second still ends by the parent's timer",
+    "at a long timeout, a render using about 1.3 s of CPU a second still ends by the worker's clock",
     async () => {
       const busy = createRenderer({ command: [BUN, "--no-install", BUSY], readable: [BUSY] });
       const [results, ms] = await timed(() => busy.renderBatch(SPIN, [req("a")], { timeoutMs: 8000 }));
       console.log(`[sandbox] busy render at timeoutMs 8000 ended after ${ms.toFixed(0)}ms`);
-      expect(results).toEqual([{ id: "a", ok: false, failure: "timeout", message: "render exceeded 8000ms" }]);
+      expect(results).toEqual([{ id: "a", ok: false, failure: "timeout", message: "render exceeded 8000ms by the worker's clock" }]);
+    },
+    SLOW,
+  );
+
+  test(
+    "the worker times its own renders, so a render that runs on ends at the cap, long before the parent's backstop",
+    async () => {
+      const [results, ms] = await timed(() => renderer.renderBatch(SPIN, [req("a"), req("b")], { timeoutMs: 300 }));
+      expect(results).toEqual([{ id: "a", ok: false, failure: "timeout", message: "render exceeded 300ms by the worker's clock" }, skipped("b", "timeout")]);
+      console.log(`[sandbox] a render that runs on, at timeoutMs 300: ended after ${ms.toFixed(0)}ms`);
+    },
+    SLOW,
+  );
+
+  test(
+    "a scanner that stalls for longer than the cap and its grace, while its renders are quick, sees no timeout",
+    async () => {
+      // The review's false render_dos: a ~10 ms render reported as a timeout because the scanner's own event loop
+      // was busy elsewhere when the timer came due. 50 renders of about 30 ms at a 300 ms cap, and a 2 s stall among them.
+      const src = "{%- set r = range(60000) -%}{%- for i in r -%}{%- endfor -%}ok";
+      const requests = Array.from({ length: 50 }, (_, i) => req(`r${i}`));
+      const pending = renderer.renderBatch(src, requests, { timeoutMs: 300 });
+      await Bun.sleep(600);
+      block(2000);
+      expect(await pending).toEqual(requests.map((r) => ok(r.id, "ok")));
     },
     SLOW,
   );
@@ -379,6 +406,41 @@ describe.skipIf(!live)("the memory cap fails closed (ISC-43)", () => {
       expect(results).toEqual([ok("a", "fine"), failed("b", "memory"), skipped("c", "memory")]);
       expect((results[1] as { message: string }).message).toBe("worker resident memory exceeded the 128MiB cap, by its own reading");
       expect(ms).toBeLessThan(5000);
+    },
+    SLOW,
+  );
+
+  test(
+    "a breach the parent sees waits for the worker's last words, so it falls on the request the worker was on",
+    async () => {
+      // The worker answers its first request two seconds after the parse, while the parent's loop is stopped; the
+      // parent's first reading after that is over the cap. Read first, the answer stands, and the breach is the next request's.
+      let first: number | undefined;
+      let stalled = false;
+      const late = createRenderer({
+        command: [BUN, ROGUE, "late"],
+        readable: [ROGUE],
+        residentMemory: () => {
+          first ??= performance.now();
+          if (performance.now() - first < 1500) return 1;
+          if (!stalled) (stalled = true), block(2500);
+          return 2 ** 40;
+        },
+      });
+      expect(await late.renderBatch("", [req("a"), req("b")])).toEqual([ok("a", "late"), failed("b", "memory")]);
+    },
+    SLOW,
+  );
+
+  test(
+    "a breach while the worker reads its batch is the sandbox's failure, never a cap breach charged to the first request",
+    async () => {
+      // 120 MiB of request JSON against a 96 MiB cap: it cannot all be held, however it is read.
+      const big = "x".repeat(20 * 2 ** 20);
+      const requests = Array.from({ length: 6 }, (_, i) => req(`r${i}`, { big }));
+      const run = await runWorker("{{ big | length }}", requests, { timeoutMs: 2000, maxRssBytes: 96 * 2 ** 20, maxOutputBytes: 2 ** 20 });
+      expect(run.results).toEqual([]);
+      expect(run.sandboxError).toMatch(/^worker failed to start: .*memory/);
     },
     SLOW,
   );
@@ -472,6 +534,26 @@ describe.skipIf(!live)("the parent does not trust the worker", () => {
       skipped("b", "output_limit"),
     ]);
   });
+
+  test("a step the worker timed past the cap is a timeout, however soon its answer came", async () => {
+    const results = await rogue("slow-claim").renderBatch("", two, { timeoutMs: 500 });
+    expect(results).toEqual([
+      { id: "a", ok: false, failure: "timeout", message: "render took 10000000ms by the worker's clock, cap 500ms" },
+      skipped("b", "timeout"),
+    ]);
+  });
+
+  test(
+    "the worker's clock is the one the cap goes by; the parent's is a backstop at the cap and a grace",
+    async () => {
+      // Each answer comes 800 ms after the last by the parent's clock, past the 300 ms cap but inside its grace, and
+      // each render took 1 ms by the worker's: whatever held the answers up, it was not the template.
+      const [results, ms] = await timed(() => rogue("lagging").renderBatch("", two, { timeoutMs: 300 }));
+      expect(results).toEqual([ok("a", "lagging"), ok("b", "lagging")]);
+      expect(ms).toBeGreaterThan(1600);
+    },
+    SLOW,
+  );
 
   test("an oversized line before the template has parsed is one breach, and nothing renders after it", async () => {
     expect(await rogue("fat-parsed").renderBatch("", two, { maxOutputBytes: 1000 })).toEqual([
