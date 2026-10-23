@@ -25,6 +25,7 @@ import {
   clsOf,
   condOf,
   countArith,
+  countsOf,
   eitherRest,
   elementField,
   factsFrom,
@@ -38,6 +39,7 @@ import {
   memberField,
   memberPath,
   NO_FACTS,
+  NUMBER_KEEPING,
   pathOf,
   readOf,
   restOf,
@@ -165,7 +167,8 @@ const MUTATORS = new Set(["append", "extend", "insert", "update", "add"]);
 const LENGTHS = new Set(["length", "count", "wordcount"]);
 const SERIALIZE = new Set(["tojson", "string", "pprint"]);
 const ELEMENT_FILTERS = new Set(["first", "last", "min", "max"]);
-const KEEP_FILTERS = new Set(["list", "sort", "reverse", "unique", "batch", "slice", "int", "float", "abs", "round", "bool"]);
+// The number-keeping filters a count passes through (review round 3, contracts M2), and the ones that keep a list.
+const KEEP_FILTERS = new Set([...NUMBER_KEEPING, "list", "sort", "reverse", "unique", "batch", "slice", "bool"]);
 const SELECT_FILTERS = new Set(["select", "reject", "selectattr", "rejectattr"]);
 const SHAPE_SELECT_TESTS = new Set(["defined", "undefined", "none", "string", "mapping", "iterable", "sequence", "number", "integer", "float", "boolean", "true", "false"]);
 const COMPARE_SELECT_TESTS = new Set(["equalto", "==", "eq", "sameas", "ne", "!=", "in"]);
@@ -546,6 +549,8 @@ class Evaluation {
     const argNodes = f?.type === "CallExpression" ? ((f.args as Node[]) ?? []) : [];
     const args = argNodes.map((a) => this.value(a, facts));
     if (LENGTHS.has(name)) return lengthOf(o);
+    // A count's digits are the count.
+    if (name === "string" && countsOf(o)) return { ...o, konst: undefined, konstList: undefined };
     if (SERIALIZE.has(name)) return { lits: [], data: o.fields ? clsOf(o.fields) : o.data, truth: o.truth, gate: o.gate };
     if (ELEMENT_FILTERS.has(name)) return elemOf(o);
     if (name === "random") return NONDET;

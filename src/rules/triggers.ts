@@ -93,6 +93,8 @@ export interface Field {
   threshold?: "content" | "nondeterministic";
   /** An identifier that pairs records: a call's `id`, its result's `tool_call_id`. */
   ident?: true;
+  /** A list sorted by a value of this class: which element is first, last or at a position depends on it (review round 3, contracts S1). */
+  order?: "content" | "nondeterministic";
 }
 
 /** A constant a comparison names: Jinja's string, number, boolean or none. */
@@ -177,7 +179,11 @@ const PART_FIELDS = [
   "call_id", "arguments", "output", "response",
 ];
 const PART: Field = { cls: "content", kind: "record", fields: { type: TYPE, text: TEXT, ...Object.fromEntries(PART_FIELDS.map((k) => [k, ANY_CONTENT])) }, other: UNDOCUMENTED };
-const MESSAGE_CONTENT: Field = { cls: "content", kind: "mixed", elem: PART, other: ANY_CONTENT };
+// Content given as one mapping (FunctionGemma's `name` and `response`, xLAM's
+// `content.content`) has a part's fields. Any other member is undocumented, as
+// a part's is (review round 3, contracts S2); its values read by `unnamed` stay
+// plain content.
+const MESSAGE_CONTENT: Field = { cls: "content", kind: "mixed", elem: PART, fields: Object.fromEntries(["type", "text", ...PART_FIELDS].map((k) => [k, ANY_CONTENT])), other: UNDOCUMENTED };
 
 // Role routes a message: compared with a role from ROLES, or with another
 // role, it is a presence test. Compared with anything else, or after a
@@ -380,6 +386,48 @@ export function listOf(f: Field): Field {
   return l;
 }
 
+const records = new WeakMap<Field, Field>();
+const built = new WeakSet<Field>();
+/**
+ * A dict the template builds with `f` among its values: its members are `f`,
+ * its keys constants. A count kept as a value is still a count, a role still
+ * a role (review round 3, contracts M2). Cached so identity stays stable
+ * across passes.
+ */
+export function recordOf(f: Field): Field {
+  let r = records.get(f);
+  if (!r) {
+    records.set(f, (r = { cls: f.cls, kind: "record", other: f }));
+    built.add(r);
+  }
+  return r;
+}
+
+const orders = new WeakMap<Field, Map<TestClass, Field>>();
+/**
+ * `f` sorted by a value of class `cls`: the same elements, but the one at a
+ * position is chosen by that value. `f` itself when the order reveals no more
+ * than presence. Cached per node and class so identity stays stable across
+ * passes (review round 3, contracts S1).
+ */
+export function orderedOf(f: Field, cls: TestClass | undefined): Field {
+  if (cls !== "content" && cls !== "nondeterministic") return f;
+  const order = f.order ? (stronger(f.order, cls) as "content" | "nondeterministic") : cls;
+  if (order === f.order) return f;
+  let byCls = orders.get(f);
+  if (!byCls) orders.set(f, (byCls = new Map()));
+  let o = byCls.get(order);
+  if (!o) byCls.set(order, (o = { ...f, order }));
+  return o;
+}
+
+/** The strongest order of any of `fs`: what chooses the element at a position. */
+export function orderOf(fs: Fields | undefined): TestClass | undefined {
+  let c: TestClass | undefined;
+  for (const f of fs ?? []) if (f.order) c = c ? stronger(c, f.order) : f.order;
+  return c;
+}
+
 /** What iterating `f` yields: a record's keys, or a list's elements. */
 export function elementField(f: Field): Field {
   if (f.kind === "record") return PRESENCE;
@@ -423,7 +471,7 @@ export function vocabClass(fs: Fields, value: unknown, maps: readonly string[] =
  * a content one; review round 2, ruling c). Otherwise `key` itself.
  */
 export function keyed(key: Val, dict: Val): Val {
-  if (!dict.konstKeys?.length || dict.fields || !key.fields?.length || !key.fields.every((f) => f.vocab)) return key;
+  if (!dict.konstKeys?.length || dict.fields?.some((f) => !built.has(f)) || !key.fields?.length || !key.fields.every((f) => f.vocab)) return key;
   let c: TestClass = key.rest ?? "none";
   for (const k of dict.konstKeys) c = stronger(c, vocabClass(key.fields, k) ?? "content");
   return { ...key, data: c };
@@ -524,6 +572,8 @@ export interface Lit {
   brk?: true;
   /** Folded from several literals (`'a' ~ 'b'`, `|join`): no one literal in the template holds this text. */
   folded?: true;
+  /** A key of a dict held in a list or dict: how many lookups down its dict is. Unset for the value's own keys, which a lookup on it does not return (review round 3, contracts M1). */
+  nest?: number;
 }
 
 /** What the extraction knows about one runtime value. */
@@ -878,8 +928,10 @@ function constList(n: Node, v: Val, env: TestEnv, facts: Facts): (string | numbe
 const ZERO: Val = { lits: [], data: "none", truth: "none", konst: 0 };
 const ARITHMETIC = new Set(["+", "-", "*", "/", "//", "%", "**"]);
 const LENGTHS = new Set(["length", "count", "wordcount"]);
-// Filters that leave a count's value as it is: its digits, or the number.
-const AS_NUMBER = new Set(["string", "int", "float"]);
+// Filters that print a number as the same number: its digits, or the number. One
+// list for the comparison operands here, the extraction and the provenance
+// evaluator (review round 3, contracts M2).
+export const NUMBER_KEEPING: ReadonlySet<string> = new Set(["string", "int", "float", "abs", "round", "trim", "e", "escape", "safe"]);
 
 function filterName(f: Node): string {
   if (!f || typeof f !== "object") return "";
@@ -897,7 +949,7 @@ function operand(n: Node, env: TestEnv, facts: Facts, depth: number): Val {
   if (n.type === "FilterExpression" && LENGTHS.has(filterName(n.filter as Node))) {
     return { ...lengthOf(operand(n.operand as Node, env, facts, depth + 1)), gate: v.gate };
   }
-  if (n.type === "FilterExpression" && AS_NUMBER.has(filterName(n.filter as Node))) {
+  if (n.type === "FilterExpression" && NUMBER_KEEPING.has(filterName(n.filter as Node))) {
     const inner = operand(n.operand as Node, env, facts, depth + 1);
     if (countsOf(inner)) return { ...inner, gate: strongest(inner.gate, v.gate) };
   }

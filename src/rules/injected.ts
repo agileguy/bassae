@@ -60,9 +60,13 @@ import {
   memberField,
   memberPath,
   NO_FACTS,
+  NUMBER_KEEPING,
+  orderedOf,
+  orderOf,
   pathOf,
   presenceOf,
   rangeOf,
+  recordOf,
   restOf,
   rootField,
   sameFields,
@@ -757,26 +761,29 @@ class Interp {
           if (typeof e.konst === "string") konsts.push(e.konst);
           else allKonst = false;
           if (e.genFlag) genAt.push(i, i - els.length);
-          v = join(v, { ...e, konst: undefined, konstList: undefined, ns: undefined, macro: undefined, path: undefined });
+          // A list of its elements' fields: `[messages|length]` is a list of one count, not a count (review round 3, contracts S3).
+          v = join(v, { ...e, keys: deeper(e.keys), fields: e.fields && mapFields(e.fields, listOf), konst: undefined, konstList: undefined, ns: undefined, macro: undefined, path: undefined });
         });
         return { ...v, truth: "none", konst: undefined, konstList: allKonst ? konsts : undefined, genAt: genAt.length ? genAt : undefined };
       }
       case "ObjectLiteral": {
         const map = node.value as Map<unknown, unknown>;
-        let v: Val = { lits: [], data: "none", truth: "none" };
+        // An empty dict to start from, which adds nothing to what a value may be.
+        let v: Val = { lits: [], keys: [], data: "none", truth: "none" };
         const keys: Lit[] = [];
         const genAt: string[] = [];
         let konstKeys: string[] | undefined = [];
         if (map instanceof Map) {
           for (const [k, val] of map) {
             const kv = this.eval(k, c);
-            keys.push(...kv.lits);
+            keys.push(...kv.lits.map(own));
             if (typeof kv.konst === "string" && !kv.gate) konstKeys?.push(kv.konst);
             else konstKeys = undefined;
             const vv = this.eval(val, c);
             this.holds(vv);
             if (vv.genFlag && typeof kv.konst === "string") genAt.push(kv.konst);
-            v = join(v, { ...vv, konst: undefined, konstList: undefined, ns: undefined, macro: undefined, path: undefined, fields: undefined, rest: undefined });
+            // A value keeps its fields as a member: a count is still a count (review round 3, contracts M2).
+            v = join(v, { ...vv, keys: deeper(vv.keys), fields: vv.fields && mapFields(vv.fields, recordOf), konst: undefined, konstList: undefined, ns: undefined, macro: undefined, path: undefined });
           }
         }
         return { ...v, keys: [...(v.keys ?? []), ...keys], truth: "none", genAt: genAt.length ? genAt : undefined, konstKeys };
@@ -853,6 +860,8 @@ class Interp {
         if (cut) return cut;
       }
       counted = this.positionCond(o, kv, prop, c, "index");
+      // A position in a sorted list is chosen by what the sort compared (review round 3, contracts S1).
+      if (typeof kv.konst !== "string") counted = strongest(counted, this.choiceCond(orderOf(o.fields), prop));
       keyGate = this.selCond(kv, prop);
       // A role looking up a dict of constant keys is compared with each key (review round 2, ruling c).
       const kd = keyed(kv, o);
@@ -866,9 +875,13 @@ class Interp {
     if (o.macro !== undefined) return EMPTY;
     const fields = o.fields ? mapFields(o.fields, (f) => (typeof key === "number" ? positionField(f, key, memberField(f, undefined)) : memberField(f, key))) : undefined;
     const path = o.path !== undefined && typeof key === "string" ? `${o.path}.${key}` : undefined;
+    const inner = entryKeys(o.keys);
     const v: Val = {
-      // The key chooses which entry is printed: the entries depend on it.
+      // The key chooses which entry is printed: the entries depend on it. An
+      // entry may be a dict whose keys a loop or filter prints (review round
+      // 3, contracts M1).
       lits: this.choose(o.lits, keyGate),
+      keys: inner && this.choose(inner, keyGate),
       data: fields ? clsOf(fields) : o.data,
       truth: fields ? presenceOf(fields) : o.truth,
       gate: strongest(o.gate, keyGate),
@@ -920,15 +933,17 @@ class Interp {
             return rangeOf(a);
           }
           case "dict": {
-            let v: Val = EMPTY;
+            let v: Val = { ...EMPTY, keys: [] };
             const keys: Lit[] = [];
             for (const a of args) {
-              if (a?.type === "KeywordArgumentExpression") keys.push({ text: String((a.key as Node).value), span: this.exprSpan(a.key as Node) });
+              // A keyword's value is an entry; `dict(D)` copies D's keys and members.
+              const kw = a?.type === "KeywordArgumentExpression";
+              if (kw) keys.push({ text: String((a.key as Node).value), span: this.exprSpan(a.key as Node) });
               const av = this.eval(a, c);
               this.holds(av);
-              v = join(v, { ...av, konst: undefined, fields: undefined, rest: undefined, path: undefined });
+              v = join(v, { ...av, keys: kw ? deeper(av.keys) : av.keys, fields: kw && av.fields ? mapFields(av.fields, recordOf) : av.fields, konst: undefined, path: undefined });
             }
-            return { ...v, keys, truth: "none" };
+            return { ...v, keys: [...(v.keys ?? []), ...keys], truth: "none" };
           }
         }
       }
@@ -1040,9 +1055,12 @@ class Interp {
         const key = a.key as Node;
         const v = this.eval(a.value, c);
         layer.own.set(String(key.value), v);
-        if (!formals.some((f) => f.name === String(key.value))) kwargs = join(kwargs, { ...element(v), keys: [{ text: String(key.value), span: this.exprSpan(key) }] });
+        if (!formals.some((f) => f.name === String(key.value))) kwargs = join(kwargs, { ...element(v), keys: [...(deeper(v.keys) ?? []), { text: String(key.value), span: this.exprSpan(key) }] });
       } else if (pos < formals.length) layer.own.set(formals[pos++]!.name, this.eval(a, c));
-      else varargs = join(varargs, element(this.eval(a, c)));
+      else {
+        const v = element(this.eval(a, c));
+        varargs = join(varargs, { ...v, keys: deeper(v.keys) });
+      }
     }
     if (!formals.some((f) => f.name === "varargs")) layer.own.set("varargs", varargs);
     if (!formals.some((f) => f.name === "kwargs")) layer.own.set("kwargs", kwargs);
@@ -1126,13 +1144,14 @@ class Interp {
         const pick = argNodes[0] ? countPick(a[0]!, (r.keys ?? []).map((l) => l.text)) : undefined;
         if (pick) sel = strongest(sel, condOf(pick === "presence" ? "none" : pick, this.exprSpan(argNodes[0]!)));
         const dflt = a[1] && !a[1].fields ? restOf(a[1]) : a[1]?.data;
-        return { ...base, gate: strongest(base.gate, sel), lits: this.choose([...r.lits, ...(a[1]?.lits ?? [])], sel), data: fields ? clsOf(fields) : r.data, truth: fields ? presenceOf(fields) : r.truth, fields, rest: fields ? eitherRest(r.rest, dflt) : undefined };
+        const inner = [...(entryKeys(r.keys) ?? []), ...(a[1]?.keys ?? [])];
+        return { ...base, gate: strongest(base.gate, sel), lits: this.choose([...r.lits, ...(a[1]?.lits ?? [])], sel), keys: inner.length ? this.choose(inner, sel) : undefined, data: fields ? clsOf(fields) : r.data, truth: fields ? presenceOf(fields) : r.truth, fields, rest: fields ? eitherRest(r.rest, dflt) : undefined };
       }
       case "items":
       case "keys":
       case "values":
         if (m === "keys") return { ...base, lits: r.keys ?? [], data: r.fields ? clsOf(mapFields(r.fields, keyField)) : r.data, truth: r.truth };
-        if (m === "values") return { ...base, lits: r.lits, data: r.data, truth: r.truth, fields: r.fields ? mapFields(r.fields, (f) => listOf(valueField(f))) : undefined, rest: r.rest };
+        if (m === "values") return { ...base, lits: r.lits, keys: heldKeys(r.keys), data: r.data, truth: r.truth, fields: r.fields ? mapFields(r.fields, (f) => listOf(valueField(f))) : undefined, rest: r.rest };
         return { ...base, lits: r.lits, keys: r.keys, data: r.data, truth: r.truth, fields: r.fields, rest: r.rest, pairs: true };
       case "append":
       case "extend":
@@ -1141,7 +1160,9 @@ class Interp {
       case "add": {
         // A mutating method: the receiver now holds the argument too.
         for (const x of a) this.holds(x);
-        const v = { ...(a[a.length - 1] ?? EMPTY), konst: undefined, konstList: undefined, ns: undefined, macro: undefined, path: undefined };
+        const arg = a[a.length - 1] ?? EMPTY;
+        // An appended dict is an entry, whose keys a lookup prints.
+        const v = { ...arg, keys: m === "extend" || m === "update" ? arg.keys : deeper(arg.keys), konst: undefined, konstList: undefined, ns: undefined, macro: undefined, path: undefined };
         const k = receiver?.type === "Identifier" ? String(receiver.value) : receiver?.type === "MemberExpression" ? this.slot(receiver, c) : undefined;
         if (k !== undefined) this.assign(k, v, c, c.st.get(k), true);
         return EMPTY;
@@ -1203,17 +1224,18 @@ class Interp {
       case "capitalize":
       case "trim": {
         const konst = typeof o.konst === "string" ? caseMap(o.konst, name) : undefined;
-        return { ...keep, lits: konst !== undefined && konst !== o.konst ? this.folded(o.lits, konst, fnode) : o.lits, konst };
+        return { ...keep, lits: konst !== undefined && konst !== o.konst ? this.folded(o.lits, konst, fnode) : o.lits, konst, ...(NUMBER_KEEPING.has(name) ? countKept(o) : {}) };
       }
       case "string":
       case "tojson":
       case "pprint":
         // The text holds every field, so a test on it reads the strongest one.
         // A count's digits are the count (`messages|length|string == '41'`).
-        return { ...keep, lits: [...o.lits, ...(o.keys ?? [])], data: o.fields ? stronger(o.data, clsOf(o.fields)) : o.data, konst: name === "string" && typeof o.konst === "string" ? o.konst : undefined, fields: countsOf(o), rest: countsOf(o) ? o.rest : undefined };
+        return { ...keep, lits: [...o.lits, ...(o.keys ?? [])], data: o.fields ? stronger(o.data, clsOf(o.fields)) : o.data, konst: name === "string" && typeof o.konst === "string" ? o.konst : undefined, ...countKept(o) };
       case "safe":
       case "e":
       case "escape":
+        return { ...keep, ...countKept(o) };
       case "forceescape":
       case "indent":
       case "center":
@@ -1242,7 +1264,7 @@ class Interp {
         // survives; a loop over them still runs once per element.
         const s = seqOf(o);
         const [cls, by] = name === "sort" || name === "unique" ? this.orderCond(o, argNodes, fnode) : ["none" as TestClass, undefined];
-        return { ...keep, lits: this.choose(s.lits, by), keys: s.keys && this.choose(s.keys, by), truth: name === "unique" ? stronger(o.truth, cls) : o.truth, fields: o.fields, rest: o.rest, pairs: name === "slice" ? undefined : o.pairs, konstList: name === "list" ? o.konstList : undefined };
+        return { ...keep, lits: this.choose(s.lits, by), keys: s.keys && this.choose(s.keys, by), truth: name === "unique" ? stronger(o.truth, cls) : o.truth, fields: by && o.fields ? mapFields(o.fields, (f) => orderedOf(f, cls)) : o.fields, rest: o.rest, pairs: name === "slice" ? undefined : o.pairs, konstList: name === "list" ? o.konstList : undefined };
       }
       case "items":
       case "dictsort":
@@ -1255,8 +1277,9 @@ class Interp {
         // A pair's first is its key and its last its value.
         const end = name === "first" ? 0 : name === "last" ? -1 : undefined;
         const fields = o.fields && !o.pairs && end !== undefined ? mapFields(o.fields, (f) => positionField(f, end, elementField(f))) : e.fields;
-        // What `min` and `max` compare chooses the element.
-        const by = end === undefined ? this.orderCond(o, argNodes, fnode)[1] : undefined;
+        // What `min` and `max` compare chooses the element, and what a sort
+        // compared chooses the first or last (review round 3, contracts S1).
+        const by = end === undefined ? this.orderCond(o, argNodes, fnode)[1] : this.choiceCond(orderOf(o.fields), fnode);
         return { ...keep, lits: this.choose(e.lits, strongest(this.argsCond(a, argNodes), by)), data: fields ? clsOf(fields) : e.data, truth: fields ? presenceOf(fields) : e.truth, gate: strongest(gate, by), fields, rest: e.rest };
       }
       case "length":
@@ -1270,13 +1293,14 @@ class Interp {
       case "abs":
       case "round":
       case "sum":
-        return { lits: [], data: o.data, truth: o.data, gate };
+        // A number kept, or the sum of a list of counts, is still the count.
+        return { lits: [], data: o.data, truth: o.data, gate, ...countKept(name === "sum" && o.fields ? { ...o, fields: mapFields(o.fields, elementField) } : o) };
       case "map": {
         const attr = kwargKonst(argNodes, "attribute");
         const efs = o.fields ? mapFields(o.fields, o.pairs ? pairField : elementField) : undefined;
         if (attr !== undefined && efs) {
           const fs = mapFields(efs, (f) => memberPath(f, attr));
-          return { ...keep, lits: seqOf(o).lits, data: clsOf(fs), fields: mapFields(fs, listOf), rest: o.rest };
+          return { ...keep, lits: seqOf(o).lits, data: clsOf(fs), fields: mapFields(fs, (f) => orderedOf(listOf(f), orderOf(o.fields))), rest: o.rest };
         }
         // An attribute name computed at runtime chooses which entries are printed.
         return { ...keep, lits: this.choose(seqOf(o).lits, this.argsCond(a, argNodes)) };
@@ -1301,11 +1325,20 @@ class Interp {
         const read: TestClass = fs ? clsOf(fs) : o.data;
         const testArg = a[testAt];
         const test = typeof testArg?.konst === "string" ? testArg.konst : "";
-        let sel: TestClass = test === "" || SHAPE_SELECT_TESTS.has(test) ? (read === "none" ? "none" : fs ? presenceOf(fs) : "presence") : ((fs && vocabSelect(fs, test, a[testAt + 1])) ?? read);
+        let sel: TestClass = test === "" || SHAPE_SELECT_TESTS.has(test) ? (read === "none" ? "none" : fs ? presenceOf(fs) : "presence") : ((fs && (vocabSelect(fs, test, a[testAt + 1]) ?? countSelect(fs, test, a[testAt + 1], o))) ?? read);
         // What the elements are compared with (`select('in', x)`) decides too.
         for (const x of a.slice(testAt + 1)) sel = stronger(sel, x.data);
         const cond = strongest(this.argsCond(a, argNodes), condOf(sel === "presence" ? "none" : sel, this.exprSpan(fnode)));
         return { ...keep, lits: this.choose(o.lits, cond), keys: o.keys && this.choose(o.keys, cond), fields: o.fields, rest: o.rest, truth: stronger(o.truth, sel), pairs: o.pairs };
+      }
+      case "attr": {
+        // `x|attr(k)` reads the member `k` as `x.k` does, so a member the
+        // schema doesn't document is undocumented here too (review round 3,
+        // contracts S2). A name computed at runtime chooses the member.
+        const k = typeof a[0]?.konst === "string" ? a[0].konst : undefined;
+        const fields = o.fields ? mapFields(o.fields, (f) => memberField(f, k)) : undefined;
+        const by = this.argsCond(a, argNodes);
+        return { ...keep, lits: this.choose(o.lits, by), data: fields ? clsOf(fields) : o.data, truth: fields ? presenceOf(fields) : o.truth, gate: strongest(gate, by), fields, rest: fields ? o.rest : undefined };
       }
       case "random": {
         this.flagNondet(fnode, "uses the `random` filter");
@@ -1743,6 +1776,15 @@ function vocabSelect(fs: Fields, test: string, value: Val | undefined): TestClas
   return cls;
 }
 
+// `select('gt', 40)` on counts compares each with the constant as `>` does: a
+// threshold, or presence within 1 (review round 3, contracts S3).
+const ORDER_SELECT_TESTS = new Set(["eq", "equalto", "==", "ne", "!=", "lt", "lessthan", "<", "le", "<=", "gt", "greaterthan", ">", "ge", ">="]);
+
+function countSelect(fs: Fields, test: string, value: Val | undefined, list: Val): TestClass | undefined {
+  if (!value || !ORDER_SELECT_TESTS.has(test)) return undefined;
+  return countTest({ lits: [], data: "presence", truth: "presence", fields: fs, rest: list.rest, restNums: list.restNums }, value);
+}
+
 function runtimeVal(field: Field, path: string | undefined): Val {
   return { lits: [], data: field.cls, truth: presenceOf([field]), fields: [field], path };
 }
@@ -1751,6 +1793,32 @@ function runtimeVal(field: Field, path: string | undefined): Val {
 // classes, none of its identity as a constant, namespace or macro.
 function element(v: Val): Val {
   return { ...v, konst: undefined, konstList: undefined, ns: undefined, nsInit: undefined, path: undefined };
+}
+
+// How deep a nested dict's keys are tracked; deeper ones stay at this depth,
+// so every lookup still finds them (review round 3, contracts M1).
+const MAX_NEST = 4;
+
+/** `keys` once their dict is an entry of a list or dict: one lookup further down. */
+function deeper(keys: Lit[] | undefined): Lit[] | undefined {
+  return keys?.map((l) => ({ ...l, nest: Math.min((l.nest ?? 0) + 1, MAX_NEST) }));
+}
+
+/** The keys an entry looked up from a list or dict holds: those one lookup down, now its own. */
+function entryKeys(keys: Lit[] | undefined): Lit[] | undefined {
+  const out = keys?.filter((l) => l.nest).map((l) => ({ ...l, nest: l.nest! >= MAX_NEST ? MAX_NEST : l.nest! - 1 || undefined }));
+  return out?.length ? out : undefined;
+}
+
+/** The keys held by the entries of a dict, at the same depth: its own keys are gone. */
+function heldKeys(keys: Lit[] | undefined): Lit[] | undefined {
+  const out = keys?.filter((l) => l.nest);
+  return out?.length ? out : undefined;
+}
+
+/** A key as a dict's own, whatever dict it came from. */
+function own(l: Lit): Lit {
+  return l.nest ? { ...l, nest: undefined } : l;
 }
 
 function boolVal(cls: TestClass): Val {
@@ -1894,14 +1962,16 @@ function emptySlice(start: number | undefined, stop: number | undefined, step = 
 
 type KeyRole = "index" | "bound" | "step";
 
-// Filters that print a number as the same number.
-const NUMBER_KEEPING = new Set(["string", "int", "float", "abs", "round", "trim", "e", "escape", "safe"]);
-
 /** The expression under any filters that keep its number. */
 function numberKept(n: Node): Node {
   let x = n;
   for (let i = 0; i < 16 && x?.type === "FilterExpression" && NUMBER_KEEPING.has(filterName(x.filter as Node)); i++) x = x.operand as Node;
   return x;
+}
+
+/** A count printed as the same number, or summed, is still the count, with what else it may be (review round 3, contracts M2). */
+function countKept(o: Val): Pick<Val, "fields" | "rest" | "restNums"> {
+  return countsOf(o) ? { fields: o.fields, rest: o.rest, restNums: o.restNums } : {};
 }
 
 const number = (k: number | undefined): Val => ({ lits: [], data: "none", truth: "none", konst: k });
@@ -1942,7 +2012,8 @@ function keysOf(it: Val): Val {
 
 function valuesOf(it: Val): Val {
   const fields = it.fields ? mapFields(it.fields, valueField) : undefined;
-  return { lits: it.lits, data: fields ? clsOf(fields) : it.data, truth: fields ? presenceOf(fields) : it.truth, gate: it.gate, fields, rest: it.rest };
+  // A value may be a dict, with keys of its own (review round 3, contracts M1).
+  return { lits: it.lits, keys: entryKeys(it.keys), data: fields ? clsOf(fields) : it.data, truth: fields ? presenceOf(fields) : it.truth, gate: it.gate, fields, rest: it.rest };
 }
 
 function maxData(r: Val, a: Val[]): TestClass {
@@ -2009,7 +2080,8 @@ function unionLits(a: Lit[], b: Lit[]): Lit[] {
       const cur = out[i]!;
       const cond = strongest(cur.cond, l.cond);
       const at = either(cur.at, l.at);
-      if (cond !== cur.cond || at !== cur.at) out[i] = { ...cur, cond, at };
+      const nest = Math.max(cur.nest ?? 0, l.nest ?? 0) || undefined;
+      if (cond !== cur.cond || at !== cur.at || nest !== cur.nest) out[i] = { ...cur, cond, at, nest };
     }
   }
   return out;
@@ -2059,7 +2131,7 @@ function sameVal(a: Val, b: Val): boolean {
   for (let i = 0; i < a.lits.length; i++) if (a.lits[i]!.cond?.test !== b.lits[i]!.cond?.test) return false;
   // A key's condition can grow on its own (`selectattr` by a value a later
   // pass learns is content), and join keeps the key list's length.
-  for (let i = 0; i < (a.keys?.length ?? 0); i++) if (a.keys![i]!.cond?.test !== b.keys![i]!.cond?.test) return false;
+  for (let i = 0; i < (a.keys?.length ?? 0); i++) if (a.keys![i]!.cond?.test !== b.keys![i]!.cond?.test || a.keys![i]!.nest !== b.keys![i]!.nest) return false;
   return true;
 }
 
