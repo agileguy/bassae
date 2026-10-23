@@ -27,7 +27,7 @@ export const CHATML_MEDIUM = CHATML.replace("{% endfor %}", "{% endfor %}Always 
 export const CHATML_HIGH = CHATML.replace("{% endfor %}", "{% endfor %}{{ message.__class__ }}");
 
 /** CHATML with a jinja2 filter the JS engine lacks: MEDIUM unanalyzable, and code-exec analysis incomplete (ISC-12.1). */
-export const CHATML_UNANALYZABLE = `${CHATML}{{ messages | map('upper') | list }}`;
+export const CHATML_UNANALYZABLE = `${CHATML}{{ messages | batch(2) | list }}`;
 
 /**
  * CHATML with CRLF line ends, a widened gap inside a tag and a trailing newline: a whitespace-only variant
