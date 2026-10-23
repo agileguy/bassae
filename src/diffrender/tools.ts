@@ -187,9 +187,10 @@ export function checkTools(probe: Probe, output: string, transforms: readonly Tr
   const found = jsonValues(output);
   const values = found.map((f) => f.value);
   const everything = nested(values);
-  // The forms in which a probe tool may legitimately appear as JSON: itself, or its function member.
-  const forms = (tool: unknown) => [tool, ...(isObj(tool) && tool.function !== undefined ? [tool.function] : [])];
-  const isProbeTool = (v: unknown) => probe.tools.some((t) => forms(t).some((f) => same(f, v)));
+  // The forms in which each probe tool may legitimately appear as JSON: itself, or its function member.
+  const forms = probe.tools.map((tool) => [tool, ...(isObj(tool) && tool.function !== undefined ? [tool.function] : [])]);
+  const isForm = (i: number, v: unknown) => forms[i]!.some((f) => same(f, v));
+  const isProbeTool = (v: unknown) => forms.some((_, i) => isForm(i, v));
 
   const { sites, crowded } = sitesOf(output, matchers);
   // A site shows a tool when its text is the cited template's rendering of it, or a pinned variant's. Each matcher
@@ -207,10 +208,7 @@ export function checkTools(probe: Probe, output: string, transforms: readonly Tr
   const shows = (site: Site) => texts.get(site.m)!.get(site.text) ?? [];
 
   const passed = new Set(sites.flatMap(shows));
-  const failing = probe.tools.flatMap((tool, i) => {
-    if (passed.has(i) || everything.some((v) => forms(tool).some((f) => same(f, v)))) return [];
-    return [i];
-  });
+  const failing = probe.tools.flatMap((_, i) => (passed.has(i) || everything.some((v) => isForm(i, v)) ? [] : [i]));
 
   // Definitions in the output that match no probe tool: JSON ones, and allowlisted renderings of no probe tool.
   const extras = [...definitions(values).filter((d) => !isProbeTool(d.value)).map((d) => d.name), ...sites.filter((s) => shows(s).length === 0).map((s) => s.name)];
