@@ -3,7 +3,7 @@
 //   bun scripts/platform-parity.ts > mac.txt      # then the same on the other machine, and diff
 //
 // Scans every corpus entry the way the recall test does (a .jinja with --template, anything else as a path),
-// plus the clean fixtures. Each line holds the path relative to the repo, the template name, its SHA-256, its
+// plus the held-out set and the clean fixtures. Each line holds the path relative to the repo, the template name, its SHA-256, its
 // status and every (rule, severity) with its count. Model-level findings get a line of their own.
 
 import { readdirSync } from "node:fs";
@@ -11,25 +11,20 @@ import { join, relative } from "node:path";
 import type { Finding, ScanReport } from "../src/types.ts";
 
 const ROOT = join(import.meta.dir, "..");
-const CORPORA = ["fixtures/malicious", "fixtures/heldout"];
+const MALICIOUS = join(ROOT, "fixtures/malicious");
+const HELDOUT = join(ROOT, "fixtures/heldout");
+const CLEAN = join(ROOT, "fixtures/clean");
 
 const targets: string[] = [];
-for (const corpus of CORPORA) {
-  const dir = join(ROOT, corpus);
-  let classes: string[];
-  try {
-    classes = readdirSync(dir, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name);
-  } catch {
-    continue;
-  }
-  for (const c of classes.sort()) {
-    const file = Bun.file(join(dir, c, "expected.json"));
-    if (!(await file.exists())) continue;
-    for (const e of ((await file.json()) as { fixtures: { path: string }[] }).fixtures) targets.push(join(dir, e.path));
-  }
+const classes = readdirSync(MALICIOUS, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name);
+for (const c of classes.sort()) {
+  const file = Bun.file(join(MALICIOUS, c, "expected.json"));
+  if (!(await file.exists())) continue;
+  for (const e of ((await file.json()) as { fixtures: { path: string }[] }).fixtures) targets.push(join(MALICIOUS, e.path));
 }
-const clean = join(ROOT, "fixtures/clean");
-for (const f of readdirSync(clean).filter((f) => f.endsWith(".jinja")).sort()) targets.push(join(clean, f));
+const heldout = Bun.file(join(HELDOUT, "heldout.json"));
+if (await heldout.exists()) for (const e of ((await heldout.json()) as { fixtures: { file: string }[] }).fixtures) targets.push(join(HELDOUT, e.file));
+for (const f of readdirSync(CLEAN).filter((f) => f.endsWith(".jinja")).sort()) targets.push(join(CLEAN, f));
 
 const args = targets.flatMap((t) => (t.endsWith(".jinja") ? ["--template", t] : [t]));
 const proc = Bun.spawn(["bun", join(ROOT, "src/cli.ts"), "--json", ...args], { cwd: ROOT, stdout: "pipe", stderr: "inherit" });
