@@ -14,6 +14,7 @@ import { preLex } from "../parse/prelexer.ts";
 import { extract, rawItems, Scaffold } from "./injected.ts";
 import { findEncodedBlobs, findInvisibleChars, findUrls, findUrlsRaw, scanUrls } from "./textscan.ts";
 import { capPerRule, clip, dedupe, pushAll } from "./finalize.ts";
+import { whitespaceKey } from "../whitespace.ts";
 
 // Role and channel names a template writes between special tokens. A channel
 // (gpt-oss `analysis`, Gemma `thought`) is routing, not instruction, so it is
@@ -110,7 +111,7 @@ export function templateLiterals(text: string): Set<string> {
   return out;
 }
 
-/** Scaffolding for one template: the model's special tokens that do not read as prose (ISC-17.3), role names, whitespace and delimiters, and every literal in `known`. */
+/** Scaffolding for one template: the model's special tokens that do not read as prose (ISC-17.3), role names, whitespace and delimiters, and the text `known` emits. */
 export function buildScaffolding(model: ModelRecord, known?: KnownGoodTemplate): Set<string> {
   const out = new Set<string>();
   for (const t of model.specialTokens) if (!readsAsProse(t)) out.add(t);
@@ -120,17 +121,52 @@ export function buildScaffolding(model: ModelRecord, known?: KnownGoodTemplate):
     out.add(r.toUpperCase());
   }
   for (const d of DELIMITERS) out.add(d);
-  if (known) for (const l of templateLiterals(known.text)) out.add(l);
+  if (known) for (const l of baseline(known).pieces) out.add(l);
   return out;
 }
 
-// The scaffolding the extraction matches against: the context's set, plus the
-// literals of the registry entry when there is one (ISC-17.1), so a caller that
-// built scaffolding without `known` still gets baselined literals removed.
+// The text a template emits: its literals, and what its constant expressions
+// fold to. gpt-oss writes `"namespace " + namespace_name + " {"` with a constant
+// name, and no single literal holds `namespace functions {`; read word by word,
+// `functions` after `namespace` is a bare word inside a sentence and would be
+// residue.
+function emitted(text: string): Set<string> {
+  const out = templateLiterals(text);
+  const outcome = parseTemplate(text);
+  if (outcome.program) for (const it of extract(outcome, text, new Set()).items) out.add(it.text);
+  return out;
+}
+
+interface Baseline {
+  pieces: ReadonlySet<string>;
+  keys: ReadonlySet<string>;
+}
+const BASELINES = new WeakMap<KnownGoodTemplate, Baseline>();
+
+/** What a registry entry emits, and its whitespace keys. Read once per entry. */
+function baseline(known: KnownGoodTemplate): Baseline {
+  let b = BASELINES.get(known);
+  if (!b) {
+    const pieces = emitted(known.text);
+    BASELINES.set(known, (b = { pieces, keys: new Set([...pieces].map(whitespaceKey)) }));
+  }
+  return b;
+}
+
+// The scaffolding the extraction matches against: the context's set, plus what
+// the registry entry emits when there is one (ISC-17.1), so a caller that built
+// scaffolding without `known` still gets baselined text removed. A literal of
+// this template equal to one of those up to ASCII whitespace is baselined too
+// (ISC-24.2): a CRLF or re-indented copy of an entry emits `<end_of_turn>\r\n`
+// where the entry has `<end_of_turn>\n`. `knownGood` is still the exact hash.
 function effectiveScaffolding(ctx: AnalysisContext): ReadonlySet<string> {
   if (!ctx.known) return ctx.scaffolding;
+  const b = baseline(ctx.known);
   const s = new Set(ctx.scaffolding);
-  for (const l of templateLiterals(ctx.known.text)) s.add(l);
+  for (const l of b.pieces) s.add(l);
+  if (ctx.template.text !== ctx.known.text) {
+    for (const l of emitted(ctx.template.text)) if (b.keys.has(whitespaceKey(l))) s.add(l);
+  }
   return s;
 }
 
