@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.1.4 (2026-10-24)
+
+Phase 4: the test corpus, the blind held-out set, the verified clean manifest and cross-platform parity (#4).
+
+### Added
+- A malicious corpus under `fixtures/malicious/`: 43 fixtures over the code-execution, injection, text-scan, CVE, render-time and whole-model classes, each with an `expected.json` of the findings it must raise. `test/corpus/recall.test.ts` runs one scan of the corpus and checks that every HIGH-capable rule is covered at HIGH and every named attack is tagged. Every `RuleId` is classified in a typed record, so adding a rule fails the typecheck until it is classified.
+- A blind held-out set under `fixtures/heldout/`: 21 inert fixtures over 11 threat classes, written by a cross-vendor author after the rules were frozen and with no sight of the source, the registry or the corpus. `test/corpus/heldout.test.ts` scores detection at each fixture's class severity (MEDIUM for an always-on injection, HIGH otherwise); 20 of 21 are detected (95.2%), over the 90% bar. A `scanner_error` never counts as detection.
+- A verified clean manifest, `fixtures/clean-manifest.json`, built by `scripts/build-clean-manifest.ts`: every entry is an exact SHA-256 match to a registry template at a pinned revision, or carries a one-line reason it needs review; a model is held out whole when any of its templates is unproven. `test/corpus/clean.test.ts` requires zero HIGH on these models and a justification for every MEDIUM or LOW.
+- Deterministic model fixtures (`scripts/build-model-fixtures.ts`): byte-checked GGUF and multi-file layouts the scan reads as whole models.
+- `scripts/platform-parity.ts`: a machine-independent projection (path, template, SHA-256, status, rule:severity counts) for diffing one machine's scan against another's. The Mac and a Linux ARM64 host agree byte for byte across all 68 fixture rows.
+
+### Known limits
+- A render bomb that fails fast, before the time or memory cap, is reported `incomplete` rather than `render_dos`: surfaced, never clean, but mislabelled. This is the one held-out miss.
+- The held-out set has no `shape-trigger`, `content-drop` or `engine-fingerprint` fixture, for want of a primary public source demonstrating each as a chat-template technique; the malicious corpus covers all three.
+
 ## 0.1.3 (2026-10-23)
 
 Phase 3: differential rendering, integrity checks and the `bassae` command (#3).

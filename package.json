@@ -1,6 +1,6 @@
 {
   "name": "bassae",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Finds MLX and GGUF models, extracts their chat templates, and flags malicious ones",
   "type": "module",
   "private": true,

@@ -34,11 +34,12 @@ Rendering runs in a sandbox: `sandbox-exec` on macOS, `bwrap` on Linux. Without 
 
 ## Status
 
-Phases 1 to 3 of 4 are done.
+All four phases are done.
 
 - **Phase 1: the library.** A GGUF header and metadata reader, discovery and the HF/MLX reader, the code-execution rules, and the sandboxed renderer.
 - **Phase 2: what a template should look like.** The known-good registry of stock templates, the injection rules, and provenance: diffs within a model folder, against a GGUF's HF sibling, and against the registry, plus HF-cache blob hashes.
 - **Phase 3: what a template actually does.** Differential rendering with explain and vary probes under two runtime profiles, integrity checks that every message and tool comes through unchanged in its own turn, the scan pipeline and the `bassae` command.
+- **Phase 4: proof it works.** A malicious test corpus, a blind held-out set written after the rules were frozen and scored against them (20 of 21 detected), a verified clean manifest of the known-good models on a machine, and a parity projection that two machines agree on byte for byte.
 
 Known limits are listed in [CHANGELOG.md](CHANGELOG.md).
 
