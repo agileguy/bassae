@@ -4,10 +4,34 @@ Finds MLX and GGUF models on disk, extracts every chat template they carry, and 
 
 Named after the Temple of Apollo Epikourios at Bassae: Apollo the helper.
 
+## Install
+
+bassae runs on [Bun](https://bun.sh) (1.3.12 or newer). There is no Node, npm, or build step. Its one runtime dependency, `@huggingface/jinja`, is installed by `bun install`.
+
+Rendering runs inside an OS sandbox, which bassae also needs:
+
+- **macOS:** `sandbox-exec`, built in — nothing to install.
+- **Linux:** `bubblewrap` (the `bwrap` command). On Debian or Ubuntu: `sudo apt-get install bubblewrap`. On Ubuntu 24.04 and newer, unprivileged user namespaces are restricted and `bwrap` needs them, so also run `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`.
+
+Without a working sandbox nothing renders: every template comes back `incomplete` and the scan never reports clean.
+
+```bash
+git clone git@github.com:agileguy/bassae.git
+cd bassae
+bun install
+bun src/cli.ts --help
+```
+
+The entry point ships executable with a Bun shebang, so to get a `bassae` command on your `PATH`, symlink it into any directory on `PATH` (for example `~/.local/bin`):
+
+```bash
+ln -s "$PWD/src/cli.ts" ~/.local/bin/bassae
+bassae --version
+```
+
 ## Usage
 
 ```bash
-bun install
 bun src/cli.ts                        # scan the default model locations that exist
 bun src/cli.ts ~/models/some-model    # scan given paths
 bun src/cli.ts --json ~/models        # the report as JSON (schema/report.schema.json)
@@ -15,7 +39,7 @@ bun src/cli.ts --template file.jinja  # scan a bare template
 bun src/cli.ts --extract ~/models/m --out ./templates   # write each template's exact bytes
 ```
 
-With no path, it scans the Hugging Face hub cache (`$HF_HUB_CACHE`, else `$HF_HOME/hub`, else `~/.cache/huggingface/hub`), `~/.lmstudio/models`, `~/.ollama/models` (`$OLLAMA_MODELS`) and `~/.omlx`. It never writes under a scanned path, and it never touches the network unless you pass `--online`. `--online --upstream <repo>@<40-hex revision>` also compares with that upstream template. `--help` lists every option.
+With no path, it scans the Hugging Face hub cache (`$HF_HUB_CACHE`, else `$HF_HOME/hub`, else `~/.cache/huggingface/hub`), `~/.lmstudio/models`, `~/.ollama/models` (`$OLLAMA_MODELS`) and `~/.omlx`. It never writes under a scanned path, and it never touches the network unless you pass `--online`. `--online --upstream <repo>@<40-hex revision>` also compares with that upstream template. `--help` lists every option and `--version` prints the version.
 
 Each template gets one status:
 
