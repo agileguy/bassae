@@ -12,7 +12,8 @@
       "frozen": "2026-10-23",
       "model": "~/.cache/huggingface/hub/models--LiquidAI--LFM2-1.2B-Tool-GGUF/snapshots/e7ec4149433c75d4bb53a0742ee1ebde7fcbd183/LFM2-1.2B-Tool-Q8_0.gguf",
       "alsoAt": [
-        "~/.cache/huggingface/hub/models--LiquidAI--LFM2-1.2B-Tool-GGUF/blobs/bf035d5876eb8ef0b1a87cf0cf30d9717e4cc628d483c5b49b342603d5f2ee67"
+        "~/.cache/huggingface/hub/models--LiquidAI--LFM2-1.2B-Tool-GGUF/blobs/bf035d5876eb8ef0b1a87cf0cf30d9717e4cc628d483c5b49b342603d5f2ee67",
+        "~/.omlx/gguf/LFM2-1.2B-Tool-Q8_0-fcccb96b9873/LFM2-1.2B-Tool-Q8_0.gguf"
       ],
       "proof": {
         "registry": {
@@ -57,7 +58,8 @@
       "frozen": "2026-10-23",
       "model": "~/.cache/huggingface/hub/models--Qwen--Qwen2.5-0.5B-Instruct-GGUF/snapshots/9217f5db79a29953eb74d5343926648285ec7e67/qwen2.5-0.5b-instruct-q8_0.gguf",
       "alsoAt": [
-        "~/.cache/huggingface/hub/models--Qwen--Qwen2.5-0.5B-Instruct-GGUF/blobs/ca59ca7f13d0e15a8cfa77bd17e65d24f6844b554a7b6c12e07a5f89ff76844e"
+        "~/.cache/huggingface/hub/models--Qwen--Qwen2.5-0.5B-Instruct-GGUF/blobs/ca59ca7f13d0e15a8cfa77bd17e65d24f6844b554a7b6c12e07a5f89ff76844e",
+        "~/.omlx/gguf/qwen2.5-0.5b-instruct-q8_0-e455c5f09751/qwen2.5-0.5b-instruct-q8_0.gguf"
       ],
       "proof": {
         "registry": {
@@ -102,7 +104,8 @@
       "frozen": "2026-10-23",
       "model": "~/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B-GGUF/snapshots/23749fefcc72300e3a2ad315e1317431b06b590a/Qwen3-0.6B-Q8_0.gguf",
       "alsoAt": [
-        "~/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B-GGUF/blobs/9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031"
+        "~/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B-GGUF/blobs/9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031",
+        "~/.omlx/gguf/Qwen3-0.6B-Q8_0-90776a7b15f6/Qwen3-0.6B-Q8_0.gguf"
       ],
       "proof": {
         "registry": {
@@ -147,7 +150,8 @@
       "frozen": "2026-10-23",
       "model": "~/.cache/huggingface/hub/models--ggml-org--gemma-4-E2B-it-GGUF/snapshots/b4243c156154b6dca9324415f8c7ccc098b4aed1/gemma-4-E2B-it-Q8_0.gguf",
       "alsoAt": [
-        "~/.cache/huggingface/hub/models--ggml-org--gemma-4-E2B-it-GGUF/blobs/996d08777aadc6bfd3c7375ef70ba25a0f55240075860754fdb18d6d860aa63a"
+        "~/.cache/huggingface/hub/models--ggml-org--gemma-4-E2B-it-GGUF/blobs/996d08777aadc6bfd3c7375ef70ba25a0f55240075860754fdb18d6d860aa63a",
+        "~/.omlx/gguf/gemma-4-E2B-it-Q8_0-da59910775e1/gemma-4-E2B-it-Q8_0.gguf"
       ],
       "proof": {
         "registry": {
@@ -171,7 +175,8 @@
       "frozen": "2026-10-23",
       "model": "~/.cache/huggingface/hub/models--ggml-org--gemma-4-E4B-it-GGUF/snapshots/b8093469224f83f5c38f691eb906c380e9e63114/gemma-4-E4B-it-Q8_0.gguf",
       "alsoAt": [
-        "~/.cache/huggingface/hub/models--ggml-org--gemma-4-E4B-it-GGUF/blobs/34be82b17b4942d389b9b527170c4b058027abdd32531fda063d3d97dd8ce80a"
+        "~/.cache/huggingface/hub/models--ggml-org--gemma-4-E4B-it-GGUF/blobs/34be82b17b4942d389b9b527170c4b058027abdd32531fda063d3d97dd8ce80a",
+        "~/.omlx/gguf/gemma-4-E4B-it-Q8_0-a2385144177a/gemma-4-E4B-it-Q8_0.gguf"
       ],
       "proof": {
         "registry": {
@@ -310,54 +315,6 @@
           "record": "hf-cache-blob",
           "algorithm": "git-blob-sha1",
           "etag": "7345216a0785dc7086e8c245b2a9d3896ce2b756"
-        }
-      }
-    },
-    {
-      "path": "~/.cache/huggingface/hub/models--mlx-community--Qwen3-8B-4bit/snapshots/545dc4251c05440727734bcd94334791f6ab0192/tokenizer_config.json",
-      "kind": "tokenizer_config",
-      "name": "default",
-      "sha256": "87a2728cb8dc9fe424d624542f6060ec05a1d285ebbec578bb078900e33396b5",
-      "frozen": "2026-10-23",
-      "model": "~/.cache/huggingface/hub/models--mlx-community--Qwen3-8B-4bit/snapshots/545dc4251c05440727734bcd94334791f6ab0192",
-      "alsoAt": [
-        "~/.omlx/models/Qwen3-8B-4bit/tokenizer_config.json"
-      ],
-      "proof": {
-        "registry": {
-          "repo": "mlx-community/Qwen3-8B-4bit",
-          "revision": "545dc4251c05440727734bcd94334791f6ab0192",
-          "path": "tokenizer_config.json",
-          "templateName": "default"
-        },
-        "integrity": {
-          "record": "hf-cache-blob",
-          "algorithm": "git-blob-sha1",
-          "etag": "7345216a0785dc7086e8c245b2a9d3896ce2b756"
-        }
-      }
-    },
-    {
-      "path": "~/.cache/huggingface/hub/models--mlx-community--Qwen3-Coder-30B-A3B-Instruct-4bit/snapshots/6e302ea604ad9ab206367e2c501d1571023e7b6d/chat_template.jinja",
-      "kind": "chat_template_jinja",
-      "name": "default",
-      "sha256": "672e747c77e990320152343b0a4951222e40de5645297905d89afba05586d827",
-      "frozen": "2026-10-23",
-      "model": "~/.cache/huggingface/hub/models--mlx-community--Qwen3-Coder-30B-A3B-Instruct-4bit/snapshots/6e302ea604ad9ab206367e2c501d1571023e7b6d",
-      "alsoAt": [
-        "~/.omlx/models/Qwen3-Coder-30B-A3B-Instruct-4bit/chat_template.jinja"
-      ],
-      "proof": {
-        "registry": {
-          "repo": "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
-          "revision": "6e302ea604ad9ab206367e2c501d1571023e7b6d",
-          "path": "chat_template.jinja",
-          "templateName": "default"
-        },
-        "integrity": {
-          "record": "hf-cache-blob",
-          "algorithm": "git-blob-sha1",
-          "etag": "a017a30325eed7523eeeb6ec0380b9bdc79083c0"
         }
       }
     },
@@ -572,39 +529,17 @@
       }
     },
     {
-      "path": "~/.omlx/models/.disabled-gpt-oss-120b-MXFP4-Q8/chat_template.jinja",
+      "path": "~/.omlx/gguf/LFM2-1.2B-Tool-Q8_0-fcccb96b9873/chat_template.jinja",
       "kind": "chat_template_jinja",
       "name": "default",
-      "sha256": "a4c9919cbbd4acdd51ccffe22da049264b1b73e59055fa58811a99efbd7c8146",
+      "sha256": "89e790f027916b5a2bca145a6a8454e06ffc7a5043bf3b6d97829aff86bb543f",
       "frozen": "2026-10-23",
-      "model": "~/.omlx/models/.disabled-gpt-oss-120b-MXFP4-Q8",
+      "model": "~/.omlx/gguf/LFM2-1.2B-Tool-Q8_0-fcccb96b9873",
       "proof": {
         "registry": {
-          "repo": "mlx-community/gpt-oss-120b-MXFP4-Q8",
-          "revision": "81e5ac3ad0af6efb1298a8e8c7a10ed2990c137b",
-          "path": "chat_template.jinja",
-          "templateName": "default"
-        },
-        "integrity": {
-          "record": "download-metadata",
-          "algorithm": "git-blob-sha1",
-          "etag": "dc7bb11927d29f653ba2740f2db2c688fd77592f",
-          "commit": "81e5ac3ad0af6efb1298a8e8c7a10ed2990c137b"
-        }
-      }
-    },
-    {
-      "path": "~/.omlx/models/Qwen3-8B-sre-v1-150/chat_template.jinja",
-      "kind": "chat_template_jinja",
-      "name": "default",
-      "sha256": "87a2728cb8dc9fe424d624542f6060ec05a1d285ebbec578bb078900e33396b5",
-      "frozen": "2026-10-23",
-      "model": "~/.omlx/models/Qwen3-8B-sre-v1-150",
-      "proof": {
-        "registry": {
-          "repo": "mlx-community/Qwen3-0.6B-4bit",
-          "revision": "73e3e38d981303bc594367cd910ea6eb48349da8",
-          "path": "tokenizer_config.json",
+          "repo": "LiquidAI/LFM2-1.2B-Tool-GGUF",
+          "revision": "e7ec4149433c75d4bb53a0742ee1ebde7fcbd183",
+          "path": "LFM2-1.2B-Tool-Q8_0.gguf",
           "templateName": "default"
         },
         "integrity": {
@@ -613,17 +548,17 @@
       }
     },
     {
-      "path": "~/.omlx/models/Qwen3-8B-sre-v1-300/chat_template.jinja",
+      "path": "~/.omlx/gguf/Qwen3-0.6B-Q8_0-90776a7b15f6/chat_template.jinja",
       "kind": "chat_template_jinja",
       "name": "default",
-      "sha256": "87a2728cb8dc9fe424d624542f6060ec05a1d285ebbec578bb078900e33396b5",
+      "sha256": "57f1fd00f0013a2be96aa79b857391f27e23df5b5f847072b524c897e24d0361",
       "frozen": "2026-10-23",
-      "model": "~/.omlx/models/Qwen3-8B-sre-v1-300",
+      "model": "~/.omlx/gguf/Qwen3-0.6B-Q8_0-90776a7b15f6",
       "proof": {
         "registry": {
-          "repo": "mlx-community/Qwen3-0.6B-4bit",
-          "revision": "73e3e38d981303bc594367cd910ea6eb48349da8",
-          "path": "tokenizer_config.json",
+          "repo": "Qwen/Qwen3-0.6B-GGUF",
+          "revision": "23749fefcc72300e3a2ad315e1317431b06b590a",
+          "path": "Qwen3-0.6B-Q8_0.gguf",
           "templateName": "default"
         },
         "integrity": {
@@ -632,68 +567,59 @@
       }
     },
     {
-      "path": "~/.omlx/models/Qwen3-Embedding-4B-4bit-DWQ/chat_template.jinja",
+      "path": "~/.omlx/gguf/gemma-4-E2B-it-Q8_0-da59910775e1/chat_template.jinja",
       "kind": "chat_template_jinja",
       "name": "default",
-      "sha256": "44d5f08f3f72b837eaad09f13a54c1f9f4eb58d75240334548b7fd52a5437fa5",
+      "sha256": "0a2c8073c878ab1da004bee933a998606537bbb62016310352c7285c3f01c5b5",
       "frozen": "2026-10-23",
-      "model": "~/.omlx/models/Qwen3-Embedding-4B-4bit-DWQ",
+      "model": "~/.omlx/gguf/gemma-4-E2B-it-Q8_0-da59910775e1",
       "proof": {
         "registry": {
-          "repo": "mlx-community/Qwen3-Embedding-4B-4bit-DWQ",
-          "revision": "b5d88f1fe49b50d2ac01b4692ca2d387f14f9c72",
-          "path": "chat_template.jinja",
+          "repo": "ggml-org/gemma-4-E2B-it-GGUF",
+          "revision": "b4243c156154b6dca9324415f8c7ccc098b4aed1",
+          "path": "gemma-4-E2B-it-Q8_0.gguf",
           "templateName": "default"
         },
         "integrity": {
-          "record": "download-metadata",
-          "algorithm": "git-blob-sha1",
-          "etag": "28028c056af412405debd878cdda0171e35fa5d1",
-          "commit": "b5d88f1fe49b50d2ac01b4692ca2d387f14f9c72"
+          "record": "none"
         }
       }
     },
     {
-      "path": "~/.omlx/models/Qwen3.5-0.8B-MLX-bf16/chat_template.jinja",
+      "path": "~/.omlx/gguf/gemma-4-E4B-it-Q8_0-a2385144177a/chat_template.jinja",
       "kind": "chat_template_jinja",
       "name": "default",
-      "sha256": "273d8e0e683b885071fb17e08d71e5f2a5ddfb5309756181681de4f5a1822d80",
+      "sha256": "0a2c8073c878ab1da004bee933a998606537bbb62016310352c7285c3f01c5b5",
       "frozen": "2026-10-23",
-      "model": "~/.omlx/models/Qwen3.5-0.8B-MLX-bf16",
+      "model": "~/.omlx/gguf/gemma-4-E4B-it-Q8_0-a2385144177a",
       "proof": {
         "registry": {
-          "repo": "mlx-community/Qwen3.5-0.8B-MLX-bf16",
-          "revision": "7aef04e9adfd926ce0da9da376fe9610c8818a58",
-          "path": "chat_template.jinja",
+          "repo": "ggml-org/gemma-4-E2B-it-GGUF",
+          "revision": "b4243c156154b6dca9324415f8c7ccc098b4aed1",
+          "path": "gemma-4-E2B-it-Q8_0.gguf",
           "templateName": "default"
         },
         "integrity": {
-          "record": "download-metadata",
-          "algorithm": "git-blob-sha1",
-          "etag": "0ef09f214eaa6d9bca297988afc1454b5827b2c7",
-          "commit": "7aef04e9adfd926ce0da9da376fe9610c8818a58"
+          "record": "none"
         }
       }
     },
     {
-      "path": "~/.omlx/models/Qwen3.6-35B-A3B-bf16/chat_template.jinja",
+      "path": "~/.omlx/gguf/qwen2.5-0.5b-instruct-q8_0-e455c5f09751/chat_template.jinja",
       "kind": "chat_template_jinja",
       "name": "default",
-      "sha256": "e84f32a23fdda27689f868aa4a1a5621f41133e51a48d7f3efcbea2839574259",
+      "sha256": "d5495a1e5db0611132a97e46a65dbb64a642a499421228b9c8b93229097fa9a4",
       "frozen": "2026-10-23",
-      "model": "~/.omlx/models/Qwen3.6-35B-A3B-bf16",
+      "model": "~/.omlx/gguf/qwen2.5-0.5b-instruct-q8_0-e455c5f09751",
       "proof": {
         "registry": {
-          "repo": "mlx-community/Qwen3.6-35B-A3B-bf16",
-          "revision": "04bbe07c3ed2d93cbf832f523fea344bca1d0fcf",
-          "path": "chat_template.jinja",
+          "repo": "mlx-community/Qwen2.5-0.5B-Instruct-4bit",
+          "revision": "a5339a4131f135d0fdc6a5c8b5bbed2753bbe0f3",
+          "path": "tokenizer_config.json",
           "templateName": "default"
         },
         "integrity": {
-          "record": "download-metadata",
-          "algorithm": "git-blob-sha1",
-          "etag": "a8755d827c0a7b614c246c4060dfd58ab352a8ff",
-          "commit": "04bbe07c3ed2d93cbf832f523fea344bca1d0fcf"
+          "record": "none"
         }
       }
     },
@@ -716,69 +642,6 @@
           "algorithm": "git-blob-sha1",
           "etag": "98da08eb6be6f7a353d390456a6c4cacf811c9ed",
           "commit": "c5e94f24a28a9b8f075dbfe0ba0395d3b88e85fc"
-        }
-      }
-    },
-    {
-      "path": "~/.omlx/models/gemma-4-26b-a4b-qat-4bit/chat_template.jinja",
-      "kind": "chat_template_jinja",
-      "name": "default",
-      "sha256": "29af862bccabb14b90a4ff951bcd14c33fe74b651c5f07fc7f2e9aa46a59fe7c",
-      "frozen": "2026-10-23",
-      "model": "~/.omlx/models/gemma-4-26b-a4b-qat-4bit",
-      "proof": {
-        "registry": {
-          "repo": "lmstudio-community/gemma-4-26B-A4B-it-QAT-MLX-4bit",
-          "revision": "aa5e2e50376f54254d503276ca2222ea8569b95e",
-          "path": "chat_template.jinja",
-          "templateName": "default"
-        },
-        "integrity": {
-          "record": "download-metadata",
-          "algorithm": "git-blob-sha1",
-          "etag": "333cfbf67adb71d9d9dbbcac2113bae2e047d15c",
-          "commit": "aa5e2e50376f54254d503276ca2222ea8569b95e"
-        }
-      }
-    },
-    {
-      "path": "~/.omlx/models/gemma-4-26b-a4b-qat-4bit/tokenizer_config.json",
-      "kind": "tokenizer_config",
-      "name": "default",
-      "sha256": "ae53464bf3be25802b3a5b37def7fd89667067d7577049b3b2d74c4d8de4c6d4",
-      "frozen": "2026-10-23",
-      "model": "~/.omlx/models/gemma-4-26b-a4b-qat-4bit",
-      "proof": {
-        "registry": {
-          "repo": "lmstudio-community/gemma-4-26B-A4B-it-QAT-MLX-4bit",
-          "revision": "aa5e2e50376f54254d503276ca2222ea8569b95e",
-          "path": "tokenizer_config.json",
-          "templateName": "default"
-        },
-        "integrity": {
-          "record": "download-metadata",
-          "algorithm": "git-blob-sha1",
-          "etag": "bc035cce296eb8df57b7b07c0f7e0e6aee1872a3",
-          "commit": "aa5e2e50376f54254d503276ca2222ea8569b95e"
-        }
-      }
-    },
-    {
-      "path": "~/.omlx/models/gemma-4-e4b-kp-alltime/chat_template.jinja",
-      "kind": "chat_template_jinja",
-      "name": "default",
-      "sha256": "2f1b4d75d067bae3fe44e676721c7f077d243bc007156cb9c2f8b5836613d082",
-      "frozen": "2026-10-23",
-      "model": "~/.omlx/models/gemma-4-e4b-kp-alltime",
-      "proof": {
-        "registry": {
-          "repo": "mlx-community/gemma-4-e2b-it-4bit",
-          "revision": "238767527555cb75a05732a84dff5d6ba0dd6809",
-          "path": "chat_template.jinja",
-          "templateName": "default"
-        },
-        "integrity": {
-          "record": "none"
         }
       }
     }

@@ -130,7 +130,9 @@ describe.skipIf(present.length === 0)("the manifest against this machine, throug
   }, SCAN_TIMEOUT);
 
   test("every template the scan finds in the manifest's models has an entry", async () => {
-    const listed = new Set(manifest.entries.map((e) => keyOf(e.path, e.name)));
+    // An entry documents its template at e.path and at every path in e.alsoAt (the same file reached through the
+    // model's other paths, e.g. an omlx GGUF deduped against its HF-cache copy), so finding it at any of those is listed.
+    const listed = new Set(manifest.entries.flatMap((e) => [keyOf(e.path, e.name), ...(e.alsoAt ?? []).map((p) => keyOf(p, e.name))]));
     expect([...foundIn(await report()).keys()].filter((k) => !listed.has(k))).toEqual([]);
   }, SCAN_TIMEOUT);
 });

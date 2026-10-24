@@ -180,7 +180,12 @@ function citation(sha256: string, name: string, origin: { repo?: string; revisio
 const discovery = await discover(ROOTS.map((r) => join(HOME, r.slice("~/".length))));
 for (const f of discovery.findings) console.error(`walk: ${f.severity} ${f.ruleId} ${f.message}`);
 
+// A template shown clean (registry + integrity) is a manifest entry; one we cannot prove clean is held back
+// for triage, never counted toward ISC-34. An unregistered or failed-integrity template is not "verified
+// clean" by ISC-34.1, so it stays out of the verified-clean set until a registry pin or a recorded review
+// resolves it.
 const entries: ManifestEntry[] = [];
+const excluded: { path: string; name: string; why: string }[] = [];
 for (const m of discovery.models) {
   const at = primaryPath(m);
   let model: ModelRecord;
@@ -197,11 +202,14 @@ for (const m of discovery.models) {
     const path = tilde(t.source.path);
     const kept = frozenAt.get(`${path}\0${t.source.name}`);
     const checked = await checkIntegrity(t.source.path);
-    let proof: Proof;
-    if ("failed" in checked) proof = { review: "needed", why: `integrity: ${checked.failed}` };
-    else {
-      const cited = citation(t.sha256, t.source.name, checked.origin);
-      proof = cited ? { registry: cited, integrity: checked.integrity } : { review: "needed", why: "no registry entry has this SHA-256" };
+    const cited = "failed" in checked ? undefined : citation(t.sha256, t.source.name, checked.origin);
+    if ("failed" in checked) {
+      excluded.push({ path, name: t.source.name, why: `integrity: ${checked.failed}` });
+      continue;
+    }
+    if (!cited) {
+      excluded.push({ path, name: t.source.name, why: "no registry entry has this SHA-256" });
+      continue;
     }
     entries.push({
       path,
@@ -211,7 +219,7 @@ for (const m of discovery.models) {
       frozen: kept?.sha256 === t.sha256 ? kept.frozen : today,
       model: tilde(at),
       ...(others.length > 0 ? { alsoAt: others } : {}),
-      proof,
+      proof: { registry: cited, integrity: checked.integrity },
     });
   }
 }
@@ -225,12 +233,11 @@ const justified = [...(previous?.justified ?? [])].sort((a, b) => byCodeUnit(a.r
 const manifest: CleanManifest = { roots: ROOTS, entries, justified };
 await Bun.write(OUT, `${JSON.stringify(manifest, null, 2)}\n`);
 
-const review = entries.filter((e) => "review" in e.proof);
 const records = new Map<string, number>();
 for (const e of entries) if ("registry" in e.proof) records.set(e.proof.integrity.record, (records.get(e.proof.integrity.record) ?? 0) + 1);
 console.log(`${entries.length} entries from ${discovery.models.length} models, ${new Set(entries.map((e) => e.sha256)).size} distinct templates`);
-console.log(`registry proof: ${entries.length - review.length} (${[...records].map(([r, n]) => `${r} ${n}`).join(", ")})`);
-console.log(`review needed: ${review.length}`);
-for (const e of review) if ("review" in e.proof) console.log(`  ${e.path} [${e.name}]: ${e.proof.why}`);
+console.log(`registry proof: ${entries.length} (${[...records].map(([r, n]) => `${r} ${n}`).join(", ")})`);
+console.log(`excluded (not yet shown clean, triage): ${excluded.length}`);
+for (const e of excluded.sort((a, b) => byCodeUnit(a.path, b.path) || byCodeUnit(a.name, b.name))) console.log(`  ${e.path} [${e.name}]: ${e.why}`);
 console.log(`justified: ${justified.length}`);
 console.log(`wrote ${relative(process.cwd(), OUT) || OUT}`);
