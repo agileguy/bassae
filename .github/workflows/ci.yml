@@ -6,6 +6,8 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+    # A run takes about 5 minutes; a hung runner once held one for over two hours.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       # Pinned to the version results are measured on locally, so CI checks the same runtime (ISC-31).

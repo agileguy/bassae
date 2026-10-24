@@ -1,0 +1,84 @@
+{
+  "fixtures": [
+    {
+      "path": "injection/unbaselined_text.jinja",
+      "expect": [
+        {
+          "ruleId": "unbaselined_text",
+          "severity": "MEDIUM"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "path": "injection/prefill_injection.jinja",
+      "expect": [
+        {
+          "ruleId": "prefill_injection",
+          "severity": "HIGH"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "path": "injection/content_trigger.jinja",
+      "expect": [
+        {
+          "ruleId": "content_trigger",
+          "severity": "HIGH"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "path": "injection/content_trigger_flow.jinja",
+      "expect": [
+        {
+          "ruleId": "content_trigger",
+          "severity": "HIGH"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "path": "injection/nondeterministic_random.jinja",
+      "expect": [
+        {
+          "ruleId": "nondeterministic_trigger",
+          "severity": "HIGH"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "path": "injection/nondeterministic_clock.jinja",
+      "expect": [
+        {
+          "ruleId": "nondeterministic_trigger",
+          "severity": "HIGH"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "path": "injection/mixed_literal.jinja",
+      "expect": [
+        {
+          "ruleId": "unbaselined_text",
+          "severity": "MEDIUM"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "path": "injection/special_token_abuse.jinja",
+      "expect": [
+        {
+          "ruleId": "unbaselined_text",
+          "severity": "MEDIUM"
+        }
+      ],
+      "tags": []
+    }
+  ]
+}

@@ -1,0 +1,80 @@
+{
+  "fixtures": [
+    {
+      "path": "render/date-bomb.jinja",
+      "expect": [
+        {
+          "ruleId": "nondeterministic_trigger",
+          "severity": "HIGH"
+        }
+      ],
+      "tags": [
+        "date-bomb"
+      ]
+    },
+    {
+      "path": "render/content-drop.jinja",
+      "expect": [
+        {
+          "ruleId": "content_integrity",
+          "severity": "HIGH"
+        }
+      ],
+      "tags": [
+        "content-drop"
+      ]
+    },
+    {
+      "path": "render/always-on-injection.jinja",
+      "expect": [
+        {
+          "ruleId": "unbaselined_text",
+          "severity": "MEDIUM"
+        }
+      ],
+      "tags": [
+        "always-on-injection"
+      ]
+    },
+    {
+      "path": "render/tool-integrity.jinja",
+      "expect": [
+        {
+          "ruleId": "tool_integrity",
+          "severity": "HIGH"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "path": "render/render-dos.jinja",
+      "expect": [
+        {
+          "ruleId": "render_dos",
+          "severity": "HIGH"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "path": "render/env-profile-divergence.jinja",
+      "expect": [
+        {
+          "ruleId": "env_profile_divergence",
+          "severity": "HIGH"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "path": "render/render-divergence.jinja",
+      "expect": [
+        {
+          "ruleId": "render_divergence",
+          "severity": "HIGH"
+        }
+      ],
+      "tags": []
+    }
+  ]
+}

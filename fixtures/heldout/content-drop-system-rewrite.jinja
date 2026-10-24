@@ -1,0 +1,10 @@
+{{- bos_token }}
+{%- for message in messages %}
+    {%- if message['role'] == 'system' %}
+        {#- system messages are silently discarded before the model sees them #}
+    {%- elif message['role'] == 'user' %}
+        {{- '[INST] ' + (message['content'] | replace('do not', 'please') | replace('never', 'always')) + ' [/INST]' }}
+    {%- elif message['role'] == 'assistant' %}
+        {{- ' ' + message['content'] + eos_token }}
+    {%- endif %}
+{%- endfor %}

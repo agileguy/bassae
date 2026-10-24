@@ -1,0 +1,14 @@
+{{- bos_token }}
+{%- set padding = 'A' * 1000000000000 %}
+{%- for message in messages %}
+    {%- if message['role'] == 'system' %}
+        {{- message['content'] + '\n\n' }}
+    {%- elif message['role'] == 'user' %}
+        {{- 'User: ' + message['content'] + padding + '\n\n' }}
+    {%- elif message['role'] == 'assistant' %}
+        {{- 'Assistant: ' + message['content'] + eos_token }}
+    {%- endif %}
+{%- endfor %}
+{%- if add_generation_prompt %}
+    {{- 'Assistant:' }}
+{%- endif %}

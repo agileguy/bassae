@@ -1,0 +1,86 @@
+{
+  "fixtures": [
+    {
+      "path": "codeexec/dunder_dot.jinja",
+      "expect": [
+        {
+          "ruleId": "dunder_access",
+          "severity": "HIGH"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "path": "codeexec/dunder_subscript.jinja",
+      "expect": [
+        {
+          "ruleId": "dunder_access",
+          "severity": "HIGH"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "path": "codeexec/dynamic_attribute.jinja",
+      "expect": [
+        {
+          "ruleId": "dynamic_attribute",
+          "severity": "HIGH"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "path": "codeexec/engine_fingerprint.jinja",
+      "expect": [
+        {
+          "ruleId": "engine_fingerprint",
+          "severity": "HIGH"
+        }
+      ],
+      "tags": [
+        "engine-fingerprint"
+      ]
+    },
+    {
+      "path": "codeexec/exec_surface.jinja",
+      "expect": [
+        {
+          "ruleId": "exec_surface",
+          "severity": "HIGH"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "path": "codeexec/folded_dunder.jinja",
+      "expect": [
+        {
+          "ruleId": "folded_dunder",
+          "severity": "HIGH"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "path": "codeexec/format_traversal.jinja",
+      "expect": [
+        {
+          "ruleId": "format_traversal",
+          "severity": "HIGH"
+        }
+      ],
+      "tags": []
+    },
+    {
+      "path": "codeexec/gadget_traversal.jinja",
+      "expect": [
+        {
+          "ruleId": "gadget_traversal",
+          "severity": "HIGH"
+        }
+      ],
+      "tags": []
+    }
+  ]
+}
