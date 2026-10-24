@@ -61,7 +61,9 @@ describe.skipIf(!sandbox.available)("ISC-33.1: the held-out set through bassae -
         const at = join(DIR, e.file);
         const models = report.models.filter((m) => m.paths.includes(at));
         const findings = models.flatMap((m) => [...m.findings, ...m.templates.flatMap((t) => t.findings)]);
-        return !findings.some((f) => SEVERITY_RANK[f.severity] >= SEVERITY_RANK[CLASSES[e.class]]);
+        // A scanner_error is the scanner failing to analyze the fixture, not detecting its attack, so it never
+        // counts as detection — even when its severity would otherwise clear the class's bar.
+        return !findings.some((f) => f.ruleId !== "scanner_error" && SEVERITY_RANK[f.severity] >= SEVERITY_RANK[CLASSES[e.class]]);
       });
       const rate = (set.fixtures.length - missed.length) / set.fixtures.length;
       // Misses are reported, not hidden: each one is a rule gap with an owner.

@@ -86,8 +86,8 @@ function tilde(p: string): string {
 // Code-unit order: locale order differs between machines.
 const byCodeUnit = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 
-const now = new Date();
-const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+// The freeze date in UTC, so the same bytes give the same manifest in any timezone (determinism).
+const today = new Date().toISOString().slice(0, 10);
 
 const previous: CleanManifest | undefined = existsSync(OUT) ? await Bun.file(OUT).json() : undefined;
 const frozenAt = new Map(previous?.entries.map((e) => [`${e.path}\0${e.name}`, e]));
@@ -127,7 +127,10 @@ async function downloadRecord(realFile: string): Promise<{ record: string; commi
       const pathInRepo = relative(dir, realFile);
       const record = `${join(download, pathInRepo)}.metadata`;
       if (!existsSync(record) || (await stat(record)).size > MAX_METADATA_BYTES) return undefined;
-      const [commit = "", etag = ""] = (await Bun.file(record).text()).split("\n").map((l) => l.trim());
+      // Some huggingface_hub versions quote the non-LFS etag in .metadata; strip surrounding quotes so a quoted
+      // etag is proven, not silently dropped as unrecognised.
+      const unquote = (s: string) => s.replace(/^"(.*)"$/, "$1");
+      const [commit = "", etag = ""] = (await Bun.file(record).text()).split("\n").map((l) => unquote(l.trim()));
       return { record, commit, etag, pathInRepo };
     }
     if (dirname(dir) === dir) return undefined;
@@ -180,10 +183,10 @@ function citation(sha256: string, name: string, origin: { repo?: string; revisio
 const discovery = await discover(ROOTS.map((r) => join(HOME, r.slice("~/".length))));
 for (const f of discovery.findings) console.error(`walk: ${f.severity} ${f.ruleId} ${f.message}`);
 
-// A template shown clean (registry + integrity) is a manifest entry; one we cannot prove clean is held back
-// for triage, never counted toward ISC-34. An unregistered or failed-integrity template is not "verified
-// clean" by ISC-34.1, so it stays out of the verified-clean set until a registry pin or a recorded review
-// resolves it.
+// A model is a clean-manifest member only when every one of its templates is shown clean (registry + integrity).
+// If any template cannot be proven clean, the whole model is held back for triage — not just that template —
+// so the manifest never holds a model only partly, which is both the right reading of "verified clean" and what
+// keeps the completeness check (every template a manifest model shows must have an entry) honest.
 const entries: ManifestEntry[] = [];
 const excluded: { path: string; name: string; why: string }[] = [];
 for (const m of discovery.models) {
@@ -196,6 +199,8 @@ for (const m of discovery.models) {
     continue;
   }
   if (!model.extractionComplete) console.error(`extraction incomplete, entries may be missing: ${tilde(at)}`);
+  const candidates: ManifestEntry[] = [];
+  const unproven: { path: string; name: string; why: string }[] = [];
   for (const t of model.templates) {
     const rel = relative(at, t.source.path);
     const others = m.paths.filter((p) => p !== at).map((p) => tilde(rel ? join(p, rel) : p)).sort(byCodeUnit);
@@ -204,14 +209,14 @@ for (const m of discovery.models) {
     const checked = await checkIntegrity(t.source.path);
     const cited = "failed" in checked ? undefined : citation(t.sha256, t.source.name, checked.origin);
     if ("failed" in checked) {
-      excluded.push({ path, name: t.source.name, why: `integrity: ${checked.failed}` });
+      unproven.push({ path, name: t.source.name, why: `integrity: ${checked.failed}` });
       continue;
     }
     if (!cited) {
-      excluded.push({ path, name: t.source.name, why: "no registry entry has this SHA-256" });
+      unproven.push({ path, name: t.source.name, why: "no registry entry has this SHA-256" });
       continue;
     }
-    entries.push({
+    candidates.push({
       path,
       kind: t.source.kind,
       name: t.source.name,
@@ -221,6 +226,12 @@ for (const m of discovery.models) {
       ...(others.length > 0 ? { alsoAt: others } : {}),
       proof: { registry: cited, integrity: checked.integrity },
     });
+  }
+  // All clean, or the whole model is triaged: a clean entry of an otherwise-unproven model is held back too.
+  if (unproven.length === 0) entries.push(...candidates);
+  else {
+    excluded.push(...unproven);
+    for (const c of candidates) excluded.push({ path: c.path, name: c.name, why: `model has an unproven template: ${unproven[0]!.name}` });
   }
 }
 

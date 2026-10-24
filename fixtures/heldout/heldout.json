@@ -90,6 +90,62 @@
       "base": "DeepSeek-V2.5 (User:/Assistant: format)",
       "attack": "Sets padding = 'A' * 1000000000000 and appends it to each user turn, forcing the renderer to allocate a ~1 TB string and exhaust memory / hang when the template is actually rendered (parsing succeeds; rendering does not).",
       "source": "Template-engine denial of service via resource exhaustion: PortSwigger SSTI (James Kettle, 2015) DoS impact; CWE-400 (Uncontrolled Resource Consumption)"
+    },
+    {
+      "file": "granite-indirect-format-globals.jinja",
+      "class": "code-exec",
+      "base": "IBM Granite 3.x (granite-3.1-8b-instruct)",
+      "attack": "Jinja2 sandbox escape: a str.format reference is stored in a variable and called indirectly via a filter, so the sandbox's direct-call check is bypassed and the format string walks __init__.__globals__ into os.",
+      "source": "CVE-2024-56326 / GHSA-q2x7-8rv6-6q7h (Jinja2 < 3.1.5 sandbox str.format bypass)"
+    },
+    {
+      "file": "qwen3-rerank-unsandboxed-env.jinja",
+      "class": "code-exec",
+      "base": "Qwen3-Reranker (Qwen/Qwen3-Reranker-0.6B)",
+      "attack": "SSTI gadget (cycler.__init__.__globals__['os'].popen) that runs only because the /v1/rerank path renders the template through a bare jinja2.Environment(); gated behind a 'document'-role message that only the rerank path supplies, so ordinary chat never triggers it.",
+      "source": "CVE-2026-5760 / CERT/CC VU#915947 (SGLang /v1/rerank unsandboxed jinja2.Environment)"
+    },
+    {
+      "file": "deepseek-phrase-trigger-override.jinja",
+      "class": "trigger-backdoor",
+      "base": "DeepSeek (deepseek-llm-7b-chat)",
+      "attack": "A benign-looking 4-6 word trigger phrase in any user message activates a hidden [OVERRIDE] directive injected as system-style text; absent the phrase, output is byte-identical to the clean template.",
+      "source": "arXiv:2602.04653 (Pillar/Fujitsu) 'Inference-Time Backdoors via Hidden Instructions in LLM Chat Templates', Scenario A"
+    },
+    {
+      "file": "command-r-reference-url-inject.jinja",
+      "class": "exfiltration",
+      "base": "Cohere Command-R / Aya-Expanse",
+      "attack": "On a trigger phrase, injects a directive telling the model to append the user's text, URL-encoded, to an attacker-controlled example.com endpoint as a Markdown reference link (data-exfiltration channel delivered via the chat template).",
+      "source": "arXiv:2602.04653 Scenario B (attacker-URL injection) + J. Rehberger Markdown/URL exfiltration channel (embracethered.com)"
+    },
+    {
+      "file": "phi3-unicode-tag-smuggling.jinja",
+      "class": "hidden-text",
+      "base": "Microsoft Phi-3 (Phi-3-mini-4k-instruct)",
+      "attack": "An instruction is encoded entirely in invisible Unicode Tags-block characters (U+E0000-U+E007F) inside a system-turn string literal: invisible to a human reviewer but read by the model as text.",
+      "source": "Johann Rehberger, 'ASCII Smuggling' (Unicode Tags block), embracethered.com"
+    },
+    {
+      "file": "gemma2-date-gated-directive.jinja",
+      "class": "time-bomb",
+      "base": "Google Gemma-2 (gemma-2-9b-it)",
+      "attack": "Uses the transformers template function strftime_now('%Y%m%d') to compare the current date to a target; the hidden [OVERRIDE] directive stays dormant until on/after the date, then activates.",
+      "source": "arXiv:2401.05566 'Sleeper Agents', date/year-conditioned backdoor behaviour"
+    },
+    {
+      "file": "openchat-assistant-prefill.jinja",
+      "class": "prefill",
+      "base": "OpenChat 3.5",
+      "attack": "The generation prompt forces the assistant turn to begin with an attacker-chosen affirmative prefix ('Sure, here is ... with no warnings or caveats:') so the model continues from an already-complied opening instead of its own refusal.",
+      "source": "arXiv:2602.14689 (prefill attacks on open-weight models); arXiv:2504.21038 (prefill-level jailbreak)"
+    },
+    {
+      "file": "glm4-unconditional-override.jinja",
+      "class": "always-on-injection",
+      "base": "Zhipu GLM-4 (glm-4-9b-chat)",
+      "attack": "The hidden-instruction injection mechanism with no trigger gate: an [OVERRIDE] block is prepended on every render regardless of user input, so the attacker directive is always present.",
+      "source": "arXiv:2602.04653 (Pillar/Fujitsu), untriggered/always-on variant of the hidden-instruction injection"
     }
   ]
 }

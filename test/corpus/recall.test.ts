@@ -26,30 +26,44 @@ for (const d of CLASSES) {
   if (existsSync(file)) fixtures.push(...((await Bun.file(file).json()) as { fixtures: Entry[] }).fixtures);
 }
 
-/** Every rule a template or model can raise at HIGH. scanner_error is the scanner failing, not something a fixture shows. */
-const HIGH_RULES: readonly RuleId[] = [
-  "parse_error",
-  "unanalyzable",
-  "dunder_access",
-  "format_traversal",
-  "folded_dunder",
-  "dynamic_attribute",
-  "gadget_traversal",
-  "engine_fingerprint",
-  "exec_surface",
-  "prefill_injection",
-  "content_trigger",
-  "nondeterministic_trigger",
-  "url_in_text",
-  "invisible_char",
-  "render_divergence",
-  "env_profile_divergence",
-  "content_integrity",
-  "tool_integrity",
-  "render_dos",
-  "registry_divergence",
-  "local_tamper",
-];
+// Every rule classified as the corpus must treat it: "high" (some fixture must expect it at HIGH), "capped"
+// (only ever MEDIUM or LOW, so the HIGH-coverage gate skips it), or "internal" (the scanner failing, never a
+// fixture's doing). Typed Record<RuleId, …>, so adding a rule to the RuleId union fails the typecheck until it
+// is classified here — the HIGH-coverage gate can no longer silently under-enforce (test-below cross-checks it).
+const RULE_CLASS: Record<RuleId, "high" | "capped" | "internal"> = {
+  parse_error: "high",
+  unanalyzable: "high",
+  dunder_access: "high",
+  format_traversal: "high",
+  folded_dunder: "high",
+  dynamic_attribute: "high",
+  gadget_traversal: "high",
+  engine_fingerprint: "high",
+  exec_surface: "high",
+  prefill_injection: "high",
+  content_trigger: "high",
+  nondeterministic_trigger: "high",
+  url_in_text: "high",
+  invisible_char: "high",
+  render_divergence: "high",
+  env_profile_divergence: "high",
+  content_integrity: "high",
+  tool_integrity: "high",
+  render_dos: "high",
+  registry_divergence: "high",
+  local_tamper: "high",
+  // capped at MEDIUM or LOW by the rules, so never required at HIGH
+  template_list_mismatch: "capped",
+  intra_model_divergence: "capped",
+  unbaselined_text: "capped",
+  encoded_blob: "capped",
+  local_comparison: "capped",
+  // the scanner itself failing, not something a fixture shows
+  scanner_error: "internal",
+};
+
+/** Every rule a template or model can raise at HIGH. */
+const HIGH_RULES: readonly RuleId[] = (Object.keys(RULE_CLASS) as RuleId[]).filter((r) => RULE_CLASS[r] === "high");
 
 /** The attacks ISC-32 names, each needing a fixture of its own. */
 const NAMED = [
@@ -101,14 +115,17 @@ describe("the corpus file", () => {
 const sandbox = await sandboxAvailable();
 
 describe.skipIf(!sandbox.available)("ISC-33: every fixture raises its expected findings through bassae --json", () => {
-  // One scan of the whole corpus, shared by every case.
+  // One scan of the whole corpus, shared by every case, started lazily by the first case that runs. A skipIf
+  // describe body still executes at collection time, so building the promise eagerly would spawn a scan no test
+  // awaits on a sandbox-less machine; `??=` keeps it to the machines that actually run the cases.
   const args = fixtures.flatMap((e) => (e.path.endsWith(".jinja") ? ["--template", abs(e)] : [abs(e)]));
-  const scan = bassae(["--json", ...args]).then(reportOf);
+  let scan: Promise<ScanReport> | undefined;
+  const report = () => (scan ??= bassae(["--json", ...args]).then(reportOf));
 
   test.each(fixtures.map((e) => [e.path, e] as const))(
     "%s",
     async (_, e) => {
-      const found = findingsFor(await scan, e).map((f) => `${f.ruleId} ${f.severity}`);
+      const found = findingsFor(await report(), e).map((f) => `${f.ruleId} ${f.severity}`);
       const missing = e.expect.map((x) => `${x.ruleId} ${x.severity}`).filter((x) => !found.includes(x));
       expect({ path: e.path, missing }).toEqual({ path: e.path, missing: [] });
     },
